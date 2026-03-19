@@ -1,3 +1,54 @@
+//! Agent tasks for building an audit's organizational model from documentation.
+//!
+//! This module drives LLM-based extraction of features, requirements, threats,
+//! and invariants from developer-provided project documentation. The output is
+//! an organizational index that independent security auditors use to structure
+//! their review of the codebase — it is not a replacement for the documentation
+//! itself.
+//!
+//! # Design principles
+//!
+//! **Documentation is untrusted.** It represents the developer's *claimed*
+//! behavior, not verified truth. The structures built here frame what an
+//! auditor must verify, without anchoring them to the developer's stated
+//! implementation.
+//!
+//! **Features are behavioral.** Feature names and descriptions are written at
+//! a user-visible or protocol-level abstraction, regardless of whether the
+//! source document is a high-level overview or a technical deep-dive. This
+//! ensures that features extracted from different document types merge cleanly
+//! during consolidation.
+//!
+//! **Requirements define verification scope.** Each requirement states *what*
+//! an auditor must verify for a feature, broadly enough that the auditor is
+//! not constrained to the developer's stated approach. Linked documentation
+//! topics provide the developer's claimed design as context, but the
+//! requirement itself frames the verification goal. This encourages auditors
+//! to think critically and consider attack vectors beyond what the
+//! documentation explicitly addresses.
+//!
+//! **Threats and invariants are adversarial.** The threat model is built by
+//! thinking offensively about each feature — what could an attacker exploit?
+//! Invariants are concrete, verifiable properties that must hold to prevent
+//! each threat. Security notes (developer-provided roles, known threats, and
+//! invariants) are incorporated but not taken at face value.
+//!
+//! # Pipeline
+//!
+//! 1. **Normalize** (`normalize_documentation`): Rewrite raw documentation
+//!    files for plain text readability (strip emojis, inline HTML, navigation,
+//!    badges, etc.) without altering content.
+//! 2. **Extract** (`build_features_from_documentation`): Process each
+//!    documentation file independently to extract behavioral features and
+//!    verification-scoped requirements, then consolidate across files —
+//!    merging duplicates and dissolving broad features into more specific ones.
+//! 3. **Threaten** (`build_threats_for_feature`): For each feature, generate
+//!    threats and invariants. Security notes are included in context so the
+//!    LLM can incorporate roles and known attack vectors.
+//! 4. **Review** (`review_security_coverage`): A completeness pass that checks
+//!    whether all security notes content is accounted for in the generated
+//!    threat model, filling any gaps.
+
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
