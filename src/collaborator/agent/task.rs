@@ -70,6 +70,30 @@ Your task is to identify all distinct smart contract **features** \
 a discrete capability or behavior of the system. Be specific with the \
 features, avoiding overlap where one \"feature\" encompasses multiple \
 distinct implementations.\n\n\
+These features and requirements will be used by independent security \
+auditors to organize their review of the codebase. The documentation is \
+developer-provided and **not trusted** — it represents claimed behavior, \
+not verified truth.\n\n\
+Feature names and descriptions must be written at a **behavioral** \
+abstraction level — describe *what* the system does, not *how* it is \
+implemented. Even if the documentation is highly technical (e.g., \
+describing specific contract functions, modifiers, or storage layouts), \
+extract the user-visible or protocol-level behavior based on the design \
+intent of the document, not the specific implementation details. For example, \
+if the document describes a `pause()` modifier with an `onlyAdmin` check, the \
+feature should be \"Admins can pause the protocol\", not \"pause() modifier \
+with onlyAdmin guard\".\n\n\
+Requirements define the **scope of what an auditor must verify** for each \
+feature. State them broadly enough that the auditor is not anchored to a \
+developer's stated implementation — the auditor should think critically \
+and consider attack vectors beyond what the documentation explicitly \
+addresses. For example, prefer \"withdrawals must be safe from reentrancy\" \
+over \"balance must be zeroed before the external call\", because the \
+latter assumes a specific implementation strategy and may cause the \
+auditor to overlook other reentrancy vectors. The linked documentation \
+topics provide the developer's claimed design as context, but the \
+requirement itself should frame the verification goal, not repeat the \
+documentation since it is untrusted and unverified.\n\n\
 For each feature, provide:\n\
 - `name`: a short, descriptive name\n\
 - `description`: a summary of the feature\n\
@@ -122,6 +146,14 @@ feature as distinct as possible, merging only duplicate features.\n\
 - Do not modify documentation_topics arrays, just combine them.\n\
 - You may rewrite feature names and descriptions to better reflect the \
 merged content.\n\
+- If a broad feature encompasses multiple more specific features that \
+were extracted separately, dissolve the broad feature and distribute its \
+requirements into the matching specific features. For example, if one \
+document produced a broad \"Staking and Rewards\" feature and another \
+produced separate \"Token Staking\", \"Stake Withdrawal\", and \"Reward \
+Distribution\" features, remove \"Staking and Rewards\" and assign each \
+of its requirements to whichever specific feature it belongs to. If a \
+requirement applies to multiple specific features, add it to each.\n\
 - If a feature was created for a documented invariant, remove it as a feature and \
 apply it as a requirement to each feature it applies to. For example, \
 \"Unauthorized users should not be able to perform admin actions\" is an invariant, not a feature, so it should be applied as a requirement to the features that it applies to.\n\
