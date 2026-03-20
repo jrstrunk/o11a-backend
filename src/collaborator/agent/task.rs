@@ -863,7 +863,7 @@ pub fn collect_contract_feature_pairs(
   // Collect features
   let mut pairs = Vec::new();
   for (ft, feature) in &audit_data.features {
-    let feature_json = match context::render_feature_to_json(ft, feature, audit_data) {
+    let feature_json = match context::render_feature_to_json(ft, feature, audit_data, None) {
       Some(json) => json,
       None => continue,
     };
@@ -877,6 +877,64 @@ pub fn collect_contract_feature_pairs(
         feature_json: feature_json.clone(),
         label,
       });
+    }
+  }
+
+  pairs
+}
+
+/// Collect contract×feature pairs for a single feature, optionally filtered to
+/// a single requirement. Used by reactive triggers after user creates a feature
+/// or requirement.
+pub fn collect_single_feature_pairs(
+  feature_topic: &topic::Topic,
+  audit_data: &AuditData,
+  source_text_cache: &std::collections::HashMap<String, String>,
+  requirement_filter: Option<&topic::Topic>,
+) -> Vec<ContractFeaturePair> {
+  use crate::solidity::parser::ASTNode;
+
+  let feature = match audit_data.features.get(feature_topic) {
+    Some(f) => f,
+    None => return Vec::new(),
+  };
+
+  let feature_json = match context::render_feature_to_json(
+    feature_topic,
+    feature,
+    audit_data,
+    requirement_filter,
+  ) {
+    Some(json) => json,
+    None => return Vec::new(),
+  };
+
+  let mut pairs = Vec::new();
+  for (_path, ast) in &audit_data.asts {
+    let sol_ast = match ast {
+      AST::Solidity(sol_ast) => sol_ast,
+      _ => continue,
+    };
+    for node in &sol_ast.nodes {
+      if let ASTNode::ContractDefinition { .. } = node {
+        let contract_json = match context::render_contract_members_for_linking(
+          node,
+          audit_data,
+          source_text_cache,
+        ) {
+          Some(json) => json,
+          None => continue,
+        };
+        let contract_topic = topic::new_node_topic(&node.node_id());
+        let label =
+          format!("{}_{}", contract_topic.id(), feature_topic.id());
+        pairs.push(ContractFeaturePair {
+          contract_topic,
+          contract_json,
+          feature_json: feature_json.clone(),
+          label,
+        });
+      }
     }
   }
 

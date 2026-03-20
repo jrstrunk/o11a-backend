@@ -2077,10 +2077,15 @@ pub fn render_all_features_with_threats(
 /// Returns `None` if the feature topic has no metadata.
 /// Render a single feature with its requirements (including R-prefixed topic IDs)
 /// as a JSON string for LLM consumption.
+///
+/// When `requirement_filter` is `Some`, only that requirement is included in the
+/// output. This is used by reactive triggers to link a single new requirement
+/// without re-processing all existing ones.
 pub fn render_feature_to_json(
   feature_topic: &topic::Topic,
   feature: &core::Feature,
   audit_data: &AuditData,
+  requirement_filter: Option<&topic::Topic>,
 ) -> Option<String> {
   let (name, description) = match audit_data.topic_metadata.get(feature_topic) {
     Some(TopicMetadata::FeatureTopic { name, description, .. }) => {
@@ -2089,9 +2094,13 @@ pub fn render_feature_to_json(
     _ => return None,
   };
 
-  let reqs: Vec<serde_json::Value> = feature
-    .requirement_topics
-    .iter()
+  let req_topics: Box<dyn Iterator<Item = &topic::Topic> + '_> =
+    match requirement_filter {
+      Some(single) => Box::new(std::iter::once(single)),
+      None => Box::new(feature.requirement_topics.iter()),
+    };
+
+  let reqs: Vec<serde_json::Value> = req_topics
     .filter_map(|rt| {
       if let Some(TopicMetadata::RequirementTopic { description, .. }) =
         audit_data.topic_metadata.get(rt)

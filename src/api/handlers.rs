@@ -1770,534 +1770,40 @@ pub async fn get_threat_invariants(
 }
 
 /// Trigger the agent to build features from documentation.
-pub async fn build_features(
+fn pipeline_state(state: &AppState) -> crate::collaborator::agent::pipeline::PipelineState {
+  crate::collaborator::agent::pipeline::PipelineState {
+    db: state.db.clone(),
+    data_context: state.data_context.clone(),
+  }
+}
+
+/// POST /api/v1/audits/:audit_id/analyze
+/// Runs the full analysis pipeline: build features → build threats → link requirements.
+pub async fn analyze(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-  println!("POST /api/v1/audits/{}/features/build", audit_id);
+  println!("POST /api/v1/audits/{}/analyze", audit_id);
 
-  // Render per-file documentation JSON while holding the lock, then release it
-  let documentation_files = {
-    let ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in build_features: {}", e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-    crate::collaborator::agent::task::render_documentation_files(audit_data)
-  };
-
-  // Run the iterative LLM task (lock is released)
-  let parsed =
-    crate::collaborator::agent::task::build_features_from_documentation(
-      &documentation_files,
-    )
+  let ps = pipeline_state(&state);
+  crate::collaborator::agent::pipeline::build_features(&ps, &audit_id)
     .await
     .map_err(|e| {
       eprintln!("build_features failed: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
-
-  // Persist to database: clear old features, insert new ones
-  db::delete_all_features_for_audit(&state.db, &audit_id)
+  crate::collaborator::agent::pipeline::build_threats(&ps, &audit_id)
     .await
     .map_err(|e| {
-      eprintln!("delete_all_features_for_audit failed: {}", e);
+      eprintln!("build_threats failed: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
-
-  for (feat_topic, feature) in &parsed.features {
-    // Get name/description from topic_metadata
-    let (name, description) = match parsed.topic_metadata.get(feat_topic) {
-      Some(core::TopicMetadata::FeatureTopic {
-        name, description, ..
-      }) => (name.as_str(), description.as_str()),
-      _ => continue,
-    };
-    let row = db::create_feature(
-      &state.db,
-      &audit_id,
-      name,
-      description,
-      AUTHOR_AGENT, // agent-created
-    )
+  crate::collaborator::agent::pipeline::link_requirements(&ps, &audit_id)
     .await
     .map_err(|e| {
-      eprintln!("create_feature failed: {}", e);
+      eprintln!("link_requirements failed: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    // Persist requirements for this feature
-    for req_topic in &feature.requirement_topics {
-      // Get description from topic_metadata
-      let req_desc = match parsed.topic_metadata.get(req_topic) {
-        Some(core::TopicMetadata::RequirementTopic { description, .. }) => {
-          description.as_str()
-        }
-        _ => continue,
-      };
-      let req_row = db::create_requirement(&state.db, row.id, req_desc, 0)
-        .await
-        .map_err(|e| {
-          eprintln!("create_requirement failed: {}", e);
-          StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-      if let Some(req) = parsed.requirements.get(req_topic) {
-        for dt in &req.documentation_topics {
-          let _ = db::add_requirement_documentation_topic(
-            &state.db,
-            req_row.id,
-            dt.id(),
-          )
-          .await;
-        }
-        for st in &req.source_topics {
-          let _ =
-            db::add_requirement_source_topic(&state.db, req_row.id, st.id())
-              .await;
-        }
-      }
-    }
-  }
-
-  // Store in audit data and build response
-  let mut ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in build_features (store): {}", e);
-    StatusCode::INTERNAL_SERVER_ERROR
-  })?;
-  let audit_data = ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  // Remove old feature/requirement/threat/invariant TopicMetadata entries
-  audit_data.topic_metadata.retain(|_, m| {
-    !matches!(
-      m,
-      core::TopicMetadata::FeatureTopic { .. }
-        | core::TopicMetadata::RequirementTopic { .. }
-        | core::TopicMetadata::ThreatTopic { .. }
-        | core::TopicMetadata::InvariantTopic { .. }
-    )
-  });
-
-  // Insert TopicMetadata from parsed result
-  audit_data.topic_metadata.extend(parsed.topic_metadata);
-
-  audit_data.features = parsed.features;
-  audit_data.requirements = parsed.requirements;
-  audit_data.threats.clear();
-  audit_data.invariants.clear();
-  crate::core::rebuild_feature_context(audit_data);
-
-  Ok(StatusCode::OK)
-}
-
-/// Trigger the agent to build threats and invariants from existing features.
-pub async fn build_threats(
-  State(state): State<AppState>,
-  Path(audit_id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-  println!("POST /api/v1/audits/{}/threats/build", audit_id);
-
-  // Render per-feature JSON while holding the lock, then release it
-  let (feature_entries, security_notes): (
-    Vec<(topic::Topic, String)>,
-    Option<String>,
-  ) = {
-    let ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in build_threats: {}", e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-
-    let entries = audit_data
-      .features
-      .iter()
-      .filter_map(|(ft, feature)| {
-        let json =
-          crate::collaborator::agent::context::render_feature_to_json(
-            ft, feature, audit_data,
-          )?;
-        Some((ft.clone(), json))
-      })
-      .collect();
-
-    (entries, audit_data.security_notes.clone())
-  };
-
-  if feature_entries.is_empty() {
-    return Err(StatusCode::NOT_FOUND);
-  }
-
-  // Fire one LLM call per feature concurrently
-  let security_notes = std::sync::Arc::new(security_notes);
-  let mut handles = Vec::new();
-  for (i, (ft, json)) in feature_entries.into_iter().enumerate() {
-    let threat_start = (i * 1000) as i32;
-    let invariant_start = (i * 1000) as i32;
-    let notes = security_notes.clone();
-    handles.push(tokio::spawn(async move {
-      let result = crate::collaborator::agent::task::build_threats_for_feature(
-        &ft,
-        &json,
-        threat_start,
-        invariant_start,
-        notes.as_deref(),
-      )
-      .await;
-      (ft, result)
-    }));
-  }
-
-  // Collect results, log errors but continue with successes
-  let mut all_parsed = Vec::new();
-  for handle in handles {
-    match handle.await {
-      Ok((_, Ok(parsed))) => all_parsed.push(parsed),
-      Ok((ft, Err(e))) => {
-        eprintln!("build_threats failed for {}: {}", ft.id(), e);
-      }
-      Err(e) => {
-        eprintln!("build_threats task panicked: {}", e);
-      }
-    }
-  }
-
-  // Delete existing threats/invariants from the database
-  db::delete_all_threats_for_audit(&state.db, &audit_id)
-    .await
-    .map_err(|e| {
-      eprintln!("delete_all_threats_for_audit failed: {}", e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-  // Persist new threats and invariants; build in-memory state from DB row IDs
-  let mut new_threats = std::collections::BTreeMap::new();
-  let mut new_invariants = std::collections::BTreeMap::new();
-  let mut new_topic_metadata = std::collections::BTreeMap::new();
-  let mut new_feature_threats: std::collections::BTreeMap<
-    topic::Topic,
-    Vec<topic::Topic>,
-  > = std::collections::BTreeMap::new();
-
-  for parsed in &all_parsed {
-    for (feat_topic, threat_topics) in &parsed.feature_threat_topics {
-      let feature_id = feat_topic.numeric_id().ok_or_else(|| {
-        eprintln!("Invalid feature topic: {}", feat_topic.id());
-        StatusCode::INTERNAL_SERVER_ERROR
-      })?;
-
-      for tt in threat_topics {
-        let (description, severity) = match parsed.topic_metadata.get(tt) {
-          Some(core::TopicMetadata::ThreatTopic {
-            description,
-            severity,
-            ..
-          }) => (description.clone(), *severity),
-          _ => continue,
-        };
-
-        let threat_row = db::create_threat(
-          &state.db,
-          feature_id,
-          &description,
-          AUTHOR_AGENT,
-          severity.as_str(),
-        )
-        .await
-        .map_err(|e| {
-          eprintln!("create_threat failed: {}", e);
-          StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-        let real_threat_topic =
-          topic::new_attack_vector_topic(threat_row.id as i32);
-
-        let mut real_invariant_topics = Vec::new();
-        if let Some(threat) = parsed.threats.get(tt) {
-          for inv_topic in &threat.invariant_topics {
-            let inv_desc = match parsed.topic_metadata.get(inv_topic) {
-              Some(core::TopicMetadata::InvariantTopic {
-                description, ..
-              }) => description.clone(),
-              _ => continue,
-            };
-
-            let inv_row = db::create_invariant(
-              &state.db,
-              threat_row.id,
-              &inv_desc,
-              AUTHOR_AGENT,
-              severity.as_str(),
-            )
-            .await
-            .map_err(|e| {
-              eprintln!("create_invariant failed: {}", e);
-              StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-
-            let real_inv_topic = topic::new_invariant_topic(inv_row.id as i32);
-
-            new_topic_metadata.insert(
-              real_inv_topic.clone(),
-              core::TopicMetadata::InvariantTopic {
-                topic: real_inv_topic.clone(),
-                description: inv_desc,
-                threat_topic: real_threat_topic.clone(),
-                author_id: AUTHOR_AGENT,
-                created_at: inv_row.created_at,
-                severity,
-              },
-            );
-            new_invariants.insert(
-              real_inv_topic.clone(),
-              core::Invariant {
-                source_topics: Vec::new(),
-              },
-            );
-            real_invariant_topics.push(real_inv_topic);
-          }
-        }
-
-        new_topic_metadata.insert(
-          real_threat_topic.clone(),
-          core::TopicMetadata::ThreatTopic {
-            topic: real_threat_topic.clone(),
-            description,
-            feature_topic: feat_topic.clone(),
-            author_id: AUTHOR_AGENT,
-            created_at: threat_row.created_at,
-            severity,
-          },
-        );
-        new_threats.insert(
-          real_threat_topic.clone(),
-          core::Threat {
-            invariant_topics: real_invariant_topics,
-          },
-        );
-        new_feature_threats
-          .entry(feat_topic.clone())
-          .or_default()
-          .push(real_threat_topic);
-      }
-    }
-  }
-
-  // Update in-memory audit data and extract review input (if security notes exist)
-  let review_input = {
-    let mut ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in build_threats (store): {}", e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let audit_data =
-      ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-
-    // Clear old threat/invariant metadata
-    audit_data.topic_metadata.retain(|_, m| {
-      !matches!(
-        m,
-        core::TopicMetadata::ThreatTopic { .. }
-          | core::TopicMetadata::InvariantTopic { .. }
-      )
-    });
-
-    audit_data.topic_metadata.extend(new_topic_metadata);
-    audit_data.threats = new_threats;
-    audit_data.invariants = new_invariants;
-
-    // Update feature threat_topics
-    for feature in audit_data.features.values_mut() {
-      feature.threat_topics.clear();
-    }
-    for (feat_topic, threat_topics) in new_feature_threats {
-      if let Some(feature) = audit_data.features.get_mut(&feat_topic) {
-        feature.threat_topics = threat_topics;
-      }
-    }
-
-    crate::core::rebuild_feature_context(audit_data);
-
-    // --- Security coverage review pass ---
-    // Extract what we need while holding the lock, then release it.
-    if let Some(ref notes) = *security_notes {
-      let features_json =
-        crate::collaborator::agent::context::render_all_features_with_threats(
-          audit_data,
-        );
-
-      let review_threat_start = audit_data
-        .threats
-        .keys()
-        .filter_map(|t| t.numeric_id())
-        .max()
-        .unwrap_or(0) as i32;
-      let review_inv_start = audit_data
-        .invariants
-        .keys()
-        .filter_map(|t| t.numeric_id())
-        .max()
-        .unwrap_or(0) as i32;
-
-      Some((
-        notes.clone(),
-        features_json,
-        review_threat_start,
-        review_inv_start,
-      ))
-    } else {
-      None
-    }
-  }; // ctx dropped here
-
-  if let Some((notes, features_json, review_threat_start, review_inv_start)) =
-    review_input
-  {
-    let review_results =
-      crate::collaborator::agent::task::review_security_coverage(
-        &notes,
-        &features_json,
-        review_threat_start,
-        review_inv_start,
-      )
-      .await
-      .map_err(|e| {
-        eprintln!("review_security_coverage failed: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-      })?;
-
-    // Persist additional threats/invariants from the review
-    if !review_results.is_empty() {
-      let mut review_threats = std::collections::BTreeMap::new();
-      let mut review_invariants = std::collections::BTreeMap::new();
-      let mut review_metadata = std::collections::BTreeMap::new();
-      let mut review_feature_threats: std::collections::BTreeMap<
-        topic::Topic,
-        Vec<topic::Topic>,
-      > = std::collections::BTreeMap::new();
-
-      for parsed in &review_results {
-        for (feat_topic, threat_topics) in &parsed.feature_threat_topics {
-          let feature_id = feat_topic.numeric_id().ok_or_else(|| {
-            eprintln!("Invalid feature topic in review: {}", feat_topic.id());
-            StatusCode::INTERNAL_SERVER_ERROR
-          })?;
-
-          for tt in threat_topics {
-            let (description, severity) = match parsed.topic_metadata.get(tt) {
-              Some(core::TopicMetadata::ThreatTopic {
-                description,
-                severity,
-                ..
-              }) => (description.clone(), *severity),
-              _ => continue,
-            };
-
-            let threat_row = db::create_threat(
-              &state.db,
-              feature_id,
-              &description,
-              AUTHOR_AGENT,
-              severity.as_str(),
-            )
-            .await
-            .map_err(|e| {
-              eprintln!("create_threat (review) failed: {}", e);
-              StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-
-            let real_threat_topic =
-              topic::new_attack_vector_topic(threat_row.id as i32);
-
-            let mut real_invariant_topics = Vec::new();
-            if let Some(threat) = parsed.threats.get(tt) {
-              for inv_topic in &threat.invariant_topics {
-                let inv_desc = match parsed.topic_metadata.get(inv_topic) {
-                  Some(core::TopicMetadata::InvariantTopic {
-                    description,
-                    ..
-                  }) => description.clone(),
-                  _ => continue,
-                };
-
-                let inv_row = db::create_invariant(
-                  &state.db,
-                  threat_row.id,
-                  &inv_desc,
-                  AUTHOR_AGENT,
-                  severity.as_str(),
-                )
-                .await
-                .map_err(|e| {
-                  eprintln!("create_invariant (review) failed: {}", e);
-                  StatusCode::INTERNAL_SERVER_ERROR
-                })?;
-
-                let real_inv_topic =
-                  topic::new_invariant_topic(inv_row.id as i32);
-
-                review_metadata.insert(
-                  real_inv_topic.clone(),
-                  core::TopicMetadata::InvariantTopic {
-                    topic: real_inv_topic.clone(),
-                    description: inv_desc,
-                    threat_topic: real_threat_topic.clone(),
-                    author_id: AUTHOR_AGENT,
-                    created_at: inv_row.created_at,
-                    severity,
-                  },
-                );
-                review_invariants.insert(
-                  real_inv_topic.clone(),
-                  core::Invariant {
-                    source_topics: Vec::new(),
-                  },
-                );
-                real_invariant_topics.push(real_inv_topic);
-              }
-            }
-
-            review_metadata.insert(
-              real_threat_topic.clone(),
-              core::TopicMetadata::ThreatTopic {
-                topic: real_threat_topic.clone(),
-                description,
-                feature_topic: feat_topic.clone(),
-                author_id: AUTHOR_AGENT,
-                created_at: threat_row.created_at,
-                severity,
-              },
-            );
-            review_threats.insert(
-              real_threat_topic.clone(),
-              core::Threat {
-                invariant_topics: real_invariant_topics,
-              },
-            );
-            review_feature_threats
-              .entry(feat_topic.clone())
-              .or_default()
-              .push(real_threat_topic);
-          }
-        }
-      }
-
-      // Merge review results into in-memory state
-      let mut ctx = state.data_context.lock().map_err(|e| {
-        eprintln!("Mutex poisoned in build_threats (review store): {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-      })?;
-      let audit_data =
-        ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-
-      audit_data.topic_metadata.extend(review_metadata);
-      audit_data.threats.extend(review_threats);
-      audit_data.invariants.extend(review_invariants);
-
-      for (feat_topic, threat_topics) in review_feature_threats {
-        if let Some(feature) = audit_data.features.get_mut(&feat_topic) {
-          feature.threat_topics.extend(threat_topics);
-        }
-      }
-
-      crate::core::rebuild_feature_context(audit_data);
-    }
-  }
 
   Ok(StatusCode::OK)
 }
@@ -2356,6 +1862,39 @@ pub async fn create_feature(
     .insert(feature_topic.clone(), metadata.clone());
 
   let response = topic_metadata_to_response(&feature_topic, &metadata);
+
+  // Spawn background task: build threats → link requirements for this feature
+  let ps = pipeline_state(&state);
+  let bg_audit_id = audit_id.clone();
+  let bg_feature_topic = feature_topic.clone();
+  tokio::spawn(async move {
+    use crate::collaborator::agent::pipeline;
+    if let Err(e) =
+      pipeline::build_threats_for_feature(&ps, &bg_audit_id, &bg_feature_topic)
+        .await
+    {
+      eprintln!(
+        "Background build_threats_for_feature failed for {}: {}",
+        bg_feature_topic.id(),
+        e
+      );
+    }
+    if let Err(e) = pipeline::link_feature_requirements(
+      &ps,
+      &bg_audit_id,
+      &bg_feature_topic,
+      None,
+    )
+    .await
+    {
+      eprintln!(
+        "Background link_feature_requirements failed for {}: {}",
+        bg_feature_topic.id(),
+        e
+      );
+    }
+  });
+
   Ok(Json(response))
 }
 
@@ -2711,6 +2250,30 @@ pub async fn create_requirement(
   crate::core::rebuild_feature_context(audit_data);
 
   let response = topic_metadata_to_response(&req_topic, &metadata);
+
+  // Spawn background task: link this single requirement to source
+  let ps = pipeline_state(&state);
+  let bg_audit_id = audit_id.clone();
+  let bg_feature_topic = feature_topic.clone();
+  let bg_req_topic = req_topic.clone();
+  tokio::spawn(async move {
+    use crate::collaborator::agent::pipeline;
+    if let Err(e) = pipeline::link_feature_requirements(
+      &ps,
+      &bg_audit_id,
+      &bg_feature_topic,
+      Some(&bg_req_topic),
+    )
+    .await
+    {
+      eprintln!(
+        "Background link_feature_requirements failed for {}: {}",
+        bg_req_topic.id(),
+        e
+      );
+    }
+  });
+
   Ok(Json(response))
 }
 
