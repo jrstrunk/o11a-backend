@@ -48,6 +48,10 @@
 //! 4. **Review** (`review_security_coverage`): A completeness pass that checks
 //!    whether all security notes content is accounted for in the generated
 //!    threat model, filling any gaps.
+//! 5. **Link** (`link_requirements_to_source`): For each (contract, feature)
+//!    pair, determine which requirements apply to which contract members.
+//!    One LLM call per pair (Option D) using the large model for quality.
+//!    Members linked to a requirement implicitly link their parent contract.
 
 use std::collections::BTreeMap;
 
@@ -791,12 +795,208 @@ pub async fn normalize_documentation(
   Ok(NormalizedDocumentation { files })
 }
 
-/// Generate documentation for all top-level contracts in the audit.
-pub fn document_contracts(
+/// Prompt for linking requirements to contract members.
+const LINK_REQUIREMENTS_PROMPT: &str = "Below is a smart contract and a feature with its \
+requirements, extracted from project documentation.\n\n\
+The contract is rendered as a JSON object with an N-prefixed topic ID on the \
+contract itself and on each of its members (functions, state variables, \
+modifiers, events, structs, enums, errors). Member bodies are omitted — \
+only signatures are shown.\n\n\
+The feature has R-prefixed requirement topic IDs on each requirement.\n\n\
+Your task is to determine which of the feature's requirements are relevant \
+to this contract's members. A requirement is relevant to a member if the \
+member's implementation would need to satisfy or could violate that \
+requirement.\n\n\
+For each relevant requirement, return the requirement's R-prefixed topic ID \
+and an array of N-prefixed member topic IDs that the requirement applies to. \
+A requirement may apply to multiple members, and a member may be relevant to \
+multiple requirements.\n\n\
+Rules:\n\
+- Only link requirements to members where there is a clear, direct \
+  relationship. Do not force links.\n\
+- If none of the feature's requirements apply to this contract, return an \
+  empty array `[]`.\n\
+- Omit requirements that do not apply to any member of this contract.\n\
+- Return ONLY a JSON array of objects, each with:\n\
+  - `requirement_topic`: the R-prefixed topic ID string\n\
+  - `source_topics`: an array of N-prefixed member topic ID strings\n\
+- No other text.\n\n";
+
+/// A pre-rendered (contract JSON, feature JSON) pair for the linking task.
+pub struct ContractFeaturePair {
+  pub contract_topic: topic::Topic,
+  pub contract_json: String,
+  pub feature_json: String,
+  /// Label for dry-run output and logging.
+  pub label: String,
+}
+
+/// Collect all (contract, feature) pairs from audit data, pre-rendered as JSON.
+pub fn collect_contract_feature_pairs(
   audit_data: &AuditData,
   source_text_cache: &std::collections::HashMap<String, String>,
-) {
-  todo!()
+) -> Vec<ContractFeaturePair> {
+  use crate::solidity::parser::ASTNode;
+
+  // Collect contract AST nodes
+  let mut contracts: Vec<(&ASTNode, String)> = Vec::new();
+  for (_path, ast) in &audit_data.asts {
+    let sol_ast = match ast {
+      AST::Solidity(sol_ast) => sol_ast,
+      _ => continue,
+    };
+    for node in &sol_ast.nodes {
+      if let ASTNode::ContractDefinition { .. } = node {
+        let contract_json = match context::render_contract_members_for_linking(
+          node,
+          audit_data,
+          source_text_cache,
+        ) {
+          Some(json) => json,
+          None => continue,
+        };
+        contracts.push((node, contract_json));
+      }
+    }
+  }
+
+  // Collect features
+  let mut pairs = Vec::new();
+  for (ft, feature) in &audit_data.features {
+    let feature_json = match context::render_feature_to_json(ft, feature, audit_data) {
+      Some(json) => json,
+      None => continue,
+    };
+
+    for (node, contract_json) in &contracts {
+      let contract_topic = topic::new_node_topic(&node.node_id());
+      let label = format!("{}_{}", contract_topic.id(), ft.id());
+      pairs.push(ContractFeaturePair {
+        contract_topic,
+        contract_json: contract_json.clone(),
+        feature_json: feature_json.clone(),
+        label,
+      });
+    }
+  }
+
+  pairs
+}
+
+/// A single requirement-to-source link returned by the LLM.
+#[derive(Deserialize)]
+struct LLMRequirementLink {
+  requirement_topic: String,
+  source_topics: Vec<String>,
+}
+
+/// Result of linking requirements to source code: maps requirement topics
+/// to their linked source (member) topics.
+pub struct ParsedRequirementLinks {
+  pub links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+}
+
+/// Link requirements to contract members via LLM (Option D: one call per
+/// contract×feature pair, large model).
+///
+/// The caller collects pairs while holding the lock, then passes them here
+/// after releasing it. Returns a merged map of requirement topics to source
+/// member topics across all contracts and features.
+pub async fn link_requirements_to_source(
+  pairs: &[ContractFeaturePair],
+) -> Result<ParsedRequirementLinks, String> {
+  if pairs.is_empty() {
+    return Err("No contract-feature pairs to process".to_string());
+  }
+
+  let mut handles = Vec::new();
+  for pair in pairs {
+    let prompt = format!(
+      "{}Contract:\n{}\n\nFeature:\n{}",
+      LINK_REQUIREMENTS_PROMPT, pair.contract_json, pair.feature_json
+    );
+    let label = pair.label.clone();
+    handles.push(tokio::spawn(async move {
+      let result = router::chat_completion(
+        TaskSize::Large,
+        router::SYSTEM_MESSAGE_CODE,
+        &prompt,
+        Some(&label),
+      )
+      .await;
+      (label, result)
+    }));
+  }
+
+  let mut links: BTreeMap<topic::Topic, Vec<topic::Topic>> = BTreeMap::new();
+  for handle in handles {
+    match handle.await {
+      Ok((_, Ok(response))) => {
+        match parse_requirement_links(&response) {
+          Ok(parsed) => {
+            for (req_topic, source_topics) in parsed {
+              links.entry(req_topic).or_default().extend(source_topics);
+            }
+          }
+          Err(e) => eprintln!("parse_requirement_links failed: {}", e),
+        }
+      }
+      Ok((label, Err(e))) => {
+        eprintln!("link_requirements_to_source failed for {}: {}", label, e);
+      }
+      Err(e) => {
+        eprintln!("link_requirements_to_source task panicked: {}", e);
+      }
+    }
+  }
+
+  // Deduplicate source topics per requirement
+  for source_topics in links.values_mut() {
+    source_topics.sort();
+    source_topics.dedup();
+  }
+
+  if links.is_empty() {
+    return Err("No requirement-to-source links found".to_string());
+  }
+
+  Ok(ParsedRequirementLinks { links })
+}
+
+/// Parse the LLM response for requirement-to-source links.
+fn parse_requirement_links(
+  response: &str,
+) -> Result<Vec<(topic::Topic, Vec<topic::Topic>)>, String> {
+  let json_str = response
+    .trim()
+    .strip_prefix("```json")
+    .or_else(|| response.trim().strip_prefix("```"))
+    .unwrap_or(response.trim());
+  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
+
+  let raw_links: Vec<LLMRequirementLink> =
+    serde_json::from_str(json_str).map_err(|e| {
+      eprintln!(
+        "Failed to parse requirement links JSON: {}\nResponse:\n{}",
+        e, json_str
+      );
+      format!("Failed to parse requirement links JSON: {}", e)
+    })?;
+
+  let mut result = Vec::new();
+  for link in raw_links {
+    let req_topic = topic::new_topic(&link.requirement_topic);
+    let source_topics: Vec<topic::Topic> = link
+      .source_topics
+      .into_iter()
+      .map(|id| topic::new_topic(&id))
+      .collect();
+    if !source_topics.is_empty() {
+      result.push((req_topic, source_topics));
+    }
+  }
+
+  Ok(result)
 }
 
 /// Generate documentation for all members of a specific contract.

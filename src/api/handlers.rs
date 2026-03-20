@@ -1910,7 +1910,7 @@ pub async fn build_threats(
       .iter()
       .filter_map(|(ft, feature)| {
         let json =
-          crate::collaborator::agent::context::render_feature_for_threats(
+          crate::collaborator::agent::context::render_feature_to_json(
             ft, feature, audit_data,
           )?;
         Some((ft.clone(), json))

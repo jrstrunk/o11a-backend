@@ -2075,7 +2075,9 @@ pub fn render_all_features_with_threats(
 
 /// Render a single feature and its requirements as JSON for the threat-building prompt.
 /// Returns `None` if the feature topic has no metadata.
-pub fn render_feature_for_threats(
+/// Render a single feature with its requirements (including R-prefixed topic IDs)
+/// as a JSON string for LLM consumption.
+pub fn render_feature_to_json(
   feature_topic: &topic::Topic,
   feature: &core::Feature,
   audit_data: &AuditData,
@@ -2095,6 +2097,7 @@ pub fn render_feature_for_threats(
         audit_data.topic_metadata.get(rt)
       {
         Some(serde_json::json!({
+          "requirement_topic": rt.id(),
           "description": description,
         }))
       } else {
@@ -2104,10 +2107,59 @@ pub fn render_feature_for_threats(
     .collect();
 
   let feature_obj = serde_json::json!({
+    "feature_topic": feature_topic.id(),
     "name": name,
     "description": description,
     "requirements": reqs,
   });
 
   Some(serde_json::to_string(&feature_obj).unwrap_or_default())
+}
+
+/// Render a contract's members (signatures only, no bodies) as a JSON array
+/// for the requirement-to-source linking prompt. Each member includes its
+/// N-prefixed topic ID.
+pub fn render_contract_members_for_linking(
+  contract_node: &crate::solidity::parser::ASTNode,
+  audit_data: &AuditData,
+  source_text_cache: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+  use crate::solidity::parser::ASTNode;
+
+  let (name, kind, members) = match contract_node {
+    ASTNode::ContractDefinition {
+      signature, nodes, ..
+    } => {
+      let (name, kind) = match signature.as_ref() {
+        ASTNode::ContractSignature {
+          name,
+          contract_kind,
+          ..
+        } => (name.clone(), format!("{:?}", contract_kind).to_lowercase()),
+        _ => ("unknown".to_string(), "contract".to_string()),
+      };
+      (name, kind, nodes)
+    }
+    _ => return None,
+  };
+
+  let render_ctx = ASTRenderContext {
+    target_topic: topic::new_node_topic(&-1),
+    omit_function_and_modifier_bodies: true,
+  };
+
+  let member_snippets: Vec<serde_json::Value> = members
+    .iter()
+    .map(|m| render_solidity_ast_snippet(m, &render_ctx, audit_data, source_text_cache))
+    .collect();
+
+  let contract_topic = topic::new_node_topic(&contract_node.node_id());
+  let obj = serde_json::json!({
+    "contract_topic": contract_topic.id(),
+    "name": name,
+    "kind": kind,
+    "members": member_snippets,
+  });
+
+  Some(serde_json::to_string(&obj).unwrap_or_default())
 }
