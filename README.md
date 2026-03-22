@@ -118,6 +118,8 @@ There are many type properties that can be checked on the subjects of a type con
   1. Length
  - Mappings:
   1. Set of keys
+ - Enums:
+  1. Enum variants
 
 Type properties converge when an operator is called:
  - Function/struct arguments (checked from the argument variable to the parameter variable)
@@ -250,3 +252,45 @@ General audit flow is:
 ### Managing Convergences
 
 Convergences are the main point of verification in the audit process. They have four states: waiting, unverified, verified, and contradicted. A waiting convergence is one is waiting for properties to be added to its parts, ie `a + b`, but `a` does not have any properties added so we cannot judge the convergence.
+
+## Subject Evaluation Context Strategy
+
+When evaluating subjects for invariant upholding or invariant recognition, we use **backward-only context** as the default strategy. When auditing a given subject, the system provides context about where the subject's values originated — their data provenance, taint sources, and upstream transformations — but does not, by default, include forward context about where those values propagate to downstream.
+
+This is a deliberate architectural choice, not a limitation. The system compensates for the absence of forward context through its **on-the-fly invariant tracking and re-check mechanism**, which provides equivalent or superior coverage to bidirectional context while maintaining focused, low-noise audit passes.
+
+### Why Not Bidirectional Context
+
+An intuitive approach to auditing a variable is to present both where its value came from and where it goes. This gives a complete picture of the variable's role in the system. The case for this is strongest when a single value fans out to multiple destinations with different requirements — seeing the full fan-out from one vantage point can surface design-level issues like incomplete access control coverage or inconsistent invariant enforcement across functions.
+
+However, this advantage is narrower than it first appears, for two reasons.
+
+**The inferential demand is the same either way.** Forward context presents the auditor with a list of destinations and relies on the auditor to recognize that a pattern (such as an access control check) is present at some sites and missing at others. Backward-only context presents the auditor with the pattern at the first site encountered and relies on the auditor to generalize it into an invariant. In both cases, the auditor must perform the same act of recognition and generalization. Forward context does not reduce the cognitive work; it merely rearranges when it happens.
+
+**Forward context introduces noise that degrades audit quality.** Forward propagation scales with the number of consumers of a state variable. In smart contracts, heavily-read state variables (token balances, approval mappings, configuration parameters) may be referenced across many functions. Including all downstream consumers in the context of every audit pass dilutes the signal about the specific code under review. For LLM auditors in particular, this context dilution measurably degrades reasoning about the subject at hand. Backward-only context keeps each audit pass lean and focused on the immediate code being evaluated.
+
+### How the Invariant System Closes the Gap
+
+The primary class of vulnerability where forward context provides value is **incomplete invariant enforcement**: cases where a check or pattern should be applied uniformly across a set of functions but is missing from one or more of them. The canonical smart contract examples are access control gaps (a modifier guards some privileged functions but not all) and economic invariant violations (some functions that modify a balance correctly maintain a sum-total relationship while others do not).
+
+Rather than using forward context to surface these issues passively, this system surfaces them actively through invariant tracking:
+
+1. **Invariant discovery.** When the auditor encounters a pattern during a backward-context audit pass (e.g., a role-based access check on a state-modifying function), they register it as an invariant linked to the relevant code.
+
+2. **Propagation via re-check.** The system applies the new invariant to all previously-audited subjects. Any function that modifies the same state but lacks the expected check is flagged mechanically, without requiring forward context at the point of origin.
+
+3. **Completeness guarantee.** Because the audit is programmatic and covers every variable and statement, the re-check mechanism provides exhaustive coverage. Once an invariant is articulated, no violation can escape detection. This is stronger than forward context, which still depends on an auditor noticing a discrepancy within a potentially large list of destinations.
+
+This architecture cleanly separates two concerns that bidirectional context conflates: understanding what a specific piece of code does (served by focused backward context) and verifying that invariants hold globally (served by the re-check system). Each concern is handled by a mechanism optimized for it.
+
+### Known Limitations and Mitigations
+
+The backward-only strategy with invariant re-checking has one residual limitation: invariant discovery depends on the auditor encountering at least one instance of a pattern and recognizing its security significance. Two edge cases deserve attention.
+
+**Subtle semantic distinctions.** Some invariants require recognizing that two superficially similar operations are categorically different. For example, a function that writes to `balances[msg.sender]` (self-modification) versus one that writes to `balances[account]` (arbitrary-address modification) may both appear as simple mapping writes, but only the latter requires elevated privilege. Forward context does not inherently make this distinction more visible — the auditor must apply domain knowledge in either case — but the system should include heuristic prompts that direct attention to these distinctions. Examples include flagging functions that modify state keyed by a caller-supplied address, or functions that bypass standard entry points.
+
+**Absent mechanisms.** If a contract should implement a security pattern (such as a pause mechanism) but does not, no backward-context encounter will contain a reference to the missing pattern. This class of finding is better addressed by a checklist of expected security patterns for the contract type, applied as a design-review pass separate from variable-level auditing. This is an inherent scope boundary of code-level auditing regardless of context strategy.
+
+### Summary
+
+The backward-only context strategy is not a cost-saving approximation of bidirectional analysis. It is a design that optimizes for audit quality by keeping individual audit passes focused, while relying on the invariant system to provide the global coverage that forward context would otherwise supply. The invariant system achieves this coverage more reliably — mechanically and exhaustively — once an invariant is identified, and the investment in invariant discovery heuristics and pattern templates compounds across engagements in a way that raw forward context never does.
