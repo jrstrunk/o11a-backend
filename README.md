@@ -5,7 +5,7 @@ The o11a backend has five modules that form a processing pipeline:
  2. Analyzer - analyzes the audit source, producing a directory of definitions and their attributes, allowing clients to fetch structured audit data
  3. Formatter - transforms the AST into formatter nodes
  4. Collaborator - stores discussion topics and the comments under them, allowing clients to post new comments and approve or disapprove of comments from other users
- 5. Checker - checks variable constraints, manages the security model of features, requirements, threats, and invariants, and allows clients to post new constraints to be checked, providing data on any conflicting constraints
+ 5. Checker - checks variable constraints, manages the security model of features, requirements, behaviors, threats, and invariants, and allows clients to post new constraints to be checked, providing data on any conflicting constraints
 
 # Parser
 
@@ -96,7 +96,7 @@ The checker is responsible for two things: checking the subjects of convergences
 
 ## Security Model
 
-The security model is the structured representation of what the code is supposed to do, what could go wrong, and which source locations are relevant to each concern. It is built incrementally throughout the audit — seeded from project documentation and refined on-the-fly as auditors review code and discover new concerns.
+The security model is the structured representation of what the documentation claims, what the code actually does, what could go wrong, and which source locations are relevant to each concern. It is built incrementally throughout the audit — seeded from project documentation and refined on-the-fly as auditors review code and discover new concerns.
 
 ### Design Principles
 
@@ -104,71 +104,85 @@ The security model is the structured representation of what the code is supposed
 
 **Features describe behavior, not implementation.** Feature names and descriptions are written at the user-visible or protocol level. A pause mechanism is a feature whether the docs describe it as "emergency stop" or "modifier onlyOwner on pause()".
 
-**Requirements describe the happy path.** Requirements are descriptions of what the code must do to complete the feature — the concrete behaviors that, taken together, constitute the feature working correctly. They describe user-facing or protocol-level functionality: what value the code provides when everything goes right. They are not threat-oriented or defensive; they state what must happen, not what could go wrong.
+**Requirements capture all documented claims.** Requirements are what the documentation says the system does. They can describe any kind of documented behavior — functionality, constraints, access control, edge case handling. They are extracted from documentation and verified by confirming that corresponding behaviors exist in the implementation.
 
-**Invariants describe the defensive path.** Invariants are properties the code must uphold to protect against threats. They do not add user or protocol functionality — they prevent abuse of it. Access control, for example, is not a requirement of any feature (it provides no functionality to users), but it is an invariant that defends against the threat of unauthorized access. The distinction is: requirements define what the system does, invariants define what the system must not allow.
+**Behaviors capture what the code actually does.** Behaviors are observed during code review and represent the real implementation logic. They carry threat links because threats exploit real code, not documentation claims. Behaviors are the subjects that invariants protect.
 
-**Source links connect scope to code.** Requirements are linked to the contract members they apply to, giving auditors a starting point without prescribing what to look for.
+**Invariants describe the defensive path.** Invariants are properties the code must uphold to protect against threats. They do not add user or protocol functionality — they prevent abuse of it. Access control, for example, provides no functionality to users, but it is an invariant that defends against the threat of unauthorized access. The distinction is: behaviors define what the system does, invariants define what the system must not allow.
+
+**Source locations link to features.** Contract members are linked to the features they participate in. This allows behaviors created during code review to automatically associate with the right features, and enables reconciliation between documented requirements and observed behaviors.
 
 ### Initial Generation
 
 The security model is initially seeded from project documentation through an automated pipeline:
 
-**1. Feature Extraction.** Documentation files are processed to extract behavioral features and their happy-path requirements. When multiple documents exist, each is analyzed independently and the results are consolidated into a unified feature set. During consolidation, broad features with overlapping requirements are dissolved into more specific ones. Each requirement retains links to the documentation it was derived from, preserving traceability to the original developer claims.
+**1. Feature Extraction.** Documentation files are processed to extract behavioral features and their requirements. When multiple documents exist, each is analyzed independently and the results are consolidated into a unified feature set. During consolidation, broad features with overlapping requirements are dissolved into more specific ones. Each requirement retains links to the documentation it was derived from, preserving traceability to the original developer claims.
 
 **2. Threat and Invariant Generation.** For each feature, the pipeline generates threats and invariants — properties that must hold for the system to be secure. Each threat carries a severity rating. When the project includes security notes (developer-documented threats, roles, known invariants), a review pass checks whether those concerns are covered and fills gaps.
 
-Threats belong to features, not to requirements, which avoids duplication when multiple requirements share a threat. However, each requirement carries threat links indicating which of the feature's threats are relevant to it. Some threats apply broadly to the feature regardless of any particular requirement, while others are introduced or made relevant by specific requirements. For example, a reentrancy-via-callback threat is specifically relevant to the ERC20 collateral requirement but not to the ETH collateral requirement, while an unauthorized withdrawal threat applies to the feature as a whole. Requirements that introduce or are affected by a threat store a link to that threat; the threat itself does not need to know which requirements reference it.
-
 Threats are few and general, derived from project documentation and the behavioral features. Invariants are many and specific to the implementation, each defining a concrete property that must hold to defend against a threat. A threat may be that users can lose funds; invariants against that threat may be that funds cannot be sent to an irrecoverable address, or that balances cannot underflow. The hierarchy flows from documentation to features to threats to invariants to source code.
 
-Where requirements and invariants both describe things the code must do, they serve opposite concerns. Requirements describe the functionality that makes a feature work — the behaviors users and the protocol depend on. Invariants describe the constraints that keep that functionality safe — the defensive properties that prevent threats from materializing. A collateral lending feature requires the ability to deposit ETH (functionality), but the invariant that only the position owner can withdraw collateral (defense) exists to protect against a threat, not to provide a feature. Code that implements a requirement delivers value; code that upholds an invariant prevents harm.
+Where requirements and invariants both describe things the code must do, they serve different concerns. Requirements capture what the documentation claims — the functionality described to users or the protocol. Invariants capture what the code must enforce to protect against threats — the defensive properties that prevent threats from materializing. A collateral lending feature has a documented requirement that users can deposit ETH, but the invariant that only the position owner can withdraw collateral exists to protect against a threat, not to fulfill a documented claim. Requirements are verified by matching them to behaviors; invariants are verified by checking them against convergences in the source code.
 
-**3. Requirement-to-Source Linking.** Each (contract, feature) pair is evaluated to determine which contract members are relevant to each requirement. This produces requirement-to-source links: a map from each requirement to the concrete code locations responsible for fulfilling it.
+**3. Source-to-Feature Linking.** Each contract member in scope is evaluated to determine which features it participates in. This produces source-to-feature links: a map from concrete code locations to the features they implement. A function can link to more than one feature. This mapping is the mechanism through which behaviors created during code review are automatically associated with the correct features — when an auditor adds a behavior while reviewing a function, the behavior inherits the feature association from the source location.
 
 ### On-the-Fly Generation
 
-The security model is not static after initial generation. As auditors review code and encounter security-relevant patterns, they add new features, requirements, threats, and invariants directly from the code context. This on-the-fly generation is the primary mechanism through which the audit achieves comprehensive coverage.
+The security model is not static after initial generation. As auditors review code and encounter security-relevant patterns, they add new features, requirements, behaviors, threats, and invariants directly from the code context. This on-the-fly generation is the primary mechanism through which the audit achieves comprehensive coverage.
 
 When a user adds a new element to the security model, the relevant pipeline steps run automatically in the background:
 
-- **New feature** — Generates threats and invariants for the feature, then links its requirements to source.
-- **New requirement** — Links that single requirement to source, then generates threats against the feature using the new requirement as context. If the generation produces a threat that already exists on the feature, the new requirement adds a threat link to the existing threat rather than creating a duplicate. Genuinely new threats are created on the feature, and the requirement stores links to them.
+- **New feature** — Generates threats and invariants for the feature, then links source locations to it.
+- **New requirement** — Added to its parent feature. Requirements do not trigger threat generation or source linking; they are documentation claims that will be verified during reconciliation against behaviors.
+- **New behavior** — Created during code review and automatically associated with a feature via the source-to-feature link on the source location where it was observed. Threat generation runs against the feature using the new behavior as context. If the generation produces a threat that already exists on the feature, the new behavior adds a threat link to the existing threat rather than creating a duplicate. Genuinely new threats are created on the feature, and the behavior stores links to them.
 - **New invariant or threat** — The system triggers re-checks against all previously-audited subjects that fall within the invariant's scope, flagging any that do not satisfy the new property.
 
 The user's request completes immediately; background work finishes asynchronously.
 
 This re-check mechanism is what makes the system's backward-only evaluation context sufficient for comprehensive coverage (see Subject Evaluation Context Strategy below). Rather than including forward context to passively surface gaps, the system actively propagates newly-discovered concerns to all relevant code locations. When an auditor notices an access control check on one function and registers it as an invariant, every other function within that invariant's scope is mechanically re-evaluated — surfacing any that lack the expected check without the auditor needing to have seen all those functions in the same context window.
 
+### Reconciliation
+
+Reconciliation is the explicit step where the auditor compares documented requirements against observed behaviors for a given feature. The system presents the feature's requirements (from documentation) alongside the behaviors associated with the feature (via source-to-feature links). The auditor evaluates coverage in both directions:
+
+- **Requirements without matching behaviors** are unimplemented specification — the documentation claims the system does something, but no corresponding behavior was observed in the code.
+- **Behaviors without matching requirements** are undocumented implementation — the code does something significant that the documentation does not describe.
+
+Both are findings. The nature of the relationship between individual requirements and behaviors — whether a behavior fulfills, constrains, or conflicts with a requirement — is assessed by the auditor during this step, not at behavior creation time. This keeps behavior creation lightweight and focused on the code, while reconciliation provides the dedicated context for documentation-implementation comparison.
+
+Features structure the reconciliation into manageable units. Instead of reconciling all requirements against all behaviors in an audit at once, the auditor works through one feature at a time.
+
 ### Hierarchy
 
 ```
 Feature
-  "Collateral Lending"
-  ├── Requirement                                          ← happy path: what the code must do
-  │     "Must support ETH as collateral"
-  │     ├── Source Links: [depositETH(), getCollateralValue(), liquidate()]
-  │     └── Threat Links: ["Unauthorized withdrawal...", "Price oracle manipulation..."]
-  ├── Requirement
-  │     "Must support ERC20 tokens as collateral"
-  │     ├── Source Links: [depositERC20(), getCollateralValue(), liquidate()]
-  │     └── Threat Links: ["Unauthorized withdrawal...", "Reentrancy via callback...", "Price oracle..."]
-  ├── Requirement
-  │     "Must liquidate undercollateralized positions"
-  │     ├── Source Links: [liquidate(), getHealthFactor(), getCollateralValue()]
-  │     └── Threat Links: ["Undercollateralized position persists..."]
-  ├── Threat                                               ← defensive: what the code must prevent
-  │     "Unauthorized withdrawal of another user's collateral"
-  │     └── Invariant: "Only position owner can withdraw collateral"
+  "Protocol Campaigns"
+  ├── Requirement (from docs)                              ← what the docs claim
+  │     "Protocols can permissionlessly deploy a campaign for their token"
+  ├── Requirement (from docs)
+  │     "Campaign creators can withdraw remaining tokens after campaign ends"
+  ├── Behavior (from code)                                 ← what the code does
+  │     "Campaign deploys and registers token in campaignsByToken mapping"
+  │     ├── Source Links: [deployCampaign(), campaignsByToken]
+  │     └── Threat Links: ["Reentrancy during deploy", "Unauthorized withdrawal..."]
+  ├── Behavior (from code)
+  │     "Only one campaign can exist per token"
+  │     ├── Source Links: [deployCampaign(), campaignsByToken]
+  │     └── Threat Links: ["Token slot squatting DOS", "Bypass via proxy tokens"]
+  ├── Threat                                               ← what could go wrong
+  │     "Token slot squatting prevents legitimate protocols from deploying"
+  │     └── Invariant: "Campaign deployment cannot be blocked by unrelated parties"
   ├── Threat
-  │     "Reentrancy via token callback"
-  │     └── Invariant: "State updates precede external calls"
-  ├── Threat
-  │     "Collateral value manipulation via price oracle"
-  │     └── Invariant: "Price oracle cannot be updated by borrowers"
+  │     "Reentrancy during campaign deployment"
+  │     └── Invariant: "State updates precede external calls in deployCampaign"
   └── Threat
-        "Undercollateralized position persists after price drop"
-        └── Invariant: "Liquidation is callable by any account when health factor < 1"
+        "Unauthorized withdrawal of campaign tokens"
+        └── Invariant: "Only campaign creator can call withdrawRemaining"
+
+Source-to-Feature Links:
+  deployCampaign()    → "Protocol Campaigns"
+  withdrawRemaining() → "Protocol Campaigns"
+  campaignsByToken    → "Protocol Campaigns"
 ```
 
 ## Convergences
@@ -219,12 +233,12 @@ When auditing a variable, it is useful for the client to present all of its ance
 
 ### Specification Convergence
 
-Specification convergences verify that the implementation of a subject upholds the properties defined in the security model. Where type convergences check mechanical type properties, specification convergences check that the happy-path functionality captured in requirements and the defensive constraints captured in invariants are faithfully implemented in code.
+Specification convergences verify that the implementation of a subject upholds the properties defined in the security model. Where type convergences check mechanical type properties, specification convergences check that the behaviors observed in code and the defensive constraints captured in invariants are consistent and correctly implemented.
 
 There are three types of properties that may be checked on the subjects of a specification convergence, depending on the kind of subject:
  - Project Implementation, Contracts, Blocks, Statements:
    1. Functional Purpose (what purpose it serves within the context of the application, derived from the feature it belongs to)
-   2. Requirements (the feature requirements that apply to this subject, as determined by requirement-to-source linking)
+   2. Behaviors (the observed behaviors that apply to this subject, associated via source-to-feature linking)
    3. Dependencies (what the subject depends on to fulfill its purpose, expressed as links to other statements or mechanisms)
  - Expressions and Values:
    1. Functional Semantics (what it represents within the context of the application)
@@ -248,7 +262,7 @@ Function calls are an expression that has a subexpression of argument list passi
 
 Index access only has semantic properties like values.
 
-Functions have a semantic return value that can converge with other semantic properties in an expression, but they also have functional properties. These functional properties may not affect the semantics of the expression, but they converge with the containing statement's functional properties. For example, `add(a, b) - c` has a semantic property convergence at `the_result_of_add_a_b - c` to form one semantic property for the expression, but the functional properties of `add` converge with the containing statement's functional properties to make sure they fulfill the containing statement's requirements and align with its purpose.
+Functions have a semantic return value that can converge with other semantic properties in an expression, but they also have functional properties. These functional properties may not affect the semantics of the expression, but they converge with the containing statement's functional properties. For example, `add(a, b) - c` has a semantic property convergence at `the_result_of_add_a_b - c` to form one semantic property for the expression, but the functional properties of `add` converge with the containing statement's functional properties to make sure they fulfill the containing statement's behaviors and align with its purpose.
 
 #### Function Call Signatures
 
@@ -266,15 +280,23 @@ Functional purposes can be categorized, which will adjust the preset questions f
 
 ### Managing Requirements
 
-Requirements are happy-path descriptions of what the code must do to complete a feature. Each requirement states a concrete behavior — something the system needs to accomplish for the feature to work correctly. For example, a "Collateral Lending" feature might require supporting ETH as collateral, supporting ERC20 tokens as collateral, and liquidating undercollateralized positions. These are not investigative prompts or threat descriptions; they describe the intended functionality that the auditor then verifies the code actually implements.
+Requirements are what the documentation claims the system does. Each requirement captures a documented behavior — something the documentation says the system needs to accomplish. They can describe any kind of documented behavior: functionality, constraints, access control, edge case handling. For example, a "Protocol Campaigns" feature might have requirements like "protocols can permissionlessly deploy a campaign for their token" and "campaign creators can withdraw remaining tokens after campaign ends."
 
-Requirements are defined at the feature level in the security model and linked to source code by the requirement-to-source linking step. At the code level, each subject inherits the requirements of the features it is linked to.
+Requirements are defined at the feature level in the security model. They do not carry source links or threat links — those belong to behaviors. Requirements are verified not by checking them directly against source code, but by confirming during reconciliation that corresponding behaviors exist in the implementation.
 
-All requirements on a subject are distinct and independent of each other. Requirements are added to a subject initially as unverified, then are able to be marked as verified by each party in the audit as they review convergences. When reviewing a specification convergence (comparing a subject's implementation to its inherited requirements), each requirement should be reviewed and marked as verified or contradicted independently of the others.
+All requirements on a feature are distinct and independent of each other. Requirements are added initially as unverified, then are able to be marked as verified by each party in the audit during reconciliation.
 
-Each requirement is traceable to its parent feature, and carries threat links to the specific threats it is affected by. This allows the client to show which threats are relevant when an auditor is reviewing code linked to a particular requirement, filtering out unrelated threats on the same feature. When a requirement is contradicted, this traceability identifies the security impact: which threats become viable and which invariants are violated. The security model's hierarchy provides this dependency structure.
+Requirements are generally explored as documentation is reviewed, but auditors can also add requirements on-the-fly when they encounter documented claims that were not captured during initial generation.
 
-Requirements are generally explored as the usage of the subject is studied; therefore, it is important that clients allow users to see and add requirements to the subject at a call site. When a user adds a new requirement during code review, the incremental update pipeline links it to source, generates threats using the new requirement as context (deduplicating against existing threats on the feature), and then the checker re-evaluates all affected convergences.
+### Managing Behaviors
+
+Behaviors are what the code actually does. Each behavior captures an observed implementation behavior — something the auditor noticed while reviewing code. A behavior is a description, source links to the code where it was observed, and threat links to the threats it is affected by.
+
+Behaviors are created during code review and automatically associated with a feature via the source-to-feature link on the source location where they were observed. This means the auditor never leaves the code context when adding a behavior — they describe what the code does, and the model knows which feature it belongs to.
+
+Behaviors carry threat links. When a behavior is added, threat generation runs against the feature using the new behavior as context. If the generation produces a threat that already exists on the feature, the behavior adds a threat link to the existing threat rather than creating a duplicate. Genuinely new threats are created on the feature, and the behavior stores links to them.
+
+Behaviors are the subjects that invariants protect and that threats exploit. The security analysis machinery — threat generation, invariant checking, re-checks — operates on behaviors, not requirements, because threats target real code, not documentation claims.
 
 ### Managing Dependencies
 
@@ -294,7 +316,7 @@ A consumer is a statement that consumes what was set up by the current statement
 
 Each topic in the audit has a "threatened by" section that links to the threats it is subject to. These threat links provide the auditor with immediate visibility into why a particular piece of code matters from a security perspective, and what the consequences of a flaw would be. Because invariants belong to threats, and threats belong to features, any contradicted convergence can be traced from the specific code location through the full hierarchy to the behavioral feature and documentation that established the concern.
 
-This traceability also enables prioritization: when the auditor is evaluating a convergence, the severity of the linked threats determines how much scrutiny the convergence warrants. The threat links stored on requirements further refine this: when an auditor is working within the scope of a specific requirement, the client can filter to show only the threats that requirement links to, keeping the view focused.
+This traceability also enables prioritization: when the auditor is evaluating a convergence, the severity of the linked threats determines how much scrutiny the convergence warrants. The threat links stored on behaviors further refine this: when an auditor is working within the scope of a specific behavior, the client can filter to show only the threats that behavior links to, keeping the view focused.
 
 ## Auditing Convergences
 
@@ -302,11 +324,12 @@ Type constraint checks can be checked by a constraint algorithm. Specification c
 
 General audit flow is:
  1. Read and understand the docs and the purpose of the project
- 2. Run the initial generation pipeline to extract features, requirements, threats, and invariants from the documentation, and link requirements to source
- 3. Review and refine the generated security model, adding missing features or requirements as needed (incremental updates handle re-linking and re-checking automatically)
- 4. Read the code, noting what every variable is, is used for, and its type and specification properties, linking them to the threats they are subject to
+ 2. Run the initial generation pipeline to extract features, requirements, threats, and invariants from the documentation, and link source locations to features
+ 3. Review and refine the generated security model, adding missing features or requirements as needed
+ 4. Read the code, documenting behaviors as they are observed — behaviors automatically associate with features via source-to-feature links, and trigger threat generation in the background
  5. Step through all convergences, checking that the properties hold up correctly (types and specifications), with contradictions traceable through the threat and invariant hierarchy to their security impact
- 6. As new features, requirements, threats, or invariants are discovered during code review, add them to the security model — the re-check system propagates them to all previously-audited subjects, ensuring nothing is missed
+ 6. Reconcile requirements against behaviors per feature, identifying unimplemented specification and undocumented implementation
+ 7. As new features, requirements, behaviors, threats, or invariants are discovered during code review, add them to the security model — the re-check system propagates them to all previously-audited subjects, ensuring nothing is missed
 
 ### Managing Convergences
 
@@ -334,7 +357,7 @@ The primary class of vulnerability where forward context provides value is **inc
 
 Rather than using forward context to surface these issues passively, this system surfaces them actively through the security model's on-the-fly generation:
 
-1. **Invariant discovery.** When the auditor encounters a security-relevant pattern during a backward-context audit pass (e.g., a role-based access check on a state-modifying function), they register it as a threat or invariant in the security model, linked to the relevant feature — or create a new feature if none exists. The incremental update pipeline propagates this addition.
+1. **Invariant discovery.** When the auditor encounters a security-relevant pattern during a backward-context audit pass (e.g., a role-based access check on a state-modifying function), they register it as a threat or invariant in the security model, linked to the relevant feature — or create a new feature and behavior if none exists. The incremental update pipeline propagates this addition.
 
 2. **Propagation via re-check.** The system applies the new invariant to all previously-audited subjects within its scope. Any function that modifies the same state but lacks the expected check is flagged mechanically, without requiring forward context at the point of origin.
 
