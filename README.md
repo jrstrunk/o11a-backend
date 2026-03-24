@@ -5,7 +5,7 @@ The o11a backend has five modules that form a processing pipeline:
  2. Analyzer - analyzes the audit source, producing a directory of definitions and their attributes, allowing clients to fetch structured audit data
  3. Formatter - transforms the AST into formatter nodes
  4. Collaborator - stores discussion topics and the comments under them, allowing clients to post new comments and approve or disapprove of comments from other users
- 5. Checker - checks variable constraints and allows clients to post new constraints to be checked, providing data on any conflicting constraints
+ 5. Checker - checks variable constraints, manages the security model of features, requirements, threats, and invariants, and allows clients to post new constraints to be checked, providing data on any conflicting constraints
 
 # Parser
 
@@ -92,13 +92,92 @@ Users can leave discussion comments on any topic. These comments are first class
 
 # Checker
 
-The checker is responsible for checking the subjects of convergences across the audit for contradictions in their properties. If the properties at a convergence contradict, that is a potential place for a vulnerability or implementation flaw.
+The checker is responsible for two things: checking the subjects of convergences across the audit for contradictions in their properties, and managing the security model that defines what properties should hold. If the properties at a convergence contradict, that is a potential place for a vulnerability or implementation flaw.
+
+## Security Model
+
+The security model is the structured representation of what the code is supposed to do, what could go wrong, and which source locations are relevant to each concern. It is built incrementally throughout the audit — seeded from project documentation and refined on-the-fly as auditors review code and discover new concerns.
+
+### Design Principles
+
+**Documentation is untrusted.** Developer docs represent claimed behavior, not verified truth. The system treats them as input to reason about, not as a source of correctness.
+
+**Features describe behavior, not implementation.** Feature names and descriptions are written at the user-visible or protocol level. A pause mechanism is a feature whether the docs describe it as "emergency stop" or "modifier onlyOwner on pause()".
+
+**Requirements describe the happy path.** Requirements are descriptions of what the code must do to complete the feature — the concrete behaviors that, taken together, constitute the feature working correctly. They describe user-facing or protocol-level functionality: what value the code provides when everything goes right. They are not threat-oriented or defensive; they state what must happen, not what could go wrong.
+
+**Invariants describe the defensive path.** Invariants are properties the code must uphold to protect against threats. They do not add user or protocol functionality — they prevent abuse of it. Access control, for example, is not a requirement of any feature (it provides no functionality to users), but it is an invariant that defends against the threat of unauthorized access. The distinction is: requirements define what the system does, invariants define what the system must not allow.
+
+**Source links connect scope to code.** Requirements are linked to the contract members they apply to, giving auditors a starting point without prescribing what to look for.
+
+### Initial Generation
+
+The security model is initially seeded from project documentation through an automated pipeline:
+
+**1. Feature Extraction.** Documentation files are processed to extract behavioral features and their happy-path requirements. When multiple documents exist, each is analyzed independently and the results are consolidated into a unified feature set. During consolidation, broad features with overlapping requirements are dissolved into more specific ones. Each requirement retains links to the documentation it was derived from, preserving traceability to the original developer claims.
+
+**2. Threat and Invariant Generation.** For each feature, the pipeline generates threats and invariants — properties that must hold for the system to be secure. Each threat carries a severity rating. When the project includes security notes (developer-documented threats, roles, known invariants), a review pass checks whether those concerns are covered and fills gaps.
+
+Threats belong to features, not to requirements, which avoids duplication when multiple requirements share a threat. However, each requirement carries threat links indicating which of the feature's threats are relevant to it. Some threats apply broadly to the feature regardless of any particular requirement, while others are introduced or made relevant by specific requirements. For example, a reentrancy-via-callback threat is specifically relevant to the ERC20 collateral requirement but not to the ETH collateral requirement, while an unauthorized withdrawal threat applies to the feature as a whole. Requirements that introduce or are affected by a threat store a link to that threat; the threat itself does not need to know which requirements reference it.
+
+Threats are few and general, derived from project documentation and the behavioral features. Invariants are many and specific to the implementation, each defining a concrete property that must hold to defend against a threat. A threat may be that users can lose funds; invariants against that threat may be that funds cannot be sent to an irrecoverable address, or that balances cannot underflow. The hierarchy flows from documentation to features to threats to invariants to source code.
+
+Where requirements and invariants both describe things the code must do, they serve opposite concerns. Requirements describe the functionality that makes a feature work — the behaviors users and the protocol depend on. Invariants describe the constraints that keep that functionality safe — the defensive properties that prevent threats from materializing. A collateral lending feature requires the ability to deposit ETH (functionality), but the invariant that only the position owner can withdraw collateral (defense) exists to protect against a threat, not to provide a feature. Code that implements a requirement delivers value; code that upholds an invariant prevents harm.
+
+**3. Requirement-to-Source Linking.** Each (contract, feature) pair is evaluated to determine which contract members are relevant to each requirement. This produces requirement-to-source links: a map from each requirement to the concrete code locations responsible for fulfilling it.
+
+### On-the-Fly Generation
+
+The security model is not static after initial generation. As auditors review code and encounter security-relevant patterns, they add new features, requirements, threats, and invariants directly from the code context. This on-the-fly generation is the primary mechanism through which the audit achieves comprehensive coverage.
+
+When a user adds a new element to the security model, the relevant pipeline steps run automatically in the background:
+
+- **New feature** — Generates threats and invariants for the feature, then links its requirements to source.
+- **New requirement** — Links that single requirement to source, then generates threats against the feature using the new requirement as context. If the generation produces a threat that already exists on the feature, the new requirement adds a threat link to the existing threat rather than creating a duplicate. Genuinely new threats are created on the feature, and the requirement stores links to them.
+- **New invariant or threat** — The system triggers re-checks against all previously-audited subjects that fall within the invariant's scope, flagging any that do not satisfy the new property.
+
+The user's request completes immediately; background work finishes asynchronously.
+
+This re-check mechanism is what makes the system's backward-only evaluation context sufficient for comprehensive coverage (see Subject Evaluation Context Strategy below). Rather than including forward context to passively surface gaps, the system actively propagates newly-discovered concerns to all relevant code locations. When an auditor notices an access control check on one function and registers it as an invariant, every other function within that invariant's scope is mechanically re-evaluated — surfacing any that lack the expected check without the auditor needing to have seen all those functions in the same context window.
+
+### Hierarchy
+
+```
+Feature
+  "Collateral Lending"
+  ├── Requirement                                          ← happy path: what the code must do
+  │     "Must support ETH as collateral"
+  │     ├── Source Links: [depositETH(), getCollateralValue(), liquidate()]
+  │     └── Threat Links: ["Unauthorized withdrawal...", "Price oracle manipulation..."]
+  ├── Requirement
+  │     "Must support ERC20 tokens as collateral"
+  │     ├── Source Links: [depositERC20(), getCollateralValue(), liquidate()]
+  │     └── Threat Links: ["Unauthorized withdrawal...", "Reentrancy via callback...", "Price oracle..."]
+  ├── Requirement
+  │     "Must liquidate undercollateralized positions"
+  │     ├── Source Links: [liquidate(), getHealthFactor(), getCollateralValue()]
+  │     └── Threat Links: ["Undercollateralized position persists..."]
+  ├── Threat                                               ← defensive: what the code must prevent
+  │     "Unauthorized withdrawal of another user's collateral"
+  │     └── Invariant: "Only position owner can withdraw collateral"
+  ├── Threat
+  │     "Reentrancy via token callback"
+  │     └── Invariant: "State updates precede external calls"
+  ├── Threat
+  │     "Collateral value manipulation via price oracle"
+  │     └── Invariant: "Price oracle cannot be updated by borrowers"
+  └── Threat
+        "Undercollateralized position persists after price drop"
+        └── Invariant: "Liquidation is callable by any account when health factor < 1"
+```
+
+## Convergences
 
 Across the audit, two types of convergences are checked for contradictions:
  1. Type Convergences (where two values interact with each other via an operator)
- 2. Specification Convergences (where many pieces of code implement a functional specification)
+ 2. Specification Convergences (where many pieces of code implement a behavioral feature)
 
-## Type Convergence
+### Type Convergence
 
 There are many type properties that can be checked on the subjects of a type convergence, depending on the type of subject:
  - All:
@@ -130,8 +209,6 @@ Type convergences are purely logical and can be checked for contradictions by a 
 
 Type constraints help identify values that cause error conditions.
 
-### Managing Type Convergences
-
 #### Variable Ancestors
 
 Function parameters each have ancestors that are the call arguments which correspond to the function parameters. A parameter may have many ancestors, as it has one for each call to that function. In the case of a function that is only called once, the parameter ancestors can be thought of as the same as the parameter itself. This is called a transitive ancestor. In the analysis, both the subject and ancestor can be given the same topic so they will be treated as the same in the audit.
@@ -140,17 +217,15 @@ Ancestors can be literal values.
 
 When auditing a variable, it is useful for the client to present all of its ancestors to the user to check at once. This may reveal a common pattern or outlier among the ancestors.
 
-#### Variable Descendants
+### Specification Convergence
 
-Variable descendants are the function parameters that are passed the subject variable. A variable may have many descendants if it is passed into multiple functions. When auditing a variable, it is useful for the client to present all of its descendants to the user to check at once. This may reveal how a variable value propagates through the codebase, seeing the properties of the places it ends up, especially into other contracts and blocks of logic.
-
-## Specification Convergence
+Specification convergences verify that the implementation of a subject upholds the properties defined in the security model. Where type convergences check mechanical type properties, specification convergences check that the happy-path functionality captured in requirements and the defensive constraints captured in invariants are faithfully implemented in code.
 
 There are three types of properties that may be checked on the subjects of a specification convergence, depending on the kind of subject:
  - Project Implementation, Contracts, Blocks, Statements:
-   1. Functional Purpose (what purpose it serves within the context of the application)
-   2. Functional Requirements (what it has to do and not to do to fulfill the functional purpose)
-   3. Functional Dependencies (what it depends on to fulfill the functional purpose)
+   1. Functional Purpose (what purpose it serves within the context of the application, derived from the feature it belongs to)
+   2. Requirements (the feature requirements that apply to this subject, as determined by requirement-to-source linking)
+   3. Dependencies (what the subject depends on to fulfill its purpose, expressed as links to other statements or mechanisms)
  - Expressions and Values:
    1. Functional Semantics (what it represents within the context of the application)
 
@@ -163,22 +238,17 @@ Specification properties converge between the declaration and implementation of 
  - Statements (checked that the sum of the properties of the expressions in the statement match the properties of the statement)
  - Expressions (checked that the the properties of the values/subexpressions in context of the operation match the properties of the expression)
 
-Specification properties are intrinsic to the project documentation, and these properties converge with the project implementation's specification properties.
+Specification properties are intrinsic to the project's security model, and these properties converge with the project implementation's specification properties.
 
 Specification convergences are based on project-specific design and cannot be checked by an algorithm. Instead, they must be manually verified to uphold within the unique project environment.
 
-Should statements be actual source statements, or a semantic grouping of statements based on extra whitespace in the source?
+#### Function Call Convergences
 
-### Function Call Convergences
-
-Function calls are an expression that has a subexpression of argument list passing, which results in the return value of the function. Because of this, function calls have both semantic properties based on their return value to can be checked with other semantic properties in a straightforward way, and other functional properties.
+Function calls are an expression that has a subexpression of argument list passing, which results in the return value of the function. Because of this, function calls have both semantic properties based on their return value that can be checked with other semantic properties in a straightforward way, and other functional properties.
 
 Index access only has semantic properties like values.
 
-Functions have a semantic return value can converge with other semantic properties in an expression, but they also have functional properties. These functional properties may not affect the semantics of the expression, but they converge with the containing statement's functional properties. For example, `add(a, b) - c` has a semantic property convergence at `the_result_of_add_a_b - c` to form one semantic property for the expression, but the functional properties of `add` converge with the containing statement's functional properties to make sure they fulfill the containing statement's functional requirements and align with its purpose.
-
-
-Can we have a convergence property graph that represents the properties that are dependent on other properties, so that if a property downstream of something is contradicted, we can see how it affects the upstream properties? Maybe all requirements stem from an underlying invariant (which all stem from an attack vector), so when a property is contradicted, we can immediately trace it back through the graph to see how and which invariant is violated.
+Functions have a semantic return value that can converge with other semantic properties in an expression, but they also have functional properties. These functional properties may not affect the semantics of the expression, but they converge with the containing statement's functional properties. For example, `add(a, b) - c` has a semantic property convergence at `the_result_of_add_a_b - c` to form one semantic property for the expression, but the functional properties of `add` converge with the containing statement's functional properties to make sure they fulfill the containing statement's requirements and align with its purpose.
 
 #### Function Call Signatures
 
@@ -188,76 +258,65 @@ Functions need to track side effects and present them to the user in the interfa
 
 ### Managing Functional Purpose
 
-The functional purpose is the business logic reason for a statement—the "why" that statement is there. Try to avoid implementation details here, and focus on the business logic. "Why" is not "to do the thing it does". It is "from the project perspective, what value does this statement provide?", and "what impact would it have on the users or system if it weren't there?"
+The functional purpose is the business logic reason for a statement — the "why" that statement is there. Functional purpose is derived from the feature the subject belongs to in the security model. Try to avoid implementation details here, and focus on the business logic. "Why" is not "to do the thing it does". It is "from the project perspective, what value does this statement provide?", and "what impact would it have on the users or system if it weren't there?"
 
 When adding functional purposes, preset questions are presented to the user that help guide them in thinking about the purpose correctly. The purpose is NOT what it does, but WHY it does it.
 
 Functional purposes can be categorized, which will adjust the preset questions for the user to answer. Some of the categories could be for Shared Resources, Authorization, or Reentry Guards. This will make sure the user is reminded of common issues with these things, like a DOS exhaustion of a shared resource.
 
-### Managing Functional Requirements
+### Managing Requirements
 
-One subject may have many functional requirements. All functional requirements are distinct and independent of each other.
+Requirements are happy-path descriptions of what the code must do to complete a feature. Each requirement states a concrete behavior — something the system needs to accomplish for the feature to work correctly. For example, a "Collateral Lending" feature might require supporting ETH as collateral, supporting ERC20 tokens as collateral, and liquidating undercollateralized positions. These are not investigative prompts or threat descriptions; they describe the intended functionality that the auditor then verifies the code actually implements.
 
-Functional requirement properties are added to a definition initially as unverified, then are able to be marked as verified by each party in the audit as they review convergences. When reviewing a specification convergence (comparing definition requirements to containing item purposes), each functional requirement should be reviewed and marked as verified or contradicted independently of the others.
+Requirements are defined at the feature level in the security model and linked to source code by the requirement-to-source linking step. At the code level, each subject inherits the requirements of the features it is linked to.
 
-Functional requirements have dependencies attached to them. When a functional requirement is added to a subject, it needs to have a reason for that requirement. Whatever depends on that requirement is a dependency. In every place a function is called, if it has to uphold a certain property, it should be listed as a dependency of the requirement. This way, if the requirement is contradicted, we can immediately trace it back through the graph to see how and which invariant is violated.
+All requirements on a subject are distinct and independent of each other. Requirements are added to a subject initially as unverified, then are able to be marked as verified by each party in the audit as they review convergences. When reviewing a specification convergence (comparing a subject's implementation to its inherited requirements), each requirement should be reviewed and marked as verified or contradicted independently of the others.
 
-Functional requirements are generally explored as the usage of the subject is studied; therefore, it is important that clients allow users to see and add functional requirements to the subject at a call site.
+Each requirement is traceable to its parent feature, and carries threat links to the specific threats it is affected by. This allows the client to show which threats are relevant when an auditor is reviewing code linked to a particular requirement, filtering out unrelated threats on the same feature. When a requirement is contradicted, this traceability identifies the security impact: which threats become viable and which invariants are violated. The security model's hierarchy provides this dependency structure.
 
-### Managing Functional Dependencies
+Requirements are generally explored as the usage of the subject is studied; therefore, it is important that clients allow users to see and add requirements to the subject at a call site. When a user adds a new requirement during code review, the incremental update pipeline links it to source, generates threats using the new requirement as context (deduplicating against existing threats on the feature), and then the checker re-evaluates all affected convergences.
 
-Functional dependencies can only be satisfied by statements, not expressions or values.
+### Managing Dependencies
 
-Functional dependencies are things that a subject depends on outside of its interface (and thus cannot be expressed by a type constraint). These are things like a stateful function that requires another block to set some required piece of state for it to work with. Like an emergency exit function that requires an exit address to be set first. Because the dependency can be fulfilled by another block far away from the subject, statement chains have to be tracked throughout the project so we can tell where a project dependency could be fulfilled. To mark a dependency as fulfilled, the user has to provide a statement id that satisfies the dependency. This statement then becomes a convergence point for the functional dependency properties of the subject.
+Dependencies are things that a subject depends on outside of its interface (and thus cannot be expressed by a type constraint). These are things like a stateful function that requires another block to set some required piece of state for it to work with. Like an emergency exit function that requires an exit address to be set first. Because the dependency can be fulfilled by another block far away from the subject, statement chains have to be tracked throughout the project so we can tell where a project dependency could be fulfilled. To mark a dependency as fulfilled, the user has to provide a statement id that satisfies the dependency. This statement then becomes a convergence point for the dependency.
 
-Statement chains are as follows: there is a main, same block chain. This represents all the statements before the subject in the same block. If the dependency is satisfied by one of these statements, then the dependency will always be satisified and we can mark it as verified. If these same-block statements do not satisfy the dependency, then it may be satisfied by a statement above the containing block in the same function, but not in sub-statements of prior sibling statements (this makes it so that both blocks of an if/else statement are blanked checked as one). If statements within the containing function do not satisfy the dependency, then it may be satisfied within the constructor statements. If is it not satisfied within the constructor, then it may be satisfied within a prior sibling statement in each block where the containing function is called. (If the containing function is an external function, then the dependency can be found anywhere in the project, as they will have to be two separate user calls.) If one of the calls does not satisfy the dependency, then it is unsatisfied as a whole. If the immediate call block does not satisfy the dependency, then a prior block in ethe call chain is searched for in the same way as the original same block chain.
+Statement chains are as follows: there is a main, same block chain. This represents all the statements before the subject in the same block. If the dependency is satisfied by one of these statements, then the dependency will always be satisfied and we can mark it as verified. If these same-block statements do not satisfy the dependency, then it may be satisfied by a statement above the containing block in the same function, but not in sub-statements of prior sibling statements (this makes it so that both blocks of an if/else statement are blanket checked as one). If statements within the containing function do not satisfy the dependency, then it may be satisfied within the constructor statements. If it is not satisfied within the constructor, then it may be satisfied within a prior sibling statement in each block where the containing function is called. (If the containing function is an external function, then the dependency can be found anywhere in the project, as they will have to be two separate user calls.) If one of the calls does not satisfy the dependency, then it is unsatisfied as a whole. If the immediate call block does not satisfy the dependency, then a prior block in the call chain is searched for in the same way as the original same block chain.
 
-Referencing mutable values (notibly state variables, but mutable local variables too) will always have a Functional Dependency associated. Mutations to the state variable that happen always within the call chain of the statement must be considered, and introduce local variable refinements (ie., a variable may always be non-zero in one place it is referenced, but not in another because of the checks / mutations that happen before it in a chain). Because of this, a reference to a mutable variable will have its own topic (which represents the unique state of the referenced variable at the reference point), while also being linked to the topic of the variable itself (maybe it is linked as an ancestor). A reference to a immutable variable can be treated as the same topic as the variable itself.
+Referencing mutable values (notably state variables, but mutable local variables too) will always have a dependency associated. Mutations to the state variable that happen always within the call chain of the statement must be considered, and introduce local variable refinements (i.e., a variable may always be non-zero in one place it is referenced, but not in another because of the checks/mutations that happen before it in a chain). Because of this, a reference to a mutable variable will have its own topic (which represents the unique state of the referenced variable at the reference point), while also being linked to the topic of the variable itself. A reference to an immutable variable can be treated as the same topic as the variable itself.
 
 To implement this, we can gather all statements that could satisfy the dependency (when a dependency is added, as many statements will have none and we do not want to waste time processing them) and store them as a tree, with the subject being the root, and tree depth representing prior statements. Then we take the statements that the user said satisfied the dependency, and search for a path to a leaf statement that does not encounter one of the satisfying statements. If we can get to a leaf without encountering a satisfying statement, then that is a path to the subject where the dependency is not satisfied, and the dependency is not satisfied as a whole. A leaf node would be some entry point to the project, like a public function. For this implementation, we would have to store an AST of statements to pull the sub-trees from to get the subject as the root.
 
-### Managing Functional Consumers
+### Managing Consumers
 
-A functional consumer is a statement that consumes what was set up by the current statement. A functional dependency checks that something was set up before the current statement, and a functional consumer checks that what is set up by the current statement is preperly used by later statements. A functional consumer turns into a functional dependency on the consuming statement when it is linked, and a functional dependency turns into a functional consumer on the consuming statement when it is linked, and so they can both be checked in the same way. Dependencies and consumers cannot be checked exhuastively, so checking for the existence or fullness of them is an important job of the auditor. When a statement has a side effect, at least one functional consumer must exist and should be searched for. The consumer is first added in an unsatisfied state, and added for satisfaction when a satifying statement is found. Checking for a least one consumer is a way to make sure that something is not set up, and then forgotten to be consumed, indicating a potential bug.
+A consumer is a statement that consumes what was set up by the current statement. A dependency checks that something was set up before the current statement, and a consumer checks that what is set up by the current statement is properly used by later statements. A consumer turns into a dependency on the consuming statement when it is linked, and a dependency turns into a consumer on the depended-upon statement when it is linked, so they can both be checked in the same way. Dependencies and consumers cannot be checked exhaustively, so checking for the existence or fullness of them is an important job of the auditor. When a statement has a side effect, at least one consumer must exist and should be searched for. The consumer is first added in an unsatisfied state, and added for satisfaction when a satisfying statement is found. Checking for at least one consumer is a way to make sure that something is not set up and then forgotten to be consumed, indicating a potential bug.
 
-### Managing Functional Failure Points
+### Threat Traceability at the Code Level
 
-The functional failure points are a list of things that could invalidate the current functional property. These things help the auditor enumerate what could go wrong, and serve like a checklist of things to check.
+Each topic in the audit has a "threatened by" section that links to the threats it is subject to. These threat links provide the auditor with immediate visibility into why a particular piece of code matters from a security perspective, and what the consequences of a flaw would be. Because invariants belong to threats, and threats belong to features, any contradicted convergence can be traced from the specific code location through the full hierarchy to the behavioral feature and documentation that established the concern.
 
-### Managing Functional Failure Consequences
-
-There needs to be a way to state the severity of a functional property not holding so that the auditor can prioritize the importance of the property. Maybe the functional property can be linked to an attack vector as a defense to it, so that the consequence of a statement can be understood. Then, each attack vector can be linked to an invariant, which has a severity.
-
-What is the difference in stating an invariant and an attack vector -- are they inverses? What is the relationship between an invariant/attack vector and a convergence. Does the convergence uphold an invariant, or defend against an attack vector? Answer: Invariants are few and general, attack vectors are many and specific to the implementation. Project documentation informs invariants, and implementation informs attack vectors. An invariant may be that users cannot lose funds, an attack vector may be that funds can be sent to an irrecoverable address, or that funds can be burned -- both invalidate the invariant. I think each topic should have a "threatened by", "subject to", or "targeted by" section that attaches to an attack vector, then each attack vector is attached to an invariant. So, the flow is 1. read the documentation and enstablish protocol design invariants. 2. read the implementation and establish attack vectors. 3. work through functional requirements and establish the attack vector a topic is subject to.
-
-## Implementation Patterns
-
-Keeping note of implementation patterns (or similarly reused logic throughout the codebase) are a good way to determine when logic may be missing or misaligned, and helps show implementation assumptions that may not be in the documentation. It can show assumptions that are completely missing from the documentation, or may highlight the *how* for the documentation's *what*. For example, the documentation may state that each function should emit an event when state changes. If every function except one then keys the event by some ID, then when looking at that function individually, the auditor may not notice that it is missing the event key because it still adheres to the vauge documentation, yet if a pattern had been established that all events are keyed (then it may reveal that the developers knew event keying was important (and that is why they did it everywhere else)), then if the one function without it was checked for adherance to the implementation patterns, then it would have become clear that the event key was missing. Patterns give concise checks against the rest of the codebase without having to pull the rest of the codebase into the current context.
-
-For another example, maybe a codebase always submits some data to an integration, but forgets one place. It is hard to identify when logic is missing, but the identifying the pattern of consistently submitting the data in other places may help highlight where it is missing.
-
-When viewing the expanded context of a named topic is a good time to gather patterns, as you can see in one place how that variable effects the rest of the codebase and can identify any patterns with it. Each topic should have a prompt for checking for new patterns with the context of the subject topic, and for checking that the subjec topic adheres to the implementation patterns.
+This traceability also enables prioritization: when the auditor is evaluating a convergence, the severity of the linked threats determines how much scrutiny the convergence warrants. The threat links stored on requirements further refine this: when an auditor is working within the scope of a specific requirement, the client can filter to show only the threats that requirement links to, keeping the view focused.
 
 ## Auditing Convergences
 
-Patterns annotate type constraint checks and can be checked by a constraint algorithm. Specification constraint checks are annotated in regular language with business logic and can only be checked by something that understands the specific business logic semantics.
+Type constraint checks can be checked by a constraint algorithm. Specification convergence checks are annotated in regular language with business logic and can only be checked by something that understands the specific business logic semantics.
 
 General audit flow is:
  1. Read and understand the docs and the purpose of the project
- 2. List out project features, linking each section of the documentation that informs the feature
- 3. Brainstorm invariants for each feature, linking them
- 4. Read the code, noting what every variable is, is used for, and its type and specification properties, linking them to the feature invariants they uphold and listing the attack vectors they are subject to
- 5. Step through all convergences, checking that the properties hold up correctly (types and specifications), and noting the invariants that uphold the attack vectors as functional requirements
+ 2. Run the initial generation pipeline to extract features, requirements, threats, and invariants from the documentation, and link requirements to source
+ 3. Review and refine the generated security model, adding missing features or requirements as needed (incremental updates handle re-linking and re-checking automatically)
+ 4. Read the code, noting what every variable is, is used for, and its type and specification properties, linking them to the threats they are subject to
+ 5. Step through all convergences, checking that the properties hold up correctly (types and specifications), with contradictions traceable through the threat and invariant hierarchy to their security impact
+ 6. As new features, requirements, threats, or invariants are discovered during code review, add them to the security model — the re-check system propagates them to all previously-audited subjects, ensuring nothing is missed
 
 ### Managing Convergences
 
-Convergences are the main point of verification in the audit process. They have four states: waiting, unverified, verified, and contradicted. A waiting convergence is one is waiting for properties to be added to its parts, ie `a + b`, but `a` does not have any properties added so we cannot judge the convergence.
+Convergences are the main point of verification in the audit process. They have four states: waiting, unverified, verified, and contradicted. A waiting convergence is one that is waiting for properties to be added to its parts, i.e. `a + b`, but `a` does not have any properties added so we cannot judge the convergence.
 
 ## Subject Evaluation Context Strategy
 
 When evaluating subjects for invariant upholding or invariant recognition, we use **backward-only context** as the default strategy. When auditing a given subject, the system provides context about where the subject's values originated — their data provenance, taint sources, and upstream transformations — but does not, by default, include forward context about where those values propagate to downstream.
 
-This is a deliberate architectural choice, not a limitation. The system compensates for the absence of forward context through its **on-the-fly invariant tracking and re-check mechanism**, which provides equivalent or superior coverage to bidirectional context while maintaining focused, low-noise audit passes.
+This is a deliberate architectural choice, not a limitation. The system compensates for the absence of forward context through the **security model's on-the-fly generation and re-check mechanism**, which provides equivalent or superior coverage to bidirectional context while maintaining focused, low-noise audit passes.
 
 ### Why Not Bidirectional Context
 
@@ -269,19 +328,19 @@ However, this advantage is narrower than it first appears, for two reasons.
 
 **Forward context introduces noise that degrades audit quality.** Forward propagation scales with the number of consumers of a state variable. In smart contracts, heavily-read state variables (token balances, approval mappings, configuration parameters) may be referenced across many functions. Including all downstream consumers in the context of every audit pass dilutes the signal about the specific code under review. For LLM auditors in particular, this context dilution measurably degrades reasoning about the subject at hand. Backward-only context keeps each audit pass lean and focused on the immediate code being evaluated.
 
-### How the Invariant System Closes the Gap
+### How the Security Model Closes the Gap
 
 The primary class of vulnerability where forward context provides value is **incomplete invariant enforcement**: cases where a check or pattern should be applied uniformly across a set of functions but is missing from one or more of them. The canonical smart contract examples are access control gaps (a modifier guards some privileged functions but not all) and economic invariant violations (some functions that modify a balance correctly maintain a sum-total relationship while others do not).
 
-Rather than using forward context to surface these issues passively, this system surfaces them actively through invariant tracking:
+Rather than using forward context to surface these issues passively, this system surfaces them actively through the security model's on-the-fly generation:
 
-1. **Invariant discovery.** When the auditor encounters a pattern during a backward-context audit pass (e.g., a role-based access check on a state-modifying function), they register it as an invariant linked to the relevant code.
+1. **Invariant discovery.** When the auditor encounters a security-relevant pattern during a backward-context audit pass (e.g., a role-based access check on a state-modifying function), they register it as a threat or invariant in the security model, linked to the relevant feature — or create a new feature if none exists. The incremental update pipeline propagates this addition.
 
-2. **Propagation via re-check.** The system applies the new invariant to all previously-audited subjects. Any function that modifies the same state but lacks the expected check is flagged mechanically, without requiring forward context at the point of origin.
+2. **Propagation via re-check.** The system applies the new invariant to all previously-audited subjects within its scope. Any function that modifies the same state but lacks the expected check is flagged mechanically, without requiring forward context at the point of origin.
 
 3. **Completeness guarantee.** Because the audit is programmatic and covers every variable and statement, the re-check mechanism provides exhaustive coverage. Once an invariant is articulated, no violation can escape detection. This is stronger than forward context, which still depends on an auditor noticing a discrepancy within a potentially large list of destinations.
 
-This architecture cleanly separates two concerns that bidirectional context conflates: understanding what a specific piece of code does (served by focused backward context) and verifying that invariants hold globally (served by the re-check system). Each concern is handled by a mechanism optimized for it.
+This architecture cleanly separates two concerns that bidirectional context conflates: understanding what a specific piece of code does (served by focused backward context) and verifying that invariants hold globally (served by the security model's re-check system). Each concern is handled by a mechanism optimized for it.
 
 ### Known Limitations and Mitigations
 
@@ -289,8 +348,8 @@ The backward-only strategy with invariant re-checking has one residual limitatio
 
 **Subtle semantic distinctions.** Some invariants require recognizing that two superficially similar operations are categorically different. For example, a function that writes to `balances[msg.sender]` (self-modification) versus one that writes to `balances[account]` (arbitrary-address modification) may both appear as simple mapping writes, but only the latter requires elevated privilege. Forward context does not inherently make this distinction more visible — the auditor must apply domain knowledge in either case — but the system should include heuristic prompts that direct attention to these distinctions. Examples include flagging functions that modify state keyed by a caller-supplied address, or functions that bypass standard entry points.
 
-**Absent mechanisms.** If a contract should implement a security pattern (such as a pause mechanism) but does not, no backward-context encounter will contain a reference to the missing pattern. This class of finding is better addressed by a checklist of expected security patterns for the contract type, applied as a design-review pass separate from variable-level auditing. This is an inherent scope boundary of code-level auditing regardless of context strategy.
+**Absent mechanisms.** If a contract should implement a security pattern (such as a pause mechanism) but does not, no backward-context encounter will contain a reference to the missing pattern. This class of finding is addressed by the initial generation pipeline's threat and invariant generation step, which derives expected security mechanisms from the project's documentation and feature set independently of what the code contains. When the initial generation identifies that a feature implies a pause mechanism, the corresponding invariant is checked against the codebase regardless of whether any code references pausing.
 
 ### Summary
 
-The backward-only context strategy is not a cost-saving approximation of bidirectional analysis. It is a design that optimizes for audit quality by keeping individual audit passes focused, while relying on the invariant system to provide the global coverage that forward context would otherwise supply. The invariant system achieves this coverage more reliably — mechanically and exhaustively — once an invariant is identified, and the investment in invariant discovery heuristics and pattern templates compounds across engagements in a way that raw forward context never does.
+The backward-only context strategy is not a cost-saving approximation of bidirectional analysis. It is a design that optimizes for audit quality by keeping individual audit passes focused, while relying on the security model to provide the global coverage that forward context would otherwise supply. The security model achieves this coverage more reliably — mechanically and exhaustively — once an invariant is identified, and the investment in invariant discovery heuristics and threat generation compounds across engagements in a way that raw forward context never does.
