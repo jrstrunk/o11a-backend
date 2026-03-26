@@ -106,9 +106,11 @@ The security model is the structured representation of what the documentation cl
 
 **Requirements capture all documented claims.** Requirements are what the documentation says the system does. They can describe any kind of documented behavior — functionality, constraints, access control, edge case handling. They are extracted from documentation and verified by confirming that corresponding behaviors exist in the implementation.
 
-**Behaviors capture what the code actually does.** Behaviors are observed during code review and represent the real implementation logic. They carry threat links because threats exploit real code, not documentation claims. Behaviors are the subjects that invariants protect.
+**Behaviors capture what the code actually does.** Behaviors are observed during code review and represent the real implementation logic. They are reconciliation artifacts — compared against requirements to surface gaps between documentation and implementation.
 
-**Invariants describe the defensive path.** Invariants are properties the code must uphold to protect against threats. They do not add user or protocol functionality — they prevent abuse of it. Access control, for example, provides no functionality to users, but it is an invariant that defends against the threat of unauthorized access. The distinction is: behaviors define what the system does, invariants define what the system must not allow.
+**Threats operate at two levels.** Feature-level threats capture design-level risks derived from documentation and features — broad concerns like "unauthorized fund access." Subject-level threats capture implementation-specific risks on non-pure source code subjects (state reads, state writes, external calls) — specific concerns like "reentrancy via token callback in this external call." Pure operations (arithmetic, comparisons, local variable assignments) are excluded from subject-level threat generation because their threat surface is fully covered by type convergences and their correctness is checked by functional semantics.
+
+**Invariants live on source code subjects.** Invariants are properties the code must uphold to protect against threats. They are attached directly to the source subjects where they are checked at convergences, not to abstract structures like behaviors. This eliminates indirection — when the auditor evaluates a convergence, the invariants that apply are immediately present. Invariants are generated from both feature-level threats (broad invariants that apply across a feature's source subjects) and subject-level threats (specific invariants on individual non-pure subjects). Each invariant links back to its parent threat for traceability.
 
 **Source locations link to features.** Contract members are linked to the features they participate in. This allows behaviors created during code review to automatically associate with the right features, and enables reconciliation between documented requirements and observed behaviors.
 
@@ -118,11 +120,11 @@ The security model is initially seeded from project documentation through an aut
 
 **1. Feature Extraction.** Documentation files are processed to extract behavioral features and their requirements. When multiple documents exist, each is analyzed independently and the results are consolidated into a unified feature set. During consolidation, broad features with overlapping requirements are dissolved into more specific ones. Each requirement retains links to the documentation it was derived from, preserving traceability to the original developer claims.
 
-**2. Threat and Invariant Generation.** For each feature, the pipeline generates threats and invariants — properties that must hold for the system to be secure. Each threat carries a severity rating. When the project includes security notes (developer-documented threats, roles, known invariants), a review pass checks whether those concerns are covered and fills gaps.
+**2. Threat and Invariant Generation.** For each feature, the pipeline generates feature-level threats — design-level risks derived from the feature's documentation and requirements. Each threat carries a severity rating. When the project includes security notes (developer-documented threats, roles, known invariants), a review pass checks whether those concerns are covered and fills gaps. Feature-level invariants are generated from these threats and attached to the source subjects within the feature's scope.
 
-Threats are few and general, derived from project documentation and the behavioral features. Invariants are many and specific to the implementation, each defining a concrete property that must hold to defend against a threat. A threat may be that users can lose funds; invariants against that threat may be that funds cannot be sent to an irrecoverable address, or that balances cannot underflow. The hierarchy flows from documentation to features to threats to invariants to source code.
+Feature-level threats are few and general, derived from project documentation and the behavioral features. A threat may be that users can lose funds; invariants against that threat may be that funds cannot be sent to an irrecoverable address, or that balances cannot underflow. The hierarchy flows from documentation to features to threats to invariants on source subjects.
 
-Where requirements and invariants both describe things the code must do, they serve different concerns. Requirements capture what the documentation claims — the functionality described to users or the protocol. Invariants capture what the code must enforce to protect against threats — the defensive properties that prevent threats from materializing. A collateral lending feature has a documented requirement that users can deposit ETH, but the invariant that only the position owner can withdraw collateral exists to protect against a threat, not to fulfill a documented claim. Requirements are verified by matching them to behaviors; invariants are verified by checking them against convergences in the source code.
+Where requirements and invariants both describe things the code must do, they serve different concerns. Requirements capture what the documentation claims — the functionality described to users or the protocol. Invariants capture what the code must enforce to protect against threats — the defensive properties that prevent threats from materializing. A collateral lending feature has a documented requirement that users can deposit ETH, but the invariant that only the position owner can withdraw collateral exists to protect against a threat, not to fulfill a documented claim. Requirements are verified by matching them to behaviors during reconciliation; invariants are verified by checking them against convergences in the source code.
 
 **3. Source-to-Feature Linking.** Each contract member in scope is evaluated to determine which features it participates in. This produces source-to-feature links: a map from concrete code locations to the features they implement. A function can link to more than one feature. This mapping is the mechanism through which behaviors created during code review are automatically associated with the correct features — when an auditor adds a behavior while reviewing a function, the behavior inherits the feature association from the source location.
 
@@ -132,10 +134,12 @@ The security model is not static after initial generation. As auditors review co
 
 When a user adds a new element to the security model, the relevant pipeline steps run automatically in the background:
 
-- **New feature** — Generates threats and invariants for the feature, then links source locations to it.
+- **New feature** — Generates feature-level threats, then links source locations to the feature. Invariants from the generated threats are attached to the source subjects within the feature's scope.
 - **New requirement** — Added to its parent feature. Requirements do not trigger threat generation or source linking; they are documentation claims that will be verified during reconciliation against behaviors.
-- **New behavior** — Created during code review and automatically associated with a feature via the source-to-feature link on the source location where it was observed. Threat generation runs against the feature using the new behavior as context. If the generation produces a threat that already exists on the feature, the new behavior adds a threat link to the existing threat rather than creating a duplicate. Genuinely new threats are created on the feature, and the behavior stores links to them.
-- **New invariant or threat** — The system triggers re-checks against all previously-audited subjects that fall within the invariant's scope, flagging any that do not satisfy the new property.
+- **New behavior** — Created during code review and automatically associated with a feature via the source-to-feature link on the source location where it was observed. Behaviors are reconciliation artifacts and do not carry threat or invariant links.
+- **New feature-level threat** — Invariants are generated from the threat and attached to source subjects within the feature's scope. The system triggers re-checks against all previously-audited subjects that fall within scope.
+- **New subject-level threat** — Generated on non-pure subjects during code review (see Subject-Level Threats below). Invariants are generated from the threat and attached to the subject. The system triggers re-checks on the subject.
+- **New invariant** — Attached to a source subject, linked to its parent threat. The system triggers re-checks against the subject and any related subjects within the invariant's scope.
 
 The user's request completes immediately; background work finishes asynchronously.
 
@@ -161,28 +165,30 @@ Feature
   │     "Protocols can permissionlessly deploy a campaign for their token"
   ├── Requirement (from docs)
   │     "Campaign creators can withdraw remaining tokens after campaign ends"
-  ├── Behavior (from code)                                 ← what the code does
+  ├── Behavior (from code)                                 ← what the code does (reconciliation)
   │     "Campaign deploys and registers token in campaignsByToken mapping"
-  │     ├── Source Links: [deployCampaign(), campaignsByToken]
-  │     └── Threat Links: ["Reentrancy during deploy", "Unauthorized withdrawal..."]
+  │     └── Source Links: [deployCampaign(), campaignsByToken]
   ├── Behavior (from code)
   │     "Only one campaign can exist per token"
-  │     ├── Source Links: [deployCampaign(), campaignsByToken]
-  │     └── Threat Links: ["Token slot squatting DOS", "Bypass via proxy tokens"]
-  ├── Threat                                               ← what could go wrong
+  │     └── Source Links: [deployCampaign(), campaignsByToken]
+  ├── Feature-Level Threat                                 ← design-level risks
   │     "Token slot squatting prevents legitimate protocols from deploying"
-  │     └── Invariant: "Campaign deployment cannot be blocked by unrelated parties"
-  ├── Threat
-  │     "Reentrancy during campaign deployment"
-  │     └── Invariant: "State updates precede external calls in deployCampaign"
-  └── Threat
+  └── Feature-Level Threat
         "Unauthorized withdrawal of campaign tokens"
-        └── Invariant: "Only campaign creator can call withdrawRemaining"
 
 Source-to-Feature Links:
   deployCampaign()    → "Protocol Campaigns"
   withdrawRemaining() → "Protocol Campaigns"
   campaignsByToken    → "Protocol Campaigns"
+
+Source Subject: deployCampaign() → IERC20(token).transferFrom(...)   [non-pure: external call]
+  ├── Functional Purpose: "Transfer campaign tokens from creator into contract"
+  ├── Functional Semantics: "token is the campaign reward token, amount is total campaign allocation"
+  ├── Subject-Level Threat: "Reentrancy via token callback during campaign setup"
+  ├── Invariant: "State updates precede external calls in deployCampaign"
+  │     └── Parent Threat: (subject-level) "Reentrancy via token callback..."
+  └── Invariant: "Only campaign creator can initiate token transfer"
+        └── Parent Threat: (feature-level) "Unauthorized withdrawal..."
 ```
 
 ## Convergences
@@ -233,13 +239,17 @@ When auditing a variable, it is useful for the client to present all of its ance
 
 ### Specification Convergence
 
-Specification convergences verify that the implementation of a subject upholds the properties defined in the security model. Where type convergences check mechanical type properties, specification convergences check that the behaviors observed in code and the defensive constraints captured in invariants are consistent and correctly implemented.
+Specification convergences verify that the implementation of a subject upholds the properties defined in the security model. Where type convergences check mechanical type properties, specification convergences check that the behaviors observed in code, the defensive invariants on subjects, and the functional properties are consistent and correctly implemented.
 
 There are three types of properties that may be checked on the subjects of a specification convergence, depending on the kind of subject:
  - Project Implementation, Contracts, Blocks, Statements:
    1. Functional Purpose (what purpose it serves within the context of the application, derived from the feature it belongs to)
    2. Behaviors (the observed behaviors that apply to this subject, associated via source-to-feature linking)
    3. Dependencies (what the subject depends on to fulfill its purpose, expressed as links to other statements or mechanisms)
+   4. Invariants (defensive properties the subject must uphold, derived from feature-level and subject-level threats)
+ - Non-Pure Subjects (state reads, state writes, external calls, delegatecalls, assembly blocks):
+   1. All of the above, plus:
+   2. Subject-Level Threats (implementation-specific risks at this code point, generated on-demand)
  - Expressions and Values:
    1. Functional Semantics (what it represents within the context of the application, derived from project documentation)
 
@@ -304,7 +314,7 @@ Functional semantics are checked at specification convergences. When the auditor
 
 Requirements are what the documentation claims the system does. Each requirement captures a documented behavior — something the documentation says the system needs to accomplish. They can describe any kind of documented behavior: functionality, constraints, access control, edge case handling. For example, a "Protocol Campaigns" feature might have requirements like "protocols can permissionlessly deploy a campaign for their token" and "campaign creators can withdraw remaining tokens after campaign ends."
 
-Requirements are defined at the feature level in the security model. They do not carry source links or threat links — those belong to behaviors. Requirements are verified not by checking them directly against source code, but by confirming during reconciliation that corresponding behaviors exist in the implementation.
+Requirements are defined at the feature level in the security model. They do not carry source links, threat links, or invariant links — security analysis operates at the source subject level. Requirements are verified not by checking them directly against source code, but by confirming during reconciliation that corresponding behaviors exist in the implementation.
 
 All requirements on a feature are distinct and independent of each other. Requirements are added initially as unverified, then are able to be marked as verified by each party in the audit during reconciliation.
 
@@ -312,13 +322,11 @@ Requirements are generally explored as documentation is reviewed, but auditors c
 
 ### Managing Behaviors
 
-Behaviors are what the code actually does. Each behavior captures an observed implementation behavior — something the auditor noticed while reviewing code. A behavior is a description, source links to the code where it was observed, and threat links to the threats it is affected by.
+Behaviors are what the code actually does. Each behavior captures an observed implementation behavior — something the auditor noticed while reviewing code. A behavior is a description and source links to the code where it was observed.
 
 Behaviors are created during code review and automatically associated with a feature via the source-to-feature link on the source location where they were observed. This means the auditor never leaves the code context when adding a behavior — they describe what the code does, and the model knows which feature it belongs to.
 
-Behaviors carry threat links. When a behavior is added, threat generation runs against the feature using the new behavior as context. If the generation produces a threat that already exists on the feature, the behavior adds a threat link to the existing threat rather than creating a duplicate. Genuinely new threats are created on the feature, and the behavior stores links to them.
-
-Behaviors are the subjects that invariants protect and that threats exploit. The security analysis machinery — threat generation, invariant checking, re-checks — operates on behaviors, not requirements, because threats target real code, not documentation claims.
+Behaviors are purely reconciliation artifacts. They do not carry threat links or invariant links — security analysis operates at the source subject level through subject-level threats and invariants on convergences. Behaviors exist to enable the comparison between what the documentation claims (requirements) and what the code does (behaviors) during reconciliation.
 
 ### Managing Dependencies
 
@@ -334,11 +342,36 @@ To implement this, we can gather all statements that could satisfy the dependenc
 
 A consumer is a statement that consumes what was set up by the current statement. A dependency checks that something was set up before the current statement, and a consumer checks that what is set up by the current statement is properly used by later statements. A consumer turns into a dependency on the consuming statement when it is linked, and a dependency turns into a consumer on the depended-upon statement when it is linked, so they can both be checked in the same way. Dependencies and consumers cannot be checked exhaustively, so checking for the existence or fullness of them is an important job of the auditor. When a statement has a side effect, at least one consumer must exist and should be searched for. The consumer is first added in an unsatisfied state, and added for satisfaction when a satisfying statement is found. Checking for at least one consumer is a way to make sure that something is not set up and then forgotten to be consumed, indicating a potential bug.
 
-### Threat Traceability at the Code Level
+### Managing Subject-Level Threats and Invariants
 
-Each topic in the audit has a "threatened by" section that links to the threats it is subject to. These threat links provide the auditor with immediate visibility into why a particular piece of code matters from a security perspective, and what the consequences of a flaw would be. Because invariants belong to threats, and threats belong to features, any contradicted convergence can be traced from the specific code location through the full hierarchy to the behavioral feature and documentation that established the concern.
+The checker classifies source code subjects as pure or non-pure based on their interaction surface. Pure operations (arithmetic, comparisons, boolean logic, local variable assignments) have a closed threat surface — the only things that can go wrong are mechanical (overflow, type mismatch, wrong operands), and these are fully covered by type convergences. Non-pure operations interact with persistent state, external code, or the blockchain environment, creating implementation-specific attack surface that requires adversarial reasoning.
 
-This traceability also enables prioritization: when the auditor is evaluating a convergence, the severity of the linked threats determines how much scrutiny the convergence warrants. The threat links stored on behaviors further refine this: when an auditor is working within the scope of a specific behavior, the client can filter to show only the threats that behavior links to, keeping the view focused.
+Non-pure subject types include:
+ - State writes (storage mutations)
+ - State reads of mutable variables (storage reads that could return manipulated or stale data)
+ - External calls (transfers control to untrusted code)
+ - Delegatecalls (executes in a different context than it appears)
+ - Assembly blocks (bypasses compiler safety checks)
+ - Selfdestruct / create / create2
+
+Subject-level threats are generated on-demand for non-pure subjects only. When a non-pure subject is first evaluated during the audit, the LLM is given the subject, its backward context, its feature-level threats (to avoid restating them), and its type constraints (to avoid restating those), and asked "what implementation-specific risks exist at this code point that aren't already captured?" The result is cached on the subject and presented to the auditor for review.
+
+Invariants are generated from both feature-level and subject-level threats and attached directly to the source subjects they protect. When the auditor evaluates a convergence, the invariants are immediately present alongside functional purpose, functional semantics, and type constraints — no indirection through abstract structures. Each invariant links back to its parent threat (either feature-level or subject-level) for traceability.
+
+Pure operations are not excluded from invariant coverage. Feature-level threats can generate invariants that apply to pure subjects — for example, a feature-level threat about reward calculation errors might produce an invariant on an arithmetic expression. What pure subjects are excluded from is dedicated subject-level threat generation, because the threats at a pure operation are either mechanical (covered by type convergences) or semantic (covered by functional semantics at specification convergences).
+
+The three layers of the threat model cover distinct risk categories with minimal overlap:
+ - **Type convergences** catch mechanical correctness at all subjects (overflow, underflow, type mismatches)
+ - **Feature-level threats** capture design-level risks (unauthorized access, economic invariant violations) and generate broad invariants across a feature's source subjects
+ - **Subject-level threats** capture implementation-specific risks at non-pure subjects (reentrancy at a specific external call, stale data from a specific state read) and generate targeted invariants on individual subjects
+
+Pure expressions can house semantic bugs — `propFactor + bal` where the operator should be `*` — but these are caught by functional semantics at specification convergences, not by threat generation. The adversarial reasoning that threats capture always bottlenecks through non-pure operations, because those are the points where the system interacts with the outside world. Pure expressions may be *incorrect*, but their incorrectness becomes *exploitable* only through the non-pure operations that act on their results. Subject-level threats on non-pure subjects have visibility into the pure expressions that feed into them through backward context, so the threats account for insufficiencies in upstream checks and computations.
+
+### Threat Traceability
+
+When an invariant is contradicted at a convergence, the traceability chain identifies the security impact. For invariants from feature-level threats: convergence → invariant → feature-level threat → feature → documentation. For invariants from subject-level threats: convergence → invariant → subject-level threat → feature (via source-to-feature link). Both paths lead to a feature, which provides the severity context and the connection to documentation and requirements.
+
+This traceability enables prioritization: when the auditor is evaluating a convergence, the severity of the threats behind its invariants determines how much scrutiny the convergence warrants.
 
 ## Auditing Convergences
 
@@ -346,12 +379,12 @@ Type constraint checks can be checked by a constraint algorithm. Specification c
 
 General audit flow is:
  1. Read and understand the docs and the purpose of the project
- 2. Run the initial generation pipeline to extract features, requirements, threats, and invariants from the documentation, and link source locations to features
+ 2. Run the initial generation pipeline to extract features, requirements, and feature-level threats from the documentation, link source locations to features, and attach invariants from feature-level threats to source subjects
  3. Review and refine the generated security model, adding missing features or requirements as needed
- 4. Read the code, documenting behaviors as they are observed — behaviors automatically associate with features via source-to-feature links, and trigger threat generation in the background
- 5. Step through all convergences, checking that the properties hold up correctly (types and specifications), with contradictions traceable through the threat and invariant hierarchy to their security impact
+ 4. Read the code, documenting behaviors as they are observed (behaviors automatically associate with features via source-to-feature links)
+ 5. Step through all convergences — for each subject, functional purpose, functional semantics, and subject-level threats (on non-pure subjects) are generated on-demand; invariants from subject-level threats are attached and checked alongside existing invariants from feature-level threats
  6. Reconcile requirements against behaviors per feature, identifying unimplemented specification and undocumented implementation
- 7. As new features, requirements, behaviors, threats, or invariants are discovered during code review, add them to the security model — the re-check system propagates them to all previously-audited subjects, ensuring nothing is missed
+ 7. As new features, requirements, behaviors, threats, or invariants are discovered during code review, add them to the security model — the re-check system propagates them to all relevant subjects, ensuring nothing is missed
 
 ### Managing Convergences
 
@@ -359,7 +392,7 @@ Convergences are the main point of verification in the audit process. They have 
 
 ## Subject Evaluation Context Strategy
 
-When evaluating subjects for invariant upholding or invariant recognition, we use **backward-only context** as the default strategy. When auditing a given subject, the system provides context about where the subject's values originated (their data provenance, taint sources, and upstream transformations), the subject's functional purpose (why it exists, derived from the feature), and the subject's functional semantics (what it represents, derived on-demand from project documentation). The system does not, by default, include forward context about where those values propagate to downstream.
+When evaluating subjects for invariant upholding or invariant recognition, we use **backward-only context** as the default strategy. When auditing a given subject, the system provides context about where the subject's values originated (their data provenance, taint sources, and upstream transformations), the subject's functional purpose (why it exists, derived from the feature), the subject's functional semantics (what it represents, derived on-demand from project documentation), its invariants (defensive properties it must uphold, from feature-level and subject-level threats), and for non-pure subjects, its subject-level threats (implementation-specific risks at this code point). The system does not, by default, include forward context about where those values propagate to downstream.
 
 This is a deliberate architectural choice, not a limitation. The system compensates for the absence of forward context through the **security model's on-the-fly generation and re-check mechanism**, which provides equivalent or superior coverage to bidirectional context while maintaining focused, low-noise audit passes.
 
@@ -379,7 +412,7 @@ The primary class of vulnerability where forward context provides value is **inc
 
 Rather than using forward context to surface these issues passively, this system surfaces them actively through the security model's on-the-fly generation:
 
-1. **Invariant discovery.** When the auditor encounters a security-relevant pattern during a backward-context audit pass (e.g., a role-based access check on a state-modifying function), they register it as a threat or invariant in the security model, linked to the relevant feature — or create a new feature and behavior if none exists. The incremental update pipeline propagates this addition.
+1. **Invariant discovery.** When the auditor encounters a security-relevant pattern during a backward-context audit pass (e.g., a role-based access check on a state-modifying function), they register it as a threat on the relevant feature (or a subject-level threat on a non-pure subject) with an associated invariant attached to the source subject. The incremental update pipeline propagates the invariant to all subjects within its scope via re-checks.
 
 2. **Propagation via re-check.** The system applies the new invariant to all previously-audited subjects within its scope. Any function that modifies the same state but lacks the expected check is flagged mechanically, without requiring forward context at the point of origin.
 
