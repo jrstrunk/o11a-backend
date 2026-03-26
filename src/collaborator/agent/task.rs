@@ -403,9 +403,7 @@ before the balance is updated to drain the contract\")\n\
 - `severity`: one of \"medium\", \"high\", or \"critical\"\n\
 - `invariants`: an array of strings, where each string is a specific, testable \
 property that must hold to prevent this attack (e.g., \"The contract's token \
-balance must be updated before any external call is made during withdrawal\")\n\n\
-Rules:\n\
-- Consider all common smart contract attack classes: reentrancy, access control \
+- Consider all common smart contract attack classes: reentrancy, replay, access control \
 bypass, front-running, oracle manipulation, flash loan attacks, price manipulation, \
 shared resource consumption, griefing, denial of service, storage \
 collision, and privilege escalation.\n\
@@ -861,12 +859,11 @@ pub fn collect_contract_feature_pairs(
   }
 
   // Collect features
-  let mut pairs = Vec::new();
-  for (ft, feature) in &audit_data.features {
-    let feature_json = match context::render_feature_to_json(ft, feature, audit_data, None) {
-      Some(json) => json,
-      None => continue,
-    };
+  let feature_json =
+      match context::render_feature_to_json(ft, feature, audit_data, None) {
+        Some(json) => json,
+        None => continue,
+      };
 
     for (node, contract_json) in &contracts {
       let contract_topic = topic::new_node_topic(&node.node_id());
@@ -924,10 +921,7 @@ pub fn collect_single_feature_pairs(
         ) {
           Some(json) => json,
           None => continue,
-        };
-        let contract_topic = topic::new_node_topic(&node.node_id());
-        let label =
-          format!("{}_{}", contract_topic.id(), feature_topic.id());
+          let label = format!("{}_{}", contract_topic.id(), feature_topic.id());
         pairs.push(ContractFeaturePair {
           contract_topic,
           contract_json,
@@ -987,18 +981,14 @@ pub async fn link_requirements_to_source(
   }
 
   let mut links: BTreeMap<topic::Topic, Vec<topic::Topic>> = BTreeMap::new();
-  for handle in handles {
-    match handle.await {
-      Ok((_, Ok(response))) => {
-        match parse_requirement_links(&response) {
-          Ok(parsed) => {
-            for (req_topic, source_topics) in parsed {
-              links.entry(req_topic).or_default().extend(source_topics);
-            }
+  Ok((_, Ok(response))) => match parse_requirement_links(&response) {
+        Ok(parsed) => {
+          for (req_topic, source_topics) in parsed {
+            links.entry(req_topic).or_default().extend(source_topics);
           }
-          Err(e) => eprintln!("parse_requirement_links failed: {}", e),
         }
-      }
+        Err(e) => eprintln!("parse_requirement_links failed: {}", e),
+      },
       Ok((label, Err(e))) => {
         eprintln!("link_requirements_to_source failed for {}: {}", label, e);
       }
@@ -1030,10 +1020,8 @@ fn parse_requirement_links(
     .strip_prefix("```json")
     .or_else(|| response.trim().strip_prefix("```"))
     .unwrap_or(response.trim());
-  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
-
-  let raw_links: Vec<LLMRequirementLink> =
-    serde_json::from_str(json_str).map_err(|e| {
+    let raw_links: Vec<LLMRequirementLink> = serde_json::from_str(json_str)
+    .map_err(|e| {
       eprintln!(
         "Failed to parse requirement links JSON: {}\nResponse:\n{}",
         e, json_str

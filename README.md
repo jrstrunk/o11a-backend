@@ -241,7 +241,7 @@ There are three types of properties that may be checked on the subjects of a spe
    2. Behaviors (the observed behaviors that apply to this subject, associated via source-to-feature linking)
    3. Dependencies (what the subject depends on to fulfill its purpose, expressed as links to other statements or mechanisms)
  - Expressions and Values:
-   1. Functional Semantics (what it represents within the context of the application)
+   1. Functional Semantics (what it represents within the context of the application, derived from project documentation)
 
 Specification properties converge between the declaration and implementation of the subject:
  - Project Implementation (checked that the sum of the properties of the contracts match the properties of the project implementation)
@@ -272,11 +272,33 @@ Functions need to track side effects and present them to the user in the interfa
 
 ### Managing Functional Purpose
 
-The functional purpose is the business logic reason for a statement — the "why" that statement is there. Functional purpose is derived from the feature the subject belongs to in the security model. Try to avoid implementation details here, and focus on the business logic. "Why" is not "to do the thing it does". It is "from the project perspective, what value does this statement provide?", and "what impact would it have on the users or system if it weren't there?"
+The functional purpose is the business logic reason for a statement — the "why" that statement is there, or more precisely, "why did the developer write this statement to do what it does?" An access control guard's functional purpose is not "checks that msg.sender equals owner" (that's what it does), but "to prevent other users from taking other users' funds" (that's why it exists).
 
-When adding functional purposes, preset questions are presented to the user that help guide them in thinking about the purpose correctly. The purpose is NOT what it does, but WHY it does it.
+Functional purpose is derived from the feature the subject belongs to combined with understanding of the code, and in a single-agent context it could be considered redundant — an auditor who knows the feature and reads the code can infer the purpose implicitly. The reason it exists as an explicit, stored property is to **externalize an intermediate reasoning step that would otherwise be opaque at collaboration boundaries**.
 
-Functional purposes can be categorized, which will adjust the preset questions for the user to answer. Some of the categories could be for Shared Resources, Authorization, or Reentry Guards. This will make sure the user is reminded of common issues with these things, like a DOS exhaustion of a shared resource.
+When reasoning passes between agents — an LLM doing an initial pass and a human following behind, or two human auditors reviewing the same code — implicit reasoning is lost at each handoff. If the LLM implicitly reasons "this access check prevents unauthorized fund access" and generates threats based on that understanding, but the human auditor thinks it enforces a delegation model, they disagree on threat coverage without knowing they disagree on the premise. That disagreement surfaces late, at the threat level, where it's harder to diagnose and resolve. Making the "why" explicit creates a checkpoint where reasoning can be inspected, corrected, and agreed upon before downstream analysis builds on it. The human sees the LLM's stated purpose, corrects it if wrong, and now threat generation and behavior documentation operate from a shared, verified premise.
+
+This applies in both directions. When the human states a purpose and the LLM generates threats, the LLM has an explicit anchor to reason from rather than inferring intent from a behavior description that could be interpreted multiple ways. When the LLM states a purpose and the human reviews, the human gets a window into the LLM's understanding that they can verify independently of whether the downstream outputs look reasonable.
+
+Functional purpose is generated on-demand using the same pattern as functional semantics: when a subject is first evaluated, the LLM is given the subject, its feature context, and the feature's documentation, and asked "why does this exist?" The result is cached on the subject and presented to the auditor for review. The auditor can correct, enrich, or confirm it before downstream analysis proceeds.
+
+Try to avoid implementation details in functional purposes, and focus on the business logic. "Why" is not "to do the thing it does." It is "from the project perspective, what value does this statement provide?", and "what impact would it have on the users or system if it weren't there?"
+
+When adding functional purposes, preset questions are presented to the user that help guide them in thinking about the purpose correctly. Functional purposes can be categorized, which will adjust the preset questions for the user to answer. Some of the categories could be for Shared Resources, Authorization, or Reentry Guards. This will make sure the user is reminded of common issues with these things, like a DOS exhaustion of a shared resource.
+
+### Managing Functional Semantics
+
+Functional semantics define what an expression or value represents within the context of the application — the project-specific meaning of a variable, literal, or sub-expression. For example, `userBalance` might semantically represent "the user's total balance" in one project and "the user's locked balance" in another. `propFactor` might semantically represent "a balance multiplier." These meanings are not derivable from the code alone — they come from project documentation.
+
+Functional semantics are generated on-demand rather than through a structured upfront extraction pipeline. When a subject is first evaluated during the audit, the LLM is given the subject itself, the features the subject is linked to (via source-to-feature links), and the documentation linked to those features, with the question: "what is the semantic meaning of this subject within this feature?" The LLM synthesizes a semantic meaning from the full documentation context in a single pass, and the result is cached on the subject.
+
+This on-demand approach is preferred over an upfront pipeline that would extract semantic claims from documentation, resolve them to declarations, and propagate properties to convergence points. Such a pipeline introduces a lossy transformation chain — each extraction and resolution step can distort or lose information, and errors propagate forward undetected. The on-demand approach avoids this by keeping the full documentation in context at the moment of evaluation, which also handles implicit and contextual semantics naturally. Documentation often defines meaning through surrounding context rather than explicit definition (e.g., a paragraph discussing "rewards accumulate proportionally to stake" implies a multiplicative relationship without stating it as a discrete claim), and the on-demand approach lets the LLM reason about these implications directly.
+
+Coverage is guaranteed by the programmatic audit's traversal of every subject. Every expression and value gets evaluated, so every subject that has a feature with documentation gets a semantic annotation. Nothing is missed due to the lack of upfront extraction.
+
+Once generated, the functional semantic is presented to the human auditor for review. The auditor can correct it, enrich it with domain knowledge, or confirm it. The corrected semantic is cached and reused at every convergence involving that subject. The auditor can also add functional semantics manually at any point when they recognize a meaning the LLM missed.
+
+Functional semantics are checked at specification convergences. When the auditor or LLM evaluates a statement like `userBonus = interest * userBalance`, the functional semantic on `userBalance` ("the user's total balance") can contradict the containing statement's functional purpose ("calculate bonus based on locked token interest"). Similarly, if `propFactor` has the semantic "a balance multiplier" but appears in an addition operation `val = propFactor + bal`, the semantic contradicts the operator. These contradictions are only surfaceable when the documentation-derived semantic and the code-derived context are both present at the convergence point.
 
 ### Managing Requirements
 
@@ -337,7 +359,7 @@ Convergences are the main point of verification in the audit process. They have 
 
 ## Subject Evaluation Context Strategy
 
-When evaluating subjects for invariant upholding or invariant recognition, we use **backward-only context** as the default strategy. When auditing a given subject, the system provides context about where the subject's values originated — their data provenance, taint sources, and upstream transformations — but does not, by default, include forward context about where those values propagate to downstream.
+When evaluating subjects for invariant upholding or invariant recognition, we use **backward-only context** as the default strategy. When auditing a given subject, the system provides context about where the subject's values originated (their data provenance, taint sources, and upstream transformations), the subject's functional purpose (why it exists, derived from the feature), and the subject's functional semantics (what it represents, derived on-demand from project documentation). The system does not, by default, include forward context about where those values propagate to downstream.
 
 This is a deliberate architectural choice, not a limitation. The system compensates for the absence of forward context through the **security model's on-the-fly generation and re-check mechanism**, which provides equivalent or superior coverage to bidirectional context while maintaining focused, low-noise audit passes.
 
