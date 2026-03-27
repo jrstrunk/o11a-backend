@@ -178,7 +178,7 @@ pub enum ContractKind {
 }
 
 /// Severity level for threats and invariants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThreatSeverity {
   Low,
@@ -209,24 +209,88 @@ impl ThreatSeverity {
 }
 
 /// A project feature extracted from documentation.
-/// Groups requirements, threats, and their invariants.
+/// Groups requirements. Feature-threat linkage is established during
+/// impact analysis, not at creation time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Feature {
   /// R-prefixed topic IDs of requirements belonging to this feature
   pub requirement_topics: Vec<topic::Topic>,
-  /// T-prefixed topic IDs of threats belonging to this feature
-  pub threat_topics: Vec<topic::Topic>,
 }
 
 /// A behavioral requirement belonging to a feature.
-/// Can be happy-path ("Users can deposit tokens") or non-happy-path
-/// ("Do not allow a user to withdraw another user's funds").
+/// Requirements are what the documentation claims the system does. They are
+/// verified via reconciliation against behaviors, not by direct source linking.
 /// Each requirement has at least one linked documentation topic that informed it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Requirement {
   /// D-prefixed topic IDs of documentation sections that informed this requirement
   pub documentation_topics: Vec<topic::Topic>,
-  /// N-prefixed topic IDs of source code topics that satisfy this requirement
+}
+
+/// Relationship type between a threat and a feature in impact analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThreatFeatureRelation {
+  /// The subject is part of the attack surface for a concern within the feature
+  IsVulnerableTo,
+  /// The subject is part of the defense against a concern within the feature
+  DefendsAgainst,
+}
+
+impl ThreatFeatureRelation {
+  pub fn as_str(&self) -> &'static str {
+    match self {
+      ThreatFeatureRelation::IsVulnerableTo => "is_vulnerable_to",
+      ThreatFeatureRelation::DefendsAgainst => "defends_against",
+    }
+  }
+
+  pub fn from_str(s: &str) -> Option<ThreatFeatureRelation> {
+    match s {
+      "is_vulnerable_to" => Some(ThreatFeatureRelation::IsVulnerableTo),
+      "defends_against" => Some(ThreatFeatureRelation::DefendsAgainst),
+      _ => None,
+    }
+  }
+}
+
+/// A link between a threat and a feature, established during impact analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreatFeatureLink {
+  pub threat_topic: topic::Topic,
+  pub feature_topic: topic::Topic,
+  pub relation: ThreatFeatureRelation,
+  pub severity: ThreatSeverity,
+}
+
+/// A condition evaluation on a non-pure subject. Conditions are the concrete,
+/// enumerable aspects of a subject's interaction surface that must be evaluated
+/// before threat generation. Each condition has standardized questions determined
+/// by its type, and the answers are stored as part of the evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Condition {
+  /// The non-pure subject this condition belongs to
+  pub subject_topic: topic::Topic,
+  /// The type of non-pure interaction this condition represents
+  pub condition_type: NonPureSubjectType,
+  /// Description of the specific condition (e.g. "Revert PAIR_EXISTS on createPair")
+  pub description: String,
+  /// Question/answer pairs from the standardized evaluation
+  pub evaluations: Vec<ConditionEvaluation>,
+}
+
+/// A single question/answer pair in a condition evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConditionEvaluation {
+  pub question: String,
+  pub answer: String,
+}
+
+/// A behavior observed during code review. Behaviors capture what the code
+/// actually does and are reconciliation artifacts — compared against
+/// requirements to surface gaps between documentation and implementation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Behavior {
+  /// N-prefixed topic IDs of source code locations where this behavior was observed
   pub source_topics: Vec<topic::Topic>,
 }
 
@@ -277,10 +341,26 @@ pub struct AuditData {
   pub features: BTreeMap<topic::Topic, Feature>,
   /// Requirements keyed by R-prefixed topic ID. Each belongs to one feature.
   pub requirements: BTreeMap<topic::Topic, Requirement>,
+  /// Functional purpose stored per subject topic: "why does this exist?"
+  pub functional_purposes: BTreeMap<topic::Topic, String>,
+  /// Functional semantics stored per subject topic: "what does this represent?"
+  pub functional_semantics: BTreeMap<topic::Topic, String>,
+  /// Impact analysis links between threats and features.
+  pub threat_feature_links: Vec<ThreatFeatureLink>,
+  /// Conditions keyed by their database ID. Each belongs to a non-pure subject
+  /// and contains standardized question/answer evaluations.
+  pub conditions: Vec<Condition>,
+  /// Behaviors keyed by B-prefixed topic ID. Each is associated with features
+  /// via source-to-feature links on its source locations.
+  pub behaviors: BTreeMap<topic::Topic, Behavior>,
   /// Threats keyed by A-prefixed topic ID. Each belongs to one feature.
   pub threats: BTreeMap<topic::Topic, Threat>,
   /// Invariants keyed by I-prefixed topic ID. Each belongs to one threat.
   pub invariants: BTreeMap<topic::Topic, Invariant>,
+  /// Source-to-feature links: maps source code member topics (N-prefixed) to
+  /// the features they participate in (F-prefixed). Built by the pipeline's
+  /// source-to-feature linking step.
+  pub source_feature_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Reverse index: mentioned topic → comment topics that mention it.
   /// Updated on comment create.
   pub mentions_index: HashMap<topic::Topic, Vec<topic::Topic>>,
@@ -712,6 +792,57 @@ pub enum UnnamedTopicKind {
   DocumentationList,
   DocumentationBlockQuote,
   Other,
+}
+
+/// Classifies whether a source code subject is pure (closed threat surface,
+/// covered by type convergences) or non-pure (interacts with persistent state,
+/// external code, or blockchain environment, requiring structured analysis).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubjectPurity {
+  /// Pure: arithmetic, comparisons, boolean logic, local variable assignments.
+  /// Threat surface is fully covered by type convergences and functional semantics.
+  Pure,
+  /// Non-pure: state writes, state reads of mutables, external calls,
+  /// delegatecalls, assembly blocks, selfdestruct/create/create2.
+  /// Requires condition evaluation and threat generation.
+  NonPure,
+}
+
+/// Non-pure subject type, determining which standardized condition questions apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NonPureSubjectType {
+  StateWrite,
+  StateRead,
+  ExternalCall,
+  DelegateCall,
+  InlineAssembly,
+  Create,
+}
+
+impl UnnamedTopicKind {
+  /// Returns the purity classification for this unnamed topic kind.
+  pub fn purity(&self) -> SubjectPurity {
+    match self {
+      UnnamedTopicKind::VariableMutation => SubjectPurity::NonPure,
+      UnnamedTopicKind::InlineAssembly => SubjectPurity::NonPure,
+      UnnamedTopicKind::NewExpression => SubjectPurity::NonPure,
+      // FunctionCall purity depends on whether it's external — caller must check
+      UnnamedTopicKind::FunctionCall => SubjectPurity::Pure,
+      _ => SubjectPurity::Pure,
+    }
+  }
+}
+
+impl NamedTopicKind {
+  /// Returns the purity classification for this named topic kind.
+  pub fn purity(&self) -> SubjectPurity {
+    match self {
+      NamedTopicKind::StateVariable(VariableMutability::Mutable) => {
+        SubjectPurity::NonPure
+      }
+      _ => SubjectPurity::Pure,
+    }
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -1339,14 +1470,25 @@ pub enum TopicMetadata {
     author_id: i64,
     created_at: String,
   },
-  /// A threat describing how an attacker could compromise a feature
+  /// A behavior observed during code review
+  BehaviorTopic {
+    topic: topic::Topic,
+    description: String,
+    /// Feature topics derived from source-to-feature links on the behavior's source locations
+    feature_topics: Vec<topic::Topic>,
+    author_id: i64,
+    created_at: String,
+  },
+  /// A threat on a non-pure source code subject
   ThreatTopic {
     topic: topic::Topic,
     description: String,
-    feature_topic: topic::Topic,
+    /// The non-pure subject this threat belongs to
+    subject_topic: topic::Topic,
     author_id: i64,
     created_at: String,
-    severity: ThreatSeverity,
+    /// Severity is assigned during impact analysis; None means pending
+    severity: Option<ThreatSeverity>,
   },
   /// An invariant that must hold to prevent a threat
   InvariantTopic {
@@ -1355,7 +1497,8 @@ pub enum TopicMetadata {
     threat_topic: topic::Topic,
     author_id: i64,
     created_at: String,
-    severity: ThreatSeverity,
+    /// Inherited from parent threat; None when threat severity is pending
+    severity: Option<ThreatSeverity>,
   },
   /// A documentation root topic (project or technical documentation)
   DocumentationTopic {
@@ -1377,6 +1520,7 @@ impl TopicMetadata {
       | TopicMetadata::DocumentationTopic { scope, .. } => scope,
       TopicMetadata::FeatureTopic { .. }
       | TopicMetadata::RequirementTopic { .. }
+      | TopicMetadata::BehaviorTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. } => &Scope::Global,
     }
@@ -1391,6 +1535,7 @@ impl TopicMetadata {
       | TopicMetadata::ControlFlow { .. }
       | TopicMetadata::CommentTopic { .. }
       | TopicMetadata::RequirementTopic { .. }
+      | TopicMetadata::BehaviorTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. }
       | TopicMetadata::DocumentationTopic { .. } => None,
@@ -1406,6 +1551,7 @@ impl TopicMetadata {
       | TopicMetadata::CommentTopic { topic, .. }
       | TopicMetadata::FeatureTopic { topic, .. }
       | TopicMetadata::RequirementTopic { topic, .. }
+      | TopicMetadata::BehaviorTopic { topic, .. }
       | TopicMetadata::ThreatTopic { topic, .. }
       | TopicMetadata::InvariantTopic { topic, .. }
       | TopicMetadata::DocumentationTopic { topic, .. } => topic,
@@ -1473,9 +1619,11 @@ impl TopicMetadata {
   pub fn target_topic(&self) -> Option<&topic::Topic> {
     match self {
       TopicMetadata::CommentTopic { target_topic, .. } => Some(target_topic),
-      TopicMetadata::RequirementTopic { feature_topic, .. }
-      | TopicMetadata::ThreatTopic { feature_topic, .. } => {
+      TopicMetadata::RequirementTopic { feature_topic, .. } => {
         Some(feature_topic)
+      }
+      TopicMetadata::ThreatTopic { subject_topic, .. } => {
+        Some(subject_topic)
       }
       TopicMetadata::InvariantTopic { threat_topic, .. } => {
         Some(threat_topic)
@@ -1876,21 +2024,12 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         sort_key,
       });
     }
-    for tt in &feature.threat_topics {
-      let sort_key = tt.numeric_id().map(|id| id as usize);
-      scope_references.push(Reference::ProjectReference {
-        reference_topic: tt.clone(),
-        sort_key,
-      });
-    }
-    let nested_references =
-      build_invariant_nested_refs(&feature.threat_topics, &audit_data.threats);
     let context = vec![SourceContext {
       scope: feature_topic.clone(),
       sort_key: Some(0),
       is_in_scope: true,
       scope_references,
-      nested_references,
+      nested_references: vec![],
     }];
     audit_data
       .topic_context
@@ -1917,16 +2056,16 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }
   }
 
-  // Build context for ThreatTopics: parent feature + threat as scope refs,
+  // Build context for ThreatTopics: subject + threat as scope refs,
   // invariants as nested refs indented under the threat
   for (threat_topic, metadata) in &audit_data.topic_metadata {
-    if let TopicMetadata::ThreatTopic { feature_topic, .. } = metadata {
-      let feat_sort_key = feature_topic.numeric_id().map(|id| id as usize);
+    if let TopicMetadata::ThreatTopic { subject_topic, .. } = metadata {
+      let subj_sort_key = subject_topic.numeric_id().map(|id| id as usize);
       let threat_sort_key = threat_topic.numeric_id().map(|id| id as usize);
       let scope_references = vec![
         Reference::ProjectReference {
-          reference_topic: feature_topic.clone(),
-          sort_key: feat_sort_key,
+          reference_topic: subject_topic.clone(),
+          sort_key: subj_sort_key,
         },
         Reference::ProjectReference {
           reference_topic: threat_topic.clone(),
@@ -2051,8 +2190,14 @@ pub fn new_audit_data(
     topic_context: BTreeMap::new(),
     features: BTreeMap::new(),
     requirements: BTreeMap::new(),
+    functional_purposes: BTreeMap::new(),
+    functional_semantics: BTreeMap::new(),
+    threat_feature_links: Vec::new(),
+    conditions: Vec::new(),
+    behaviors: BTreeMap::new(),
     threats: BTreeMap::new(),
     invariants: BTreeMap::new(),
+    source_feature_links: BTreeMap::new(),
     mentions_index: HashMap::new(),
   }
 }

@@ -1,6 +1,6 @@
 use crate::collaborator::models::*;
 use crate::collaborator::{formatter, parser};
-use crate::core::{self, topic, DataContext, Feature, Requirement};
+use crate::core::{self, topic, DataContext, Behavior, Feature, Requirement};
 use sqlx::SqlitePool;
 
 // ============================================================================
@@ -193,11 +193,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     r#"
         CREATE TABLE IF NOT EXISTS threats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            feature_id INTEGER NOT NULL,
+            audit_id TEXT NOT NULL,
+            subject_topic TEXT NOT NULL,
             description TEXT NOT NULL,
             author_id INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            severity TEXT NOT NULL DEFAULT 'medium'
+            severity TEXT
         )
         "#,
   )
@@ -205,7 +206,13 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .await?;
 
   sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_threats_feature ON threats(feature_id)",
+    "CREATE INDEX IF NOT EXISTS idx_threats_audit ON threats(audit_id)",
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_threats_subject ON threats(subject_topic)",
   )
   .execute(pool)
   .await?;
@@ -248,6 +255,182 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
   sqlx::query(
     "CREATE INDEX IF NOT EXISTS idx_inv_source_topics_inv ON invariant_source_topics(invariant_id)",
+  )
+  .execute(pool)
+  .await?;
+
+  // Subject properties table (functional purpose and semantics)
+  sqlx::query(
+    r#"
+        CREATE TABLE IF NOT EXISTS subject_properties (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audit_id TEXT NOT NULL,
+            topic_id TEXT NOT NULL,
+            property_type TEXT NOT NULL,
+            value TEXT NOT NULL,
+            author_id INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(audit_id, topic_id, property_type)
+        )
+        "#,
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_subj_props_audit ON subject_properties(audit_id)",
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_subj_props_topic ON subject_properties(topic_id)",
+  )
+  .execute(pool)
+  .await?;
+
+  // Threat-feature links table (impact analysis)
+  sqlx::query(
+    r#"
+        CREATE TABLE IF NOT EXISTS threat_feature_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audit_id TEXT NOT NULL,
+            threat_id INTEGER NOT NULL,
+            feature_id INTEGER NOT NULL,
+            relation TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            UNIQUE(threat_id, feature_id)
+        )
+        "#,
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_tfl_threat ON threat_feature_links(threat_id)",
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_tfl_feature ON threat_feature_links(feature_id)",
+  )
+  .execute(pool)
+  .await?;
+
+  // Conditions table
+  sqlx::query(
+    r#"
+        CREATE TABLE IF NOT EXISTS conditions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audit_id TEXT NOT NULL,
+            subject_topic TEXT NOT NULL,
+            condition_type TEXT NOT NULL,
+            description TEXT NOT NULL,
+            author_id INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        "#,
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_conditions_audit ON conditions(audit_id)",
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_conditions_subject ON conditions(subject_topic)",
+  )
+  .execute(pool)
+  .await?;
+
+  // Condition evaluations table
+  sqlx::query(
+    r#"
+        CREATE TABLE IF NOT EXISTS condition_evaluations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            condition_id INTEGER NOT NULL,
+            question TEXT NOT NULL,
+            answer TEXT NOT NULL
+        )
+        "#,
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_cond_evals_cond ON condition_evaluations(condition_id)",
+  )
+  .execute(pool)
+  .await?;
+
+  // Behaviors table
+  sqlx::query(
+    r#"
+        CREATE TABLE IF NOT EXISTS behaviors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audit_id TEXT NOT NULL,
+            description TEXT NOT NULL,
+            author_id INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        "#,
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_behaviors_audit ON behaviors(audit_id)",
+  )
+  .execute(pool)
+  .await?;
+
+  // Behavior source topic associations
+  sqlx::query(
+    r#"
+        CREATE TABLE IF NOT EXISTS behavior_source_topics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            behavior_id INTEGER NOT NULL,
+            topic_id TEXT NOT NULL,
+            UNIQUE(behavior_id, topic_id)
+        )
+        "#,
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_beh_source_topics_beh ON behavior_source_topics(behavior_id)",
+  )
+  .execute(pool)
+  .await?;
+
+  // Source-to-feature links table
+  sqlx::query(
+    r#"
+        CREATE TABLE IF NOT EXISTS source_feature_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audit_id TEXT NOT NULL,
+            source_topic TEXT NOT NULL,
+            feature_id INTEGER NOT NULL,
+            UNIQUE(audit_id, source_topic, feature_id)
+        )
+        "#,
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_source_feature_links_audit ON source_feature_links(audit_id)",
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_source_feature_links_source ON source_feature_links(source_topic)",
   )
   .execute(pool)
   .await?;
@@ -684,65 +867,16 @@ pub async fn delete_all_features_for_audit(
   .execute(pool)
   .await?;
 
-  // Delete requirement source topic associations
-  sqlx::query(
-    r#"
-        DELETE FROM requirement_source_topics WHERE requirement_id IN (
-            SELECT r.id FROM requirements r
-            JOIN features f ON r.feature_id = f.id
-            WHERE f.audit_id = ?
-        )
-        "#,
-  )
-  .bind(audit_id)
-  .execute(pool)
-  .await?;
+  // Delete source-to-feature links
+  sqlx::query("DELETE FROM source_feature_links WHERE audit_id = ?")
+    .bind(audit_id)
+    .execute(pool)
+    .await?;
 
   // Delete requirements
   sqlx::query(
     r#"
         DELETE FROM requirements WHERE feature_id IN (
-            SELECT id FROM features WHERE audit_id = ?
-        )
-        "#,
-  )
-  .bind(audit_id)
-  .execute(pool)
-  .await?;
-
-  // Delete invariant source topic associations
-  sqlx::query(
-    r#"
-        DELETE FROM invariant_source_topics WHERE invariant_id IN (
-            SELECT i.id FROM invariants i
-            JOIN threats t ON i.threat_id = t.id
-            JOIN features f ON t.feature_id = f.id
-            WHERE f.audit_id = ?
-        )
-        "#,
-  )
-  .bind(audit_id)
-  .execute(pool)
-  .await?;
-
-  // Delete invariants
-  sqlx::query(
-    r#"
-        DELETE FROM invariants WHERE threat_id IN (
-            SELECT t.id FROM threats t
-            JOIN features f ON t.feature_id = f.id
-            WHERE f.audit_id = ?
-        )
-        "#,
-  )
-  .bind(audit_id)
-  .execute(pool)
-  .await?;
-
-  // Delete threats
-  sqlx::query(
-    r#"
-        DELETE FROM threats WHERE feature_id IN (
             SELECT id FROM features WHERE audit_id = ?
         )
         "#,
@@ -787,13 +921,6 @@ pub async fn load_all_features(
       .fetch_all(pool)
       .await?;
 
-  let req_source_topics =
-    sqlx::query_as::<_, RequirementSourceTopicRow>(
-      "SELECT * FROM requirement_source_topics",
-    )
-    .fetch_all(pool)
-    .await?;
-
   let req_doc_topics =
     sqlx::query_as::<_, RequirementDocumentationTopicRow>(
       "SELECT * FROM requirement_documentation_topics",
@@ -825,25 +952,11 @@ pub async fn load_all_features(
     reqs_by_feature.entry(r.feature_id).or_default().push(r);
   }
 
-  // Group requirement source topics by requirement_id
-  let mut src_by_req: std::collections::HashMap<i64, Vec<&RequirementSourceTopicRow>> =
-    std::collections::HashMap::new();
-  for rst in &req_source_topics {
-    src_by_req.entry(rst.requirement_id).or_default().push(rst);
-  }
-
   // Group requirement documentation topics by requirement_id
   let mut doc_by_req: std::collections::HashMap<i64, Vec<&RequirementDocumentationTopicRow>> =
     std::collections::HashMap::new();
   for rdt in &req_doc_topics {
     doc_by_req.entry(rdt.requirement_id).or_default().push(rdt);
-  }
-
-  // Group threats by feature_id
-  let mut threats_by_feature: std::collections::HashMap<i64, Vec<&ThreatRow>> =
-    std::collections::HashMap::new();
-  for t in &threats {
-    threats_by_feature.entry(t.feature_id).or_default().push(t);
   }
 
   // Group invariants by threat_id
@@ -880,13 +993,6 @@ pub async fn load_all_features(
             }
           }
 
-          let mut source_topics = Vec::new();
-          if let Some(srcs) = src_by_req.get(&req.id) {
-            for s in srcs {
-              source_topics.push(topic::new_topic(&s.topic_id));
-            }
-          }
-
           audit_data.topic_metadata.insert(
             req_topic.clone(),
             core::TopicMetadata::RequirementTopic {
@@ -902,69 +1008,7 @@ pub async fn load_all_features(
             req_topic,
             Requirement {
               documentation_topics,
-              source_topics,
             },
-          );
-        }
-      }
-
-      // Load threats for this feature
-      let mut threat_topics = Vec::new();
-      if let Some(th_rows) = threats_by_feature.get(&row.id) {
-        for th in th_rows {
-          let threat_topic = topic::new_attack_vector_topic(th.id as i32);
-          threat_topics.push(threat_topic.clone());
-
-          // Load invariants for this threat
-          let mut invariant_topics = Vec::new();
-          if let Some(inv_rows) = invs_by_threat.get(&th.id) {
-            for inv in inv_rows {
-              let inv_topic = topic::new_invariant_topic(inv.id as i32);
-              invariant_topics.push(inv_topic.clone());
-
-              let mut source_topics = Vec::new();
-              if let Some(srcs) = src_by_inv.get(&inv.id) {
-                for s in srcs {
-                  source_topics.push(topic::new_topic(&s.topic_id));
-                }
-              }
-
-              audit_data.topic_metadata.insert(
-                inv_topic.clone(),
-                core::TopicMetadata::InvariantTopic {
-                  topic: inv_topic.clone(),
-                  description: inv.description.clone(),
-                  threat_topic: threat_topic.clone(),
-                  author_id: inv.author_id,
-                  created_at: inv.created_at.clone(),
-                  severity: core::ThreatSeverity::from_str(&inv.severity)
-                    .unwrap_or(core::ThreatSeverity::Medium),
-                },
-              );
-
-              audit_data.invariants.insert(
-                inv_topic,
-                core::Invariant { source_topics },
-              );
-            }
-          }
-
-          audit_data.topic_metadata.insert(
-            threat_topic.clone(),
-            core::TopicMetadata::ThreatTopic {
-              topic: threat_topic.clone(),
-              description: th.description.clone(),
-              feature_topic: feature_topic.clone(),
-              author_id: th.author_id,
-              created_at: th.created_at.clone(),
-              severity: core::ThreatSeverity::from_str(&th.severity)
-                .unwrap_or(core::ThreatSeverity::Medium),
-            },
-          );
-
-          audit_data.threats.insert(
-            threat_topic,
-            core::Threat { invariant_topics },
           );
         }
       }
@@ -984,13 +1028,701 @@ pub async fn load_all_features(
         feature_topic,
         Feature {
           requirement_topics,
-          threat_topics,
         },
       );
     }
   }
 
+  // Load threats (independent of features, keyed by subject_topic)
+  for th in &threats {
+    if let Some(audit_data) = data_context.get_audit_mut(&th.audit_id) {
+      let threat_topic = topic::new_attack_vector_topic(th.id as i32);
+      let subject_topic = topic::new_topic(&th.subject_topic);
+
+      // Load invariants for this threat
+      let mut invariant_topics = Vec::new();
+      if let Some(inv_rows) = invs_by_threat.get(&th.id) {
+        for inv in inv_rows {
+          let inv_topic = topic::new_invariant_topic(inv.id as i32);
+          invariant_topics.push(inv_topic.clone());
+
+          let mut source_topics = Vec::new();
+          if let Some(srcs) = src_by_inv.get(&inv.id) {
+            for s in srcs {
+              source_topics.push(topic::new_topic(&s.topic_id));
+            }
+          }
+
+          let severity = inv
+            .severity
+            .as_deref()
+            .and_then(core::ThreatSeverity::from_str);
+
+          audit_data.topic_metadata.insert(
+            inv_topic.clone(),
+            core::TopicMetadata::InvariantTopic {
+              topic: inv_topic.clone(),
+              description: inv.description.clone(),
+              threat_topic: threat_topic.clone(),
+              author_id: inv.author_id,
+              created_at: inv.created_at.clone(),
+              severity,
+            },
+          );
+
+          audit_data.invariants.insert(
+            inv_topic,
+            core::Invariant { source_topics },
+          );
+        }
+      }
+
+      let severity = th
+        .severity
+        .as_deref()
+        .and_then(core::ThreatSeverity::from_str);
+
+      audit_data.topic_metadata.insert(
+        threat_topic.clone(),
+        core::TopicMetadata::ThreatTopic {
+          topic: threat_topic.clone(),
+          description: th.description.clone(),
+          subject_topic: subject_topic.clone(),
+          author_id: th.author_id,
+          created_at: th.created_at.clone(),
+          severity,
+        },
+      );
+
+      audit_data.threats.insert(
+        threat_topic,
+        core::Threat { invariant_topics },
+      );
+    }
+  }
+
+  // Load source-to-feature links
+  let source_feature_rows =
+    sqlx::query_as::<_, SourceFeatureLinkRow>(
+      "SELECT * FROM source_feature_links",
+    )
+    .fetch_all(pool)
+    .await?;
+
+  for row in &source_feature_rows {
+    if let Some(audit_data) = data_context.get_audit_mut(&row.audit_id) {
+      let source_topic = topic::new_topic(&row.source_topic);
+      let feature_topic = topic::new_feature_topic(row.feature_id as i32);
+      let features = audit_data
+        .source_feature_links
+        .entry(source_topic)
+        .or_default();
+      if !features.contains(&feature_topic) {
+        features.push(feature_topic);
+      }
+    }
+  }
+
+  // Load subject properties (functional purpose and semantics)
+  let prop_rows =
+    sqlx::query_as::<_, SubjectPropertyRow>(
+      "SELECT * FROM subject_properties",
+    )
+    .fetch_all(pool)
+    .await?;
+
+  for row in &prop_rows {
+    if let Some(audit_data) = data_context.get_audit_mut(&row.audit_id) {
+      let t = topic::new_topic(&row.topic_id);
+      match row.property_type.as_str() {
+        "functional_purpose" => {
+          audit_data.functional_purposes.insert(t, row.value.clone());
+        }
+        "functional_semantics" => {
+          audit_data.functional_semantics.insert(t, row.value.clone());
+        }
+        _ => {}
+      }
+    }
+  }
+
+  // Load threat-feature links (impact analysis)
+  let tfl_rows =
+    sqlx::query_as::<_, ThreatFeatureLinkRow>(
+      "SELECT * FROM threat_feature_links",
+    )
+    .fetch_all(pool)
+    .await?;
+
+  for row in &tfl_rows {
+    if let Some(audit_data) = data_context.get_audit_mut(&row.audit_id) {
+      let relation = match core::ThreatFeatureRelation::from_str(&row.relation) {
+        Some(r) => r,
+        None => continue,
+      };
+      let severity = match core::ThreatSeverity::from_str(&row.severity) {
+        Some(s) => s,
+        None => continue,
+      };
+      audit_data.threat_feature_links.push(core::ThreatFeatureLink {
+        threat_topic: topic::new_attack_vector_topic(row.threat_id as i32),
+        feature_topic: topic::new_feature_topic(row.feature_id as i32),
+        relation,
+        severity,
+      });
+    }
+  }
+
+  // Load conditions
+  let condition_rows =
+    sqlx::query_as::<_, ConditionRow>("SELECT * FROM conditions")
+      .fetch_all(pool)
+      .await?;
+
+  let cond_eval_rows =
+    sqlx::query_as::<_, ConditionEvaluationRow>(
+      "SELECT * FROM condition_evaluations",
+    )
+    .fetch_all(pool)
+    .await?;
+
+  let mut evals_by_cond: std::collections::HashMap<i64, Vec<&ConditionEvaluationRow>> =
+    std::collections::HashMap::new();
+  for eval in &cond_eval_rows {
+    evals_by_cond.entry(eval.condition_id).or_default().push(eval);
+  }
+
+  for row in &condition_rows {
+    if let Some(audit_data) = data_context.get_audit_mut(&row.audit_id) {
+      let evaluations = evals_by_cond
+        .get(&row.id)
+        .map(|evals| {
+          evals
+            .iter()
+            .map(|e| core::ConditionEvaluation {
+              question: e.question.clone(),
+              answer: e.answer.clone(),
+            })
+            .collect()
+        })
+        .unwrap_or_default();
+
+      let condition_type = match row.condition_type.as_str() {
+        "state_write" => core::NonPureSubjectType::StateWrite,
+        "state_read" => core::NonPureSubjectType::StateRead,
+        "external_call" => core::NonPureSubjectType::ExternalCall,
+        "delegate_call" => core::NonPureSubjectType::DelegateCall,
+        "inline_assembly" => core::NonPureSubjectType::InlineAssembly,
+        "create" => core::NonPureSubjectType::Create,
+        _ => continue,
+      };
+
+      audit_data.conditions.push(core::Condition {
+        subject_topic: topic::new_topic(&row.subject_topic),
+        condition_type,
+        description: row.description.clone(),
+        evaluations,
+      });
+    }
+  }
+
+  // Load behaviors
+  let behavior_rows =
+    sqlx::query_as::<_, BehaviorRow>("SELECT * FROM behaviors")
+      .fetch_all(pool)
+      .await?;
+
+  let beh_source_topics =
+    sqlx::query_as::<_, BehaviorSourceTopicRow>(
+      "SELECT * FROM behavior_source_topics",
+    )
+    .fetch_all(pool)
+    .await?;
+
+  let mut src_by_beh: std::collections::HashMap<i64, Vec<&BehaviorSourceTopicRow>> =
+    std::collections::HashMap::new();
+  for bst in &beh_source_topics {
+    src_by_beh.entry(bst.behavior_id).or_default().push(bst);
+  }
+
+  for row in &behavior_rows {
+    if let Some(audit_data) = data_context.get_audit_mut(&row.audit_id) {
+      let beh_topic = topic::new_behavior_topic(row.id as i32);
+
+      let mut source_topics = Vec::new();
+      if let Some(srcs) = src_by_beh.get(&row.id) {
+        for s in srcs {
+          source_topics.push(topic::new_topic(&s.topic_id));
+        }
+      }
+
+      // Derive feature associations from source-to-feature links
+      let mut feature_topics = Vec::new();
+      for st in &source_topics {
+        if let Some(fts) = audit_data.source_feature_links.get(st) {
+          for ft in fts {
+            if !feature_topics.contains(ft) {
+              feature_topics.push(ft.clone());
+            }
+          }
+        }
+      }
+
+      audit_data.topic_metadata.insert(
+        beh_topic.clone(),
+        core::TopicMetadata::BehaviorTopic {
+          topic: beh_topic.clone(),
+          description: row.description.clone(),
+          feature_topics,
+          author_id: row.author_id,
+          created_at: row.created_at.clone(),
+        },
+      );
+
+      audit_data.behaviors.insert(
+        beh_topic,
+        core::Behavior { source_topics },
+      );
+    }
+  }
+
   Ok(count)
+}
+
+// ============================================================================
+// Source-to-feature link operations
+// ============================================================================
+
+/// Database row for a source-to-feature link
+#[derive(Debug, sqlx::FromRow)]
+pub struct SourceFeatureLinkRow {
+  pub id: i64,
+  pub audit_id: String,
+  pub source_topic: String,
+  pub feature_id: i64,
+}
+
+/// Adds a source-to-feature link
+pub async fn add_source_feature_link(
+  pool: &SqlitePool,
+  audit_id: &str,
+  source_topic: &str,
+  feature_id: i64,
+) -> Result<(), sqlx::Error> {
+  sqlx::query(
+    r#"
+        INSERT OR IGNORE INTO source_feature_links (audit_id, source_topic, feature_id)
+        VALUES (?, ?, ?)
+        "#,
+  )
+  .bind(audit_id)
+  .bind(source_topic)
+  .bind(feature_id)
+  .execute(pool)
+  .await?;
+  Ok(())
+}
+
+/// Removes a source-to-feature link
+pub async fn remove_source_feature_link(
+  pool: &SqlitePool,
+  audit_id: &str,
+  source_topic: &str,
+  feature_id: i64,
+) -> Result<(), sqlx::Error> {
+  sqlx::query(
+    "DELETE FROM source_feature_links WHERE audit_id = ? AND source_topic = ? AND feature_id = ?",
+  )
+  .bind(audit_id)
+  .bind(source_topic)
+  .bind(feature_id)
+  .execute(pool)
+  .await?;
+  Ok(())
+}
+
+/// Deletes all source-to-feature links for an audit
+pub async fn delete_all_source_feature_links(
+  pool: &SqlitePool,
+  audit_id: &str,
+) -> Result<(), sqlx::Error> {
+  sqlx::query("DELETE FROM source_feature_links WHERE audit_id = ?")
+    .bind(audit_id)
+    .execute(pool)
+    .await?;
+  Ok(())
+}
+
+// ============================================================================
+// Subject property operations (functional purpose and semantics)
+// ============================================================================
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct SubjectPropertyRow {
+  pub id: i64,
+  pub audit_id: String,
+  pub topic_id: String,
+  pub property_type: String,
+  pub value: String,
+  pub author_id: i64,
+  pub created_at: String,
+}
+
+/// Sets a subject property (upserts)
+pub async fn set_subject_property(
+  pool: &SqlitePool,
+  audit_id: &str,
+  topic_id: &str,
+  property_type: &str,
+  value: &str,
+  author_id: i64,
+) -> Result<SubjectPropertyRow, sqlx::Error> {
+  sqlx::query(
+    r#"
+        INSERT INTO subject_properties (audit_id, topic_id, property_type, value, author_id)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(audit_id, topic_id, property_type) DO UPDATE SET value = ?, author_id = ?
+        "#,
+  )
+  .bind(audit_id)
+  .bind(topic_id)
+  .bind(property_type)
+  .bind(value)
+  .bind(author_id)
+  .bind(value)
+  .bind(author_id)
+  .execute(pool)
+  .await?;
+
+  sqlx::query_as::<_, SubjectPropertyRow>(
+    "SELECT * FROM subject_properties WHERE audit_id = ? AND topic_id = ? AND property_type = ?",
+  )
+  .bind(audit_id)
+  .bind(topic_id)
+  .bind(property_type)
+  .fetch_one(pool)
+  .await
+}
+
+/// Gets a subject property
+pub async fn get_subject_property(
+  pool: &SqlitePool,
+  audit_id: &str,
+  topic_id: &str,
+  property_type: &str,
+) -> Result<Option<SubjectPropertyRow>, sqlx::Error> {
+  sqlx::query_as::<_, SubjectPropertyRow>(
+    "SELECT * FROM subject_properties WHERE audit_id = ? AND topic_id = ? AND property_type = ?",
+  )
+  .bind(audit_id)
+  .bind(topic_id)
+  .bind(property_type)
+  .fetch_optional(pool)
+  .await
+}
+
+// ============================================================================
+// Impact analysis (threat-feature link) operations
+// ============================================================================
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct ThreatFeatureLinkRow {
+  pub id: i64,
+  pub audit_id: String,
+  pub threat_id: i64,
+  pub feature_id: i64,
+  pub relation: String,
+  pub severity: String,
+}
+
+/// Creates a threat-feature link (impact analysis)
+pub async fn create_threat_feature_link(
+  pool: &SqlitePool,
+  audit_id: &str,
+  threat_id: i64,
+  feature_id: i64,
+  relation: &str,
+  severity: &str,
+) -> Result<ThreatFeatureLinkRow, sqlx::Error> {
+  let result = sqlx::query(
+    r#"
+        INSERT INTO threat_feature_links (audit_id, threat_id, feature_id, relation, severity)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(threat_id, feature_id) DO UPDATE SET relation = ?, severity = ?
+        "#,
+  )
+  .bind(audit_id)
+  .bind(threat_id)
+  .bind(feature_id)
+  .bind(relation)
+  .bind(severity)
+  .bind(relation)
+  .bind(severity)
+  .execute(pool)
+  .await?;
+
+  let id = result.last_insert_rowid();
+  sqlx::query_as::<_, ThreatFeatureLinkRow>(
+    "SELECT * FROM threat_feature_links WHERE id = ?",
+  )
+  .bind(id)
+  .fetch_one(pool)
+  .await
+}
+
+/// Deletes a threat-feature link
+pub async fn delete_threat_feature_link(
+  pool: &SqlitePool,
+  threat_id: i64,
+  feature_id: i64,
+) -> Result<(), sqlx::Error> {
+  sqlx::query(
+    "DELETE FROM threat_feature_links WHERE threat_id = ? AND feature_id = ?",
+  )
+  .bind(threat_id)
+  .bind(feature_id)
+  .execute(pool)
+  .await?;
+  Ok(())
+}
+
+/// Gets all threat-feature links for a threat
+pub async fn get_threat_feature_links(
+  pool: &SqlitePool,
+  threat_id: i64,
+) -> Result<Vec<ThreatFeatureLinkRow>, sqlx::Error> {
+  sqlx::query_as::<_, ThreatFeatureLinkRow>(
+    "SELECT * FROM threat_feature_links WHERE threat_id = ? ORDER BY id",
+  )
+  .bind(threat_id)
+  .fetch_all(pool)
+  .await
+}
+
+// ============================================================================
+// Condition CRUD operations
+// ============================================================================
+
+/// Database row for a condition
+#[derive(Debug, sqlx::FromRow)]
+pub struct ConditionRow {
+  pub id: i64,
+  pub audit_id: String,
+  pub subject_topic: String,
+  pub condition_type: String,
+  pub description: String,
+  pub author_id: i64,
+  pub created_at: String,
+}
+
+/// Database row for a condition evaluation
+#[derive(Debug, sqlx::FromRow)]
+pub struct ConditionEvaluationRow {
+  pub id: i64,
+  pub condition_id: i64,
+  pub question: String,
+  pub answer: String,
+}
+
+/// Creates a new condition and returns the row
+pub async fn create_condition(
+  pool: &SqlitePool,
+  audit_id: &str,
+  subject_topic: &str,
+  condition_type: &str,
+  description: &str,
+  author_id: i64,
+) -> Result<ConditionRow, sqlx::Error> {
+  let result = sqlx::query(
+    r#"
+        INSERT INTO conditions (audit_id, subject_topic, condition_type, description, author_id)
+        VALUES (?, ?, ?, ?, ?)
+        "#,
+  )
+  .bind(audit_id)
+  .bind(subject_topic)
+  .bind(condition_type)
+  .bind(description)
+  .bind(author_id)
+  .execute(pool)
+  .await?;
+
+  let id = result.last_insert_rowid();
+  sqlx::query_as::<_, ConditionRow>("SELECT * FROM conditions WHERE id = ?")
+    .bind(id)
+    .fetch_one(pool)
+    .await
+}
+
+/// Adds an evaluation (question/answer pair) to a condition
+pub async fn add_condition_evaluation(
+  pool: &SqlitePool,
+  condition_id: i64,
+  question: &str,
+  answer: &str,
+) -> Result<ConditionEvaluationRow, sqlx::Error> {
+  let result = sqlx::query(
+    r#"
+        INSERT INTO condition_evaluations (condition_id, question, answer)
+        VALUES (?, ?, ?)
+        "#,
+  )
+  .bind(condition_id)
+  .bind(question)
+  .bind(answer)
+  .execute(pool)
+  .await?;
+
+  let id = result.last_insert_rowid();
+  sqlx::query_as::<_, ConditionEvaluationRow>(
+    "SELECT * FROM condition_evaluations WHERE id = ?",
+  )
+  .bind(id)
+  .fetch_one(pool)
+  .await
+}
+
+/// Deletes a condition and its evaluations
+pub async fn delete_condition(
+  pool: &SqlitePool,
+  condition_id: i64,
+) -> Result<(), sqlx::Error> {
+  sqlx::query("DELETE FROM condition_evaluations WHERE condition_id = ?")
+    .bind(condition_id)
+    .execute(pool)
+    .await?;
+  sqlx::query("DELETE FROM conditions WHERE id = ?")
+    .bind(condition_id)
+    .execute(pool)
+    .await?;
+  Ok(())
+}
+
+/// Gets all conditions for a subject topic
+pub async fn get_conditions_for_subject(
+  pool: &SqlitePool,
+  audit_id: &str,
+  subject_topic: &str,
+) -> Result<Vec<ConditionRow>, sqlx::Error> {
+  sqlx::query_as::<_, ConditionRow>(
+    "SELECT * FROM conditions WHERE audit_id = ? AND subject_topic = ? ORDER BY id",
+  )
+  .bind(audit_id)
+  .bind(subject_topic)
+  .fetch_all(pool)
+  .await
+}
+
+/// Gets all evaluations for a condition
+pub async fn get_condition_evaluations(
+  pool: &SqlitePool,
+  condition_id: i64,
+) -> Result<Vec<ConditionEvaluationRow>, sqlx::Error> {
+  sqlx::query_as::<_, ConditionEvaluationRow>(
+    "SELECT * FROM condition_evaluations WHERE condition_id = ? ORDER BY id",
+  )
+  .bind(condition_id)
+  .fetch_all(pool)
+  .await
+}
+
+// ============================================================================
+// Behavior CRUD operations
+// ============================================================================
+
+/// Database row for a behavior
+#[derive(Debug, sqlx::FromRow)]
+pub struct BehaviorRow {
+  pub id: i64,
+  pub audit_id: String,
+  pub description: String,
+  pub author_id: i64,
+  pub created_at: String,
+}
+
+/// Database row for a behavior source topic association
+#[derive(Debug, sqlx::FromRow)]
+pub struct BehaviorSourceTopicRow {
+  pub id: i64,
+  pub behavior_id: i64,
+  pub topic_id: String,
+}
+
+/// Creates a new behavior and returns the row
+pub async fn create_behavior(
+  pool: &SqlitePool,
+  audit_id: &str,
+  description: &str,
+  author_id: i64,
+) -> Result<BehaviorRow, sqlx::Error> {
+  let result = sqlx::query(
+    r#"
+        INSERT INTO behaviors (audit_id, description, author_id)
+        VALUES (?, ?, ?)
+        "#,
+  )
+  .bind(audit_id)
+  .bind(description)
+  .bind(author_id)
+  .execute(pool)
+  .await?;
+
+  let id = result.last_insert_rowid();
+  sqlx::query_as::<_, BehaviorRow>("SELECT * FROM behaviors WHERE id = ?")
+    .bind(id)
+    .fetch_one(pool)
+    .await
+}
+
+/// Deletes a behavior and its source topic associations
+pub async fn delete_behavior(
+  pool: &SqlitePool,
+  behavior_id: i64,
+) -> Result<(), sqlx::Error> {
+  sqlx::query("DELETE FROM behavior_source_topics WHERE behavior_id = ?")
+    .bind(behavior_id)
+    .execute(pool)
+    .await?;
+  sqlx::query("DELETE FROM behaviors WHERE id = ?")
+    .bind(behavior_id)
+    .execute(pool)
+    .await?;
+  Ok(())
+}
+
+/// Adds a source topic to a behavior
+pub async fn add_behavior_source_topic(
+  pool: &SqlitePool,
+  behavior_id: i64,
+  topic_id: &str,
+) -> Result<(), sqlx::Error> {
+  sqlx::query(
+    r#"
+        INSERT OR IGNORE INTO behavior_source_topics (behavior_id, topic_id)
+        VALUES (?, ?)
+        "#,
+  )
+  .bind(behavior_id)
+  .bind(topic_id)
+  .execute(pool)
+  .await?;
+  Ok(())
+}
+
+/// Removes a source topic from a behavior
+pub async fn remove_behavior_source_topic(
+  pool: &SqlitePool,
+  behavior_id: i64,
+  topic_id: &str,
+) -> Result<(), sqlx::Error> {
+  sqlx::query(
+    "DELETE FROM behavior_source_topics WHERE behavior_id = ? AND topic_id = ?",
+  )
+  .bind(behavior_id)
+  .bind(topic_id)
+  .execute(pool)
+  .await?;
+  Ok(())
 }
 
 // ============================================================================
@@ -1005,14 +1737,6 @@ pub struct RequirementRow {
   pub description: String,
   pub author_id: i64,
   pub created_at: String,
-}
-
-/// Database row for a requirement source topic association
-#[derive(Debug, sqlx::FromRow)]
-pub struct RequirementSourceTopicRow {
-  pub id: i64,
-  pub requirement_id: i64,
-  pub topic_id: String,
 }
 
 /// Creates a new requirement and returns the row
@@ -1050,49 +1774,10 @@ pub async fn delete_requirement(
     .bind(requirement_id)
     .execute(pool)
     .await?;
-  sqlx::query("DELETE FROM requirement_source_topics WHERE requirement_id = ?")
-    .bind(requirement_id)
-    .execute(pool)
-    .await?;
   sqlx::query("DELETE FROM requirements WHERE id = ?")
     .bind(requirement_id)
     .execute(pool)
     .await?;
-  Ok(())
-}
-
-/// Adds a source topic to a requirement
-pub async fn add_requirement_source_topic(
-  pool: &SqlitePool,
-  requirement_id: i64,
-  topic_id: &str,
-) -> Result<(), sqlx::Error> {
-  sqlx::query(
-    r#"
-        INSERT OR IGNORE INTO requirement_source_topics (requirement_id, topic_id)
-        VALUES (?, ?)
-        "#,
-  )
-  .bind(requirement_id)
-  .bind(topic_id)
-  .execute(pool)
-  .await?;
-  Ok(())
-}
-
-/// Removes a source topic from a requirement
-pub async fn remove_requirement_source_topic(
-  pool: &SqlitePool,
-  requirement_id: i64,
-  topic_id: &str,
-) -> Result<(), sqlx::Error> {
-  sqlx::query(
-    "DELETE FROM requirement_source_topics WHERE requirement_id = ? AND topic_id = ?",
-  )
-  .bind(requirement_id)
-  .bind(topic_id)
-  .execute(pool)
-  .await?;
   Ok(())
 }
 
@@ -1147,28 +1832,31 @@ pub async fn remove_requirement_documentation_topic(
 #[derive(Debug, sqlx::FromRow)]
 pub struct ThreatRow {
   pub id: i64,
-  pub feature_id: i64,
+  pub audit_id: String,
+  pub subject_topic: String,
   pub description: String,
   pub author_id: i64,
   pub created_at: String,
-  pub severity: String,
+  pub severity: Option<String>,
 }
 
 /// Creates a new threat and returns the row
 pub async fn create_threat(
   pool: &SqlitePool,
-  feature_id: i64,
+  audit_id: &str,
+  subject_topic: &str,
   description: &str,
   author_id: i64,
-  severity: &str,
+  severity: Option<&str>,
 ) -> Result<ThreatRow, sqlx::Error> {
   let result = sqlx::query(
     r#"
-        INSERT INTO threats (feature_id, description, author_id, severity)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO threats (audit_id, subject_topic, description, author_id, severity)
+        VALUES (?, ?, ?, ?, ?)
         "#,
   )
-  .bind(feature_id)
+  .bind(audit_id)
+  .bind(subject_topic)
   .bind(description)
   .bind(author_id)
   .bind(severity)
@@ -1194,8 +1882,7 @@ pub async fn delete_all_threats_for_audit(
         DELETE FROM invariant_source_topics WHERE invariant_id IN (
             SELECT i.id FROM invariants i
             JOIN threats t ON i.threat_id = t.id
-            JOIN features f ON t.feature_id = f.id
-            WHERE f.audit_id = ?
+            WHERE t.audit_id = ?
         )
         "#,
   )
@@ -1207,9 +1894,7 @@ pub async fn delete_all_threats_for_audit(
   sqlx::query(
     r#"
         DELETE FROM invariants WHERE threat_id IN (
-            SELECT t.id FROM threats t
-            JOIN features f ON t.feature_id = f.id
-            WHERE f.audit_id = ?
+            SELECT id FROM threats WHERE audit_id = ?
         )
         "#,
   )
@@ -1218,16 +1903,10 @@ pub async fn delete_all_threats_for_audit(
   .await?;
 
   // Delete threats
-  sqlx::query(
-    r#"
-        DELETE FROM threats WHERE feature_id IN (
-            SELECT id FROM features WHERE audit_id = ?
-        )
-        "#,
-  )
-  .bind(audit_id)
-  .execute(pool)
-  .await?;
+  sqlx::query("DELETE FROM threats WHERE audit_id = ?")
+    .bind(audit_id)
+    .execute(pool)
+    .await?;
 
   Ok(())
 }
@@ -1270,7 +1949,7 @@ pub struct InvariantRow {
   pub description: String,
   pub author_id: i64,
   pub created_at: String,
-  pub severity: String,
+  pub severity: Option<String>,
 }
 
 /// Database row for an invariant source topic association
@@ -1287,7 +1966,7 @@ pub async fn create_invariant(
   threat_id: i64,
   description: &str,
   author_id: i64,
-  severity: &str,
+  severity: Option<&str>,
 ) -> Result<InvariantRow, sqlx::Error> {
   let result = sqlx::query(
     r#"

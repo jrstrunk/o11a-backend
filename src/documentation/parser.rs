@@ -148,6 +148,7 @@ pub(crate) fn get_named_topic_kind(
     | core::TopicMetadata::CommentTopic { .. }
     | core::TopicMetadata::FeatureTopic { .. }
     | core::TopicMetadata::RequirementTopic { .. }
+    | core::TopicMetadata::BehaviorTopic { .. }
     | core::TopicMetadata::ThreatTopic { .. }
     | core::TopicMetadata::InvariantTopic { .. }
     | core::TopicMetadata::DocumentationTopic { .. } => None,
