@@ -5,7 +5,7 @@ The o11a backend has five modules that form a processing pipeline:
  2. Analyzer - analyzes the audit source, producing a directory of definitions and their attributes, allowing clients to fetch structured audit data
  3. Formatter - transforms the AST into formatter nodes
  4. Collaborator - stores discussion topics and the comments under them, allowing clients to post new comments and approve or disapprove of comments from other users
- 5. Checker - checks variable constraints, manages the security model of features, requirements, behaviors, threats, and invariants, and allows clients to post new constraints to be checked, providing data on any conflicting constraints
+ 5. Checker - checks variable constraints, manages the security model of features, requirements, behaviors, conditions, threats, and invariants, and allows clients to post new constraints to be checked, providing data on any conflicting constraints
 
 # Parser
 
@@ -108,9 +108,11 @@ The security model is the structured representation of what the documentation cl
 
 **Behaviors capture what the code actually does.** Behaviors are observed during code review and represent the real implementation logic. They are reconciliation artifacts — compared against requirements to surface gaps between documentation and implementation.
 
-**Threats operate at two levels.** Feature-level threats externalize a shared adversarial framing for a feature — "here is how we think about what could go wrong with this feature." Like functional purpose, they do not contain information that is strictly unique (subject-level threat generation could re-derive the adversarial reasoning from the feature description), but they make an intermediate reasoning step explicit so that all agents — human and LLM — work from the same agreed-upon risk model. Without them, each subject-level threat generation independently re-derives the adversarial framing, which may produce inconsistent results across subjects in the same feature. Subject-level threats capture implementation-specific risks on non-pure source code subjects (state reads, state writes, external calls) — specific concerns like "reentrancy via token callback in this external call." They are generated with the feature-level threats as context, anchoring their adversarial reasoning to the shared risk model. Pure operations (arithmetic, comparisons, local variable assignments) are excluded from subject-level threat generation because their threat surface is fully covered by type convergences and their correctness is checked by functional semantics.
+**Conditions are the structured analysis of a non-pure subject's interaction surface.** Each non-pure subject has conditions determined by its type — revert conditions for function calls, value domain constraints for state mutations, staleness and manipulability for state reads. Each condition is evaluated with standardized questions, and the answers are stored on the subject. Conditions are evaluated before threat generation, providing concrete, enumerable inputs for adversarial reasoning rather than relying on open-ended threat identification.
 
-**Invariants live on source code subjects.** Invariants are properties the code must uphold to protect against threats. They are attached directly to the source subjects where they are checked at convergences, not to abstract structures like behaviors. This eliminates indirection — when the auditor evaluates a convergence, the invariants that apply are immediately present. Invariants are generated from both feature-level threats (broad invariants that apply across a feature's source subjects) and subject-level threats (specific invariants on individual non-pure subjects). Each invariant links back to its parent threat for traceability.
+**Threats live on non-pure source code subjects.** Threats capture implementation-specific risks derived from condition evaluations — specific concerns like "frontrunning via pre-computed token address bricks deployment." They are generated with the condition evaluations, the feature description, and requirements as context. Threats are created without a mandatory link to a feature, and linkage is established during a dedicated impact analysis step. Pure operations (arithmetic, comparisons, local variable assignments) are excluded from threat generation because their threat surface is fully covered by type convergences and their correctness is checked by functional semantics.
+
+**Invariants live on source code subjects.** Invariants are properties the code must uphold to protect against threats. They are attached directly to the source subjects where they are checked at convergences, not to abstract structures like behaviors. This eliminates indirection — when the auditor evaluates a convergence, the invariants that apply are immediately present. Invariants are generated from threats on non-pure subjects. Each invariant links back to its parent threat for traceability.
 
 **Source locations link to features.** Contract members are linked to the features they participate in. This allows behaviors created during code review to automatically associate with the right features, and enables reconciliation between documented requirements and observed behaviors.
 
@@ -120,25 +122,21 @@ The security model is initially seeded from project documentation through an aut
 
 **1. Feature Extraction.** Documentation files are processed to extract behavioral features and their requirements. When multiple documents exist, each is analyzed independently and the results are consolidated into a unified feature set. During consolidation, broad features with overlapping requirements are dissolved into more specific ones. Each requirement retains links to the documentation it was derived from, preserving traceability to the original developer claims.
 
-**2. Threat and Invariant Generation.** For each feature, the pipeline generates feature-level threats — the shared adversarial framing for that feature. Each threat carries a severity rating. These threats establish the risk model that all subsequent analysis within the feature is anchored to: when subject-level threats are later generated on individual code points, the feature-level threats provide the context that ensures consistent adversarial reasoning across all subjects. When the project includes security notes (developer-documented threats, roles, known invariants), a review pass checks whether those concerns are covered and fills gaps. Feature-level invariants are generated from these threats and attached to the source subjects within the feature's scope.
-
-Feature-level threats are few and general, derived from project documentation and the behavioral features. A threat may be that users can lose funds; invariants against that threat may be that funds cannot be sent to an irrecoverable address, or that balances cannot underflow. The hierarchy flows from documentation to features to threats to invariants on source subjects.
+**2. Source-to-Feature Linking.** Each contract member in scope is evaluated to determine which features it participates in. This produces source-to-feature links: a map from concrete code locations to the features they implement. A function can link to more than one feature. This mapping is the mechanism through which behaviors created during code review are automatically associated with the correct features — when an auditor adds a behavior while reviewing a function, the behavior inherits the feature association from the source location.
 
 Where requirements and invariants both describe things the code must do, they serve different concerns. Requirements capture what the documentation claims — the functionality described to users or the protocol. Invariants capture what the code must enforce to protect against threats — the defensive properties that prevent threats from materializing. A collateral lending feature has a documented requirement that users can deposit ETH, but the invariant that only the position owner can withdraw collateral exists to protect against a threat, not to fulfill a documented claim. Requirements are verified by matching them to behaviors during reconciliation; invariants are verified by checking them against convergences in the source code.
 
-**3. Source-to-Feature Linking.** Each contract member in scope is evaluated to determine which features it participates in. This produces source-to-feature links: a map from concrete code locations to the features they implement. A function can link to more than one feature. This mapping is the mechanism through which behaviors created during code review are automatically associated with the correct features — when an auditor adds a behavior while reviewing a function, the behavior inherits the feature association from the source location.
-
 ### On-the-Fly Generation
 
-The security model is not static after initial generation. As auditors review code and encounter security-relevant patterns, they add new features, requirements, behaviors, threats, and invariants directly from the code context. This on-the-fly generation is the primary mechanism through which the audit achieves comprehensive coverage.
+The security model is not static after initial generation. As auditors review code and encounter security-relevant patterns, they add new features, requirements, behaviors, conditions, threats, and invariants directly from the code context. This on-the-fly generation is the primary mechanism through which the audit achieves comprehensive coverage.
 
 When a user adds a new element to the security model, the relevant pipeline steps run automatically in the background:
 
-- **New feature** — Generates feature-level threats, then links source locations to the feature. Invariants from the generated threats are attached to the source subjects within the feature's scope.
+- **New feature** — Links source locations to the feature.
 - **New requirement** — Added to its parent feature. Requirements do not trigger threat generation or source linking; they are documentation claims that will be verified during reconciliation against behaviors.
 - **New behavior** — Created during code review and automatically associated with a feature via the source-to-feature link on the source location where it was observed. Behaviors are reconciliation artifacts and do not carry threat or invariant links.
-- **New feature-level threat** — Invariants are generated from the threat and attached to source subjects within the feature's scope. The system triggers re-checks against all previously-audited subjects that fall within scope.
-- **New subject-level threat** — Generated on non-pure subjects during code review (see Subject-Level Threats below). Invariants are generated from the threat and attached to the subject. The system triggers re-checks on the subject.
+- **New condition** — Evaluated on a non-pure subject with standardized questions. Condition evaluations trigger re-evaluation of the subject's threats, as new condition answers may reveal risks not previously identified.
+- **New threat** — Generated on non-pure subjects from condition evaluations (see Managing Threats and Invariants below). Created without a mandatory link to a feature, allowing the discoverer to record it immediately. Invariants are generated from the threat and attached to the subject. The system triggers re-checks on the subject. The feature linkage is established during impact analysis.
 - **New invariant** — Attached to a source subject, linked to its parent threat. The system triggers re-checks against the subject and any related subjects within the invariant's scope.
 
 The user's request completes immediately; background work finishes asynchronously.
@@ -156,6 +154,20 @@ Both are findings. The nature of the relationship between individual requirement
 
 Features structure the reconciliation into manageable units. Instead of reconciling all requirements against all behaviors in an audit at once, the auditor works through one feature at a time.
 
+### Impact Analysis
+
+Impact analysis is the dedicated step where threats on source subjects are linked to the features they affect. Threats are created during code review without a mandatory feature link — the discoverer records the implementation-specific risk immediately with whatever context they have, keeping them focused on the code. Impact analysis is where the linkage happens, with the right context and the right person.
+
+The link between a threat and a feature carries a relationship type: either "is vulnerable to" (the subject is part of the attack surface for a concern within the feature) or "defends against" (the subject is part of the defense against a concern within the feature). Both relationships establish why the subject matters from a security perspective and determine the nature of the audit emphasis — attack surface subjects need verification that they're safe, defense subjects need verification that they're sufficient.
+
+Severity is assigned during impact analysis based on the feature context and the nature of the threat. A reentrancy risk on an external call in a lending contract is critical because the feature involves user funds. A configuration read related to a display-only feature is low severity. Until impact analysis is performed, the threat has no severity — it is flagged as needing impact assessment.
+
+Threats that cannot be linked to any feature are one of two things: either the feature set is incomplete (a behavioral area of the code wasn't captured as a feature), which prompts adding a missing feature; or the threat is not actually a threat (the failure mode doesn't harm any feature), which prompts reconsidering whether it's valid. Both are useful signals that impact analysis surfaces.
+
+Some threats link to multiple features — a storage collision might affect collateral management and governance simultaneously. A proxy vulnerability might affect every feature. Impact analysis supports multiple links, and the threat inherits the highest severity among them.
+
+The system tracks unlinked threats and surfaces them for review. Unlinked threats that persist to the end of the audit indicate either incomplete impact analysis or threats that should be reconsidered.
+
 ### Hierarchy
 
 ```
@@ -168,13 +180,9 @@ Feature
   ├── Behavior (from code)                                 ← what the code does (reconciliation)
   │     "Campaign deploys and registers token in campaignsByToken mapping"
   │     └── Source Links: [deployCampaign(), campaignsByToken]
-  ├── Behavior (from code)
-  │     "Only one campaign can exist per token"
-  │     └── Source Links: [deployCampaign(), campaignsByToken]
-  ├── Feature-Level Threat                                 ← design-level risks
-  │     "Token slot squatting prevents legitimate protocols from deploying"
-  └── Feature-Level Threat
-        "Unauthorized withdrawal of campaign tokens"
+  └── Behavior (from code)
+        "Only one campaign can exist per token"
+        └── Source Links: [deployCampaign(), campaignsByToken]
 
 Source-to-Feature Links:
   deployCampaign()    → "Protocol Campaigns"
@@ -184,11 +192,21 @@ Source-to-Feature Links:
 Source Subject: deployCampaign() → IERC20(token).transferFrom(...)   [non-pure: external call]
   ├── Functional Purpose: "Transfer campaign tokens from creator into contract"
   ├── Functional Semantics: "token is the campaign reward token, amount is total campaign allocation"
-  ├── Subject-Level Threat: "Reentrancy via token callback during campaign setup"
+  ├── Condition: Revert "PAIR_EXISTS" on createPair
+  │     ├── Can an attacker trigger? Yes — token address is deterministic (CREATE opcode)
+  │     ├── Can normal operation trigger? No
+  │     └── Is it recoverable? No — createPair has no overwrite mechanism
+  ├── Condition: Reentrancy via token callback
+  │     ├── Does the call transfer control to untrusted code? Yes — token is user-supplied
+  │     └── Can the callee re-enter? Yes — no reentrancy guard
+  ├── Threat: "Frontrunning via pre-computed token address bricks deployment"
+  │     └── Impact: [is vulnerable to] "Protocol Campaigns" (severity: critical)
+  ├── Threat: "Reentrancy via token callback during campaign setup"
+  │     └── Impact: [is vulnerable to] "Protocol Campaigns" (severity: critical)
   ├── Invariant: "State updates precede external calls in deployCampaign"
-  │     └── Parent Threat: (subject-level) "Reentrancy via token callback..."
-  └── Invariant: "Only campaign creator can initiate token transfer"
-        └── Parent Threat: (feature-level) "Unauthorized withdrawal..."
+  │     └── Parent Threat: "Reentrancy via token callback..."
+  └── Invariant: "Token address must not be predictable or pair creation must be atomic"
+        └── Parent Threat: "Frontrunning via pre-computed token address..."
 ```
 
 ## Convergences
@@ -246,10 +264,11 @@ There are three types of properties that may be checked on the subjects of a spe
    1. Functional Purpose (what purpose it serves within the context of the application, derived from the feature it belongs to)
    2. Behaviors (the observed behaviors that apply to this subject, associated via source-to-feature linking)
    3. Dependencies (what the subject depends on to fulfill its purpose, expressed as links to other statements or mechanisms)
-   4. Invariants (defensive properties the subject must uphold, derived from feature-level and subject-level threats)
+   4. Invariants (defensive properties the subject must uphold, derived from threats)
  - Non-Pure Subjects (state reads, state writes, external calls, delegatecalls, assembly blocks):
    1. All of the above, plus:
-   2. Subject-Level Threats (implementation-specific risks at this code point, generated on-demand)
+   2. Conditions (structured evaluations of the subject's interaction surface, determined by subject type)
+   3. Threats (implementation-specific risks derived from condition evaluations)
  - Expressions and Values:
    1. Functional Semantics (what it represents within the context of the application, derived from project documentation)
 
@@ -326,7 +345,7 @@ Behaviors are what the code actually does. Each behavior captures an observed im
 
 Behaviors are created during code review and automatically associated with a feature via the source-to-feature link on the source location where they were observed. This means the auditor never leaves the code context when adding a behavior — they describe what the code does, and the model knows which feature it belongs to.
 
-Behaviors are purely reconciliation artifacts. They do not carry threat links or invariant links — security analysis operates at the source subject level through subject-level threats and invariants on convergences. Behaviors exist to enable the comparison between what the documentation claims (requirements) and what the code does (behaviors) during reconciliation.
+Behaviors are purely reconciliation artifacts. They do not carry threat links or invariant links — security analysis operates at the source subject level through threats and invariants on convergences. Behaviors exist to enable the comparison between what the documentation claims (requirements) and what the code does (behaviors) during reconciliation.
 
 ### Managing Dependencies
 
@@ -342,9 +361,9 @@ To implement this, we can gather all statements that could satisfy the dependenc
 
 A consumer is a statement that consumes what was set up by the current statement. A dependency checks that something was set up before the current statement, and a consumer checks that what is set up by the current statement is properly used by later statements. A consumer turns into a dependency on the consuming statement when it is linked, and a dependency turns into a consumer on the depended-upon statement when it is linked, so they can both be checked in the same way. Dependencies and consumers cannot be checked exhaustively, so checking for the existence or fullness of them is an important job of the auditor. When a statement has a side effect, at least one consumer must exist and should be searched for. The consumer is first added in an unsatisfied state, and added for satisfaction when a satisfying statement is found. Checking for at least one consumer is a way to make sure that something is not set up and then forgotten to be consumed, indicating a potential bug.
 
-### Managing Subject-Level Threats and Invariants
+### Managing Conditions
 
-The checker classifies source code subjects as pure or non-pure based on their interaction surface. Pure operations (arithmetic, comparisons, boolean logic, local variable assignments) have a closed threat surface — the only things that can go wrong are mechanical (overflow, type mismatch, wrong operands), and these are fully covered by type convergences. Non-pure operations interact with persistent state, external code, or the blockchain environment, creating implementation-specific attack surface that requires adversarial reasoning.
+The checker classifies source code subjects as pure or non-pure based on their interaction surface. Pure operations (arithmetic, comparisons, boolean logic, local variable assignments) have a closed threat surface — the only things that can go wrong are mechanical (overflow, type mismatch, wrong operands), and these are fully covered by type convergences. Non-pure operations interact with persistent state, external code, or the blockchain environment, creating implementation-specific attack surface that requires structured analysis before adversarial reasoning.
 
 Non-pure subject types include:
  - State writes (storage mutations)
@@ -354,24 +373,57 @@ Non-pure subject types include:
  - Assembly blocks (bypasses compiler safety checks)
  - Selfdestruct / create / create2
 
-Subject-level threats are generated on-demand for non-pure subjects only. When a non-pure subject is first evaluated during the audit, the LLM is given the subject, its backward context, its feature-level threats (as the shared adversarial framing to anchor reasoning against and avoid restating), and its type constraints (to avoid restating those), and asked "what implementation-specific risks exist at this code point that aren't already captured?" The result is cached on the subject and presented to the auditor for review. This ensures that subject-level adversarial reasoning is consistent across all subjects within a feature — each subject is evaluated against the same agreed-upon risk model rather than independently re-deriving it.
+Each non-pure subject has conditions determined by its type. Conditions are the concrete, enumerable aspects of a subject's interaction surface that must be evaluated. The analyzer identifies conditions from data it already tracks — revert conditions from function signatures, value domains from type constraints, access patterns from require statements. Each condition is evaluated with standardized questions specific to the subject type, and the answers are stored on the subject and shared between evaluators.
 
-Invariants are generated from both feature-level and subject-level threats and attached directly to the source subjects they protect. When the auditor evaluates a convergence, the invariants are immediately present alongside functional purpose, functional semantics, and type constraints — no indirection through abstract structures. Each invariant links back to its parent threat (either feature-level or subject-level) for traceability.
+Conditions are evaluated before threat generation. This provides threat generation with concrete, bounded inputs to reason from rather than relying on open-ended adversarial reasoning. The reasoning chain is: structured observations about each condition → threats derived from those observations → invariants derived from those threats. Separating observations from threats also allows the human auditor to agree with an observation but disagree with the threat assessment, making disagreements diagnosable.
 
-Pure operations are not excluded from invariant coverage. Feature-level threats can generate invariants that apply to pure subjects — for example, a feature-level threat about reward calculation errors might produce an invariant on an arithmetic expression. What pure subjects are excluded from is dedicated subject-level threat generation, because the threats at a pure operation are either mechanical (covered by type convergences) or semantic (covered by functional semantics at specification convergences).
+Standardized questions by condition type:
 
-The three layers of the threat model cover distinct risk categories with minimal overlap:
- - **Type convergences** catch mechanical correctness at all subjects (overflow, underflow, type mismatches)
- - **Feature-level threats** externalize the shared adversarial framing for a feature, ensuring all agents reason from the same risk model. They generate broad invariants across a feature's source subjects and provide the context input that anchors subject-level threat generation
- - **Subject-level threats** capture implementation-specific risks at non-pure subjects (reentrancy at a specific external call, stale data from a specific state read) and generate targeted invariants on individual subjects
+**Revert conditions on function calls.** For each revert condition in the callee's signature:
+ - Can an attacker trigger this condition?
+ - Can normal system operation trigger this condition?
+ - Is this condition recoverable if triggered?
 
-Pure expressions can house semantic bugs — `propFactor + bal` where the operator should be `*` — but these are caught by functional semantics at specification convergences, not by threat generation. The adversarial reasoning that threats capture always bottlenecks through non-pure operations, because those are the points where the system interacts with the outside world. Pure expressions may be *incorrect*, but their incorrectness becomes *exploitable* only through the non-pure operations that act on their results. Subject-level threats on non-pure subjects have visibility into the pure expressions that feed into them through backward context, so the threats account for insufficiencies in upstream checks and computations.
+For example, Uniswap's `createPair` has a revert condition "PAIR_EXISTS." When evaluating an external call to `createPair` where the token address is produced by `Clones.clone()` (which uses the deterministic CREATE opcode), the evaluation yields: an attacker *can* trigger PAIR_EXISTS by pre-computing the token address and calling `createPair` first; this condition is *not* recoverable because `createPair` has no mechanism to overwrite an existing pair. These observations directly produce the threat "frontrunning via pre-computed token address bricks deployment."
+
+**State mutations.** For each state write:
+ - Can the value be set to something that makes other functionality fail?
+ - Can the value be set by an unauthorized party?
+ - Is the mutation reversible?
+
+**State reads of mutable variables.** For each state read:
+ - Can the value be manipulated before this read?
+ - Can the value be stale?
+ - Does the caller control what value is read (via timing, ordering)?
+
+**External calls (beyond revert conditions).** For each external call:
+ - Does the call transfer control to untrusted code?
+ - Can the callee re-enter the current contract?
+ - Is the return value checked?
+
+**Delegatecalls.** For each delegatecall:
+ - Can the target address be manipulated?
+ - Does the delegated code make assumptions about storage layout?
+
+**Assembly blocks.** For each assembly block:
+ - Does the assembly bypass compiler safety checks that the surrounding code relies on?
+ - Does the assembly make assumptions about memory or storage layout?
+
+### Managing Threats and Invariants
+
+Threats are generated on-demand for non-pure subjects only, after their conditions have been evaluated. When a non-pure subject is first evaluated during the audit, the LLM is given the subject, its condition evaluations, its backward context, its feature description and requirements (as the adversarial context), and its type constraints (to avoid restating those), and asked "given these condition evaluations, what implementation-specific risks exist at this code point?" The condition evaluations provide concrete inputs — "an attacker can trigger PAIR_EXISTS and it is not recoverable" — from which the LLM derives specific threats rather than reasoning from scratch. The result is cached on the subject and presented to the auditor for review.
+
+Threats are created without a mandatory link to a feature. This keeps discovery lightweight — the auditor or LLM records the implementation-specific risk immediately without needing to perform impact analysis on the spot. Cross-cutting vulnerabilities like storage collisions may affect multiple features in ways that aren't apparent during code review, and forcing the link at creation time would either block documentation, produce a hasty and potentially misleading link, or cause the threat to go unrecorded. The linkage to features, along with severity and the relationship type ("is vulnerable to" or "defends against"), is established during the dedicated impact analysis step.
+
+Invariants are generated from threats and attached directly to the source subjects they protect. When the auditor evaluates a convergence, the invariants are immediately present alongside functional purpose, functional semantics, and type constraints — no indirection through abstract structures. Each invariant links back to its parent threat for traceability.
+
+Pure expressions can house semantic bugs — `propFactor + bal` where the operator should be `*` — but these are caught by functional semantics at specification convergences, not by threat generation. The adversarial reasoning that threats capture always bottlenecks through non-pure operations, because those are the points where the system interacts with the outside world. Pure expressions may be *incorrect*, but their incorrectness becomes *exploitable* only through the non-pure operations that act on their results. Threats on non-pure subjects have visibility into the pure expressions that feed into them through backward context, so the threats account for insufficiencies in upstream checks and computations.
 
 ### Threat Traceability
 
-When an invariant is contradicted at a convergence, the traceability chain identifies the security impact. For invariants from feature-level threats: convergence → invariant → feature-level threat → feature → documentation. For invariants from subject-level threats: convergence → invariant → subject-level threat → feature (via source-to-feature link). Both paths lead to a feature, which provides the severity context and the connection to documentation and requirements.
+When an invariant is contradicted at a convergence, the traceability chain identifies the security impact. For threats with completed impact analysis: convergence → invariant → threat → feature → documentation. For threats without a feature link: the contradiction is flagged but severity is pending impact analysis.
 
-This traceability enables prioritization: when the auditor is evaluating a convergence, the severity of the threats behind its invariants determines how much scrutiny the convergence warrants.
+This traceability enables prioritization: when the auditor is evaluating a convergence, the severity of the threats behind its invariants determines how much scrutiny the convergence warrants. Invariants from unlinked threats are flagged as needing impact assessment, ensuring they are not deprioritized by default but are also not assigned an arbitrary severity.
 
 ## Auditing Convergences
 
@@ -379,12 +431,13 @@ Type constraint checks can be checked by a constraint algorithm. Specification c
 
 General audit flow is:
  1. Read and understand the docs and the purpose of the project
- 2. Run the initial generation pipeline to extract features, requirements, and feature-level threats from the documentation, link source locations to features, and attach invariants from feature-level threats to source subjects
+ 2. Run the initial generation pipeline to extract features and requirements from the documentation, and link source locations to features
  3. Review and refine the generated security model, adding missing features or requirements as needed
  4. Read the code, documenting behaviors as they are observed (behaviors automatically associate with features via source-to-feature links)
- 5. Step through all convergences — for each subject, functional purpose, functional semantics, and subject-level threats (on non-pure subjects) are generated on-demand; invariants from subject-level threats are attached and checked alongside existing invariants from feature-level threats
- 6. Reconcile requirements against behaviors per feature, identifying unimplemented specification and undocumented implementation
- 7. As new features, requirements, behaviors, threats, or invariants are discovered during code review, add them to the security model — the re-check system propagates them to all relevant subjects, ensuring nothing is missed
+ 5. Step through all convergences — for each subject, functional purpose and functional semantics are generated on-demand; for non-pure subjects, conditions are evaluated with standardized questions, then threats are generated from the condition evaluations, and invariants from threats are attached and checked at convergences
+ 6. Perform impact analysis — link threats to the features they affect, establishing severity and the relationship type ("is vulnerable to" or "defends against"); unlinked threats are flagged for review
+ 7. Reconcile requirements against behaviors per feature, identifying unimplemented specification and undocumented implementation
+ 8. As new features, requirements, behaviors, conditions, threats, or invariants are discovered during code review, add them to the security model — the re-check system propagates them to all relevant subjects, ensuring nothing is missed
 
 ### Managing Convergences
 
@@ -392,7 +445,7 @@ Convergences are the main point of verification in the audit process. They have 
 
 ## Subject Evaluation Context Strategy
 
-When evaluating subjects for invariant upholding or invariant recognition, we use **backward-only context** as the default strategy. When auditing a given subject, the system provides context about where the subject's values originated (their data provenance, taint sources, and upstream transformations), the subject's functional purpose (why it exists, derived from the feature), the subject's functional semantics (what it represents, derived on-demand from project documentation), its invariants (defensive properties it must uphold, from feature-level and subject-level threats), and for non-pure subjects, its subject-level threats (implementation-specific risks at this code point). The system does not, by default, include forward context about where those values propagate to downstream.
+When evaluating subjects for invariant upholding or invariant recognition, we use **backward-only context** as the default strategy. When auditing a given subject, the system provides context about where the subject's values originated (their data provenance, taint sources, and upstream transformations), the subject's functional purpose (why it exists, derived from the feature), the subject's functional semantics (what it represents, derived on-demand from project documentation), its invariants (defensive properties it must uphold), and for non-pure subjects, its condition evaluations (structured analysis of the subject's interaction surface) and threats (implementation-specific risks derived from condition evaluations). The system does not, by default, include forward context about where those values propagate to downstream.
 
 This is a deliberate architectural choice, not a limitation. The system compensates for the absence of forward context through the **security model's on-the-fly generation and re-check mechanism**, which provides equivalent or superior coverage to bidirectional context while maintaining focused, low-noise audit passes.
 
@@ -412,7 +465,7 @@ The primary class of vulnerability where forward context provides value is **inc
 
 Rather than using forward context to surface these issues passively, this system surfaces them actively through the security model's on-the-fly generation:
 
-1. **Invariant discovery.** When the auditor encounters a security-relevant pattern during a backward-context audit pass (e.g., a role-based access check on a state-modifying function), they register it as a threat on the relevant feature (or a subject-level threat on a non-pure subject) with an associated invariant attached to the source subject. The incremental update pipeline propagates the invariant to all subjects within its scope via re-checks.
+1. **Invariant discovery.** When the auditor encounters a security-relevant pattern during a backward-context audit pass (e.g., a role-based access check on a state-modifying function), they register it as a threat on the non-pure subject with an associated invariant. The incremental update pipeline propagates the invariant to all subjects within its scope via re-checks.
 
 2. **Propagation via re-check.** The system applies the new invariant to all previously-audited subjects within its scope. Any function that modifies the same state but lacks the expected check is flagged mechanically, without requiring forward context at the point of origin.
 
@@ -426,7 +479,7 @@ The backward-only strategy with invariant re-checking has one residual limitatio
 
 **Subtle semantic distinctions.** Some invariants require recognizing that two superficially similar operations are categorically different. For example, a function that writes to `balances[msg.sender]` (self-modification) versus one that writes to `balances[account]` (arbitrary-address modification) may both appear as simple mapping writes, but only the latter requires elevated privilege. Forward context does not inherently make this distinction more visible — the auditor must apply domain knowledge in either case — but the system should include heuristic prompts that direct attention to these distinctions. Examples include flagging functions that modify state keyed by a caller-supplied address, or functions that bypass standard entry points.
 
-**Absent mechanisms.** If a contract should implement a security pattern (such as a pause mechanism) but does not, no backward-context encounter will contain a reference to the missing pattern. This class of finding is addressed by the initial generation pipeline's threat and invariant generation step, which derives expected security mechanisms from the project's documentation and feature set independently of what the code contains. When the initial generation identifies that a feature implies a pause mechanism, the corresponding invariant is checked against the codebase regardless of whether any code references pausing.
+**Absent mechanisms.** If a contract should implement a security pattern (such as a pause mechanism) but does not, no backward-context encounter will contain a reference to the missing pattern. This class of finding is addressed by reconciliation: if the documentation describes pausability, a requirement will exist for it, and the absence of a matching behavior surfaces the gap. Additionally, when the auditor reviews the feature's requirements and finds no corresponding code, the missing mechanism is identified as unimplemented specification.
 
 ### Summary
 
