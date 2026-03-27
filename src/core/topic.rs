@@ -9,6 +9,7 @@ pub enum TopicKind {
   AttackVector,
   Feature,
   Requirement,
+  Behavior,
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash, Serialize, Deserialize)]
@@ -32,6 +33,7 @@ impl Topic {
       Some(b'T') => Some(TopicKind::AttackVector),
       Some(b'F') => Some(TopicKind::Feature),
       Some(b'R') => Some(TopicKind::Requirement),
+      Some(b'B') => Some(TopicKind::Behavior),
       _ => None,
     }
   }
@@ -98,5 +100,11 @@ pub fn new_feature_topic(id: i32) -> Topic {
 pub fn new_requirement_topic(id: i32) -> Topic {
   Topic {
     id: format!("R{}", id),
+  }
+}
+
+pub fn new_behavior_topic(id: i32) -> Topic {
+  Topic {
+    id: format!("B{}", id),
   }
 }

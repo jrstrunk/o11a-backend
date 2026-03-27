@@ -42,16 +42,9 @@
 //!    documentation file independently to extract behavioral features and
 //!    verification-scoped requirements, then consolidate across files —
 //!    merging duplicates and dissolving broad features into more specific ones.
-//! 3. **Threaten** (`build_threats_for_feature`): For each feature, generate
-//!    threats and invariants. Security notes are included in context so the
-//!    LLM can incorporate roles and known attack vectors.
-//! 4. **Review** (`review_security_coverage`): A completeness pass that checks
-//!    whether all security notes content is accounted for in the generated
-//!    threat model, filling any gaps.
-//! 5. **Link** (`link_requirements_to_source`): For each (contract, feature)
-//!    pair, determine which requirements apply to which contract members.
-//!    One LLM call per pair (Option D) using the large model for quality.
-//!    Members linked to a requirement implicitly link their parent contract.
+//! 3. **Link** (`link_source_to_features`): For each (contract, feature)
+//!    pair, determine which contract members participate in the feature.
+//!    One LLM call per pair using the large model for quality.
 
 use std::collections::BTreeMap;
 
@@ -274,7 +267,6 @@ fn parse_features_response(response: &str) -> Result<ParsedFeatures, String> {
         req_topic,
         Requirement {
           documentation_topics: doc_topics,
-          source_topics: Vec::new(),
         },
       );
     }
@@ -294,7 +286,6 @@ fn parse_features_response(response: &str) -> Result<ParsedFeatures, String> {
       feature_topic,
       Feature {
         requirement_topics,
-        threat_topics: Vec::new(),
       },
     );
   }
@@ -386,290 +377,6 @@ pub async fn build_features_from_documentation(
   .await?;
 
   parse_features_response(&response)
-}
-
-/// Build the prompt for threat and invariant extraction for a single feature.
-const BUILD_THREATS_PROMPT: &str = "Below is a smart contract feature and its \
-requirements, extracted from project documentation.\n\n\
-Your task is to think adversarially about this feature and produce a list \
-of **threats** (attack vectors that an attacker could use to compromise \
-or abuse the feature). For each threat, produce a list of at least one **invariant** — \
-properties that must always hold in the implementation to prevent that \
-specific attack.\n\n\
-For each threat, provide:\n\
-- `description`: a concise description of the attack vector — how an attacker \
-could exploit the feature (e.g., \"An attacker re-enters the withdraw function \
-before the balance is updated to drain the contract\")\n\
-- `severity`: one of \"medium\", \"high\", or \"critical\"\n\
-- `invariants`: an array of strings, where each string is a specific, testable \
-property that must hold to prevent this attack (e.g., \"The contract's token \
-- Consider all common smart contract attack classes: reentrancy, replay, access control \
-bypass, front-running, oracle manipulation, flash loan attacks, price manipulation, \
-shared resource consumption, griefing, denial of service, storage \
-collision, and privilege escalation.\n\
-- Each threat should be specific to the feature, not generic.\n\
-- Each threat must have at least one invariant.\n\
-- Each invariant should be a concrete, verifiable property — not a vague \
-statement like \"the system should be secure\".\n\
-- The feature should have at least one threat\n\
-- If a requirement for a feature is describing an invariant, make sure it gets \
-added as an actual invariant to a threat on the feature.\n\
-- Return ONLY a JSON array of threat objects, no other text.\n\n";
-
-/// Appended to the threat prompt when a security notes document is present.
-const SECURITY_NOTES_PREAMBLE: &str = "\
-The project developers have provided a **Security Notes** document \
-containing roles, known threats, invariants, and other security \
-considerations. You MUST incorporate this information:\n\n\
-- If the document defines **roles** (named actors in the access control \
-model), those are the ONLY roles that exist. When writing access-control \
-invariants, reference only these roles by name. The enforcement of these \
-roles (e.g., \"only the `guardian` role can pause the protocol\") is a \
-valid and encouraged invariant. Do not invent roles that are not listed, \
-and do not create access control invariants that are not based on these roles.\n\
-- If the document describes **threats or attack vectors** that are \
-relevant to this feature, make sure they appear in your output as \
-threats (with matching invariants).\n\
-- If the document describes **invariants or security properties** that \
-are relevant to this feature, make sure they appear as invariants under \
-an appropriate threat.\n\n\
-Security Notes:\n";
-
-/// Result of parsing LLM threats: threats, invariants, and topic metadata.
-pub struct ParsedThreats {
-  pub threats: BTreeMap<topic::Topic, Threat>,
-  pub invariants: BTreeMap<topic::Topic, Invariant>,
-  pub topic_metadata: BTreeMap<topic::Topic, core::TopicMetadata>,
-  /// Maps feature topic -> new threat topics to append
-  pub feature_threat_topics: BTreeMap<topic::Topic, Vec<topic::Topic>>,
-}
-
-/// Parse the LLM response for a single feature into threats and invariants,
-/// assigning sequential T-prefixed and I-prefixed topic IDs.
-fn parse_threats_response(
-  response: &str,
-  feature_topic: &topic::Topic,
-  threat_start: i32,
-  invariant_start: i32,
-) -> Result<ParsedThreats, String> {
-  // Strip markdown code fences if present
-  let json_str = response
-    .trim()
-    .strip_prefix("```json")
-    .or_else(|| response.trim().strip_prefix("```"))
-    .unwrap_or(response.trim());
-  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
-
-  let raw_threats: Vec<LLMThreat> =
-    serde_json::from_str(json_str).map_err(|e| {
-      eprintln!(
-        "Failed to parse threats JSON: {}\nResponse:\n{}",
-        e, json_str
-      );
-      format!("Failed to parse threats JSON: {}", e)
-    })?;
-
-  let mut threats = BTreeMap::new();
-  let mut invariants = BTreeMap::new();
-  let mut topic_metadata = BTreeMap::new();
-  let mut threat_topics = Vec::new();
-  let mut threat_counter = threat_start;
-  let mut inv_counter = invariant_start;
-
-  for raw in raw_threats {
-    threat_counter += 1;
-    let threat_topic = topic::new_attack_vector_topic(threat_counter);
-    let threat_severity =
-      ThreatSeverity::from_str(&raw.severity).unwrap_or(ThreatSeverity::Medium);
-
-    let mut invariant_topics = Vec::new();
-    for inv_description in raw.invariants {
-      inv_counter += 1;
-      let inv_topic = topic::new_invariant_topic(inv_counter);
-
-      topic_metadata.insert(
-        inv_topic.clone(),
-        core::TopicMetadata::InvariantTopic {
-          topic: inv_topic.clone(),
-          description: inv_description,
-          threat_topic: threat_topic.clone(),
-          author_id: AUTHOR_AGENT,
-          created_at: String::new(),
-          severity: threat_severity,
-        },
-      );
-      invariants.insert(
-        inv_topic.clone(),
-        Invariant {
-          source_topics: Vec::new(),
-        },
-      );
-      invariant_topics.push(inv_topic);
-    }
-
-    topic_metadata.insert(
-      threat_topic.clone(),
-      core::TopicMetadata::ThreatTopic {
-        topic: threat_topic.clone(),
-        description: raw.description,
-        feature_topic: feature_topic.clone(),
-        author_id: AUTHOR_AGENT,
-        created_at: String::new(),
-        severity: threat_severity,
-      },
-    );
-    threats.insert(threat_topic.clone(), Threat { invariant_topics });
-    threat_topics.push(threat_topic);
-  }
-
-  let mut feature_threat_topics = BTreeMap::new();
-  if !threat_topics.is_empty() {
-    feature_threat_topics.insert(feature_topic.clone(), threat_topics);
-  }
-
-  Ok(ParsedThreats {
-    threats,
-    invariants,
-    topic_metadata,
-    feature_threat_topics,
-  })
-}
-
-/// Build threats and invariants for a single feature via LLM.
-///
-/// The caller renders the feature JSON while holding the lock, then passes
-/// it to this function after releasing it. `threat_start` and `invariant_start`
-/// are the current max IDs so new topics get unique sequential IDs.
-///
-/// When `security_notes` is provided, the security document is injected into
-/// the prompt so the LLM can incorporate roles, known threats, and invariants.
-pub async fn build_threats_for_feature(
-  feature_topic: &topic::Topic,
-  feature_json: &str,
-  threat_start: i32,
-  invariant_start: i32,
-  security_notes: Option<&str>,
-) -> Result<ParsedThreats, String> {
-  let prompt = match security_notes {
-    Some(notes) => format!(
-      "{}{}{}\n\nFeature:\n{}",
-      BUILD_THREATS_PROMPT, SECURITY_NOTES_PREAMBLE, notes, feature_json
-    ),
-    None => format!("{}Feature:\n{}", BUILD_THREATS_PROMPT, feature_json),
-  };
-  let response = router::chat_completion(
-    TaskSize::Large,
-    router::SYSTEM_MESSAGE_DOCUMENTATION,
-    &prompt,
-    Some(feature_topic.id()),
-  )
-  .await?;
-
-  parse_threats_response(
-    &response,
-    feature_topic,
-    threat_start,
-    invariant_start,
-  )
-}
-
-/// Prompt for the security coverage review pass.
-const REVIEW_SECURITY_COVERAGE_PROMPT: &str = "\
-You are reviewing a smart contract audit's threat model for completeness \
-against a **Security Notes** document provided by the project developers.\n\n\
-Below you will find:\n\
-1. The Security Notes document (roles, known threats, invariants, and \
-   other security considerations written by the developers).\n\
-2. All features that were extracted from the project documentation, each \
-   with their generated threats and invariants.\n\n\
-Your task is to identify any information in the Security Notes that is NOT \
-yet accounted for in the generated threats and invariants. For each gap, \
-produce additional threats and invariants under the most appropriate \
-feature.\n\n\
-Output rules:\n\
-- Return a JSON array of objects, one per feature that needs additions. \
-  Each object has:\n\
-  - `feature_topic`: the topic ID string of the feature (e.g., \"F1\")\n\
-  - `threats`: an array of threat objects (same format as the threat \
-    builder: `description`, `severity`, `invariants`)\n\
-- If all Security Notes content is already covered, return an empty array `[]`.\n\
-- Do NOT repeat threats or invariants that already exist.\n\
-- If the Security Notes define **roles**, ensure that access-control \
-  invariants referencing those roles exist under appropriate threats. \
-  Only use the roles defined in the Security Notes.\n\
-- Return ONLY the JSON array, no other text.\n\n";
-
-/// A single feature's additional threats from the review pass.
-#[derive(Deserialize)]
-struct LLMReviewEntry {
-  feature_topic: String,
-  threats: Vec<LLMThreat>,
-}
-
-/// Review the security notes against all generated features/threats/invariants
-/// and return additional threats to fill any gaps.
-pub async fn review_security_coverage(
-  security_notes: &str,
-  features_json: &str,
-  threat_start: i32,
-  invariant_start: i32,
-) -> Result<Vec<ParsedThreats>, String> {
-  let prompt = format!(
-    "{}Security Notes:\n{}\n\nFeatures with existing threats:\n{}",
-    REVIEW_SECURITY_COVERAGE_PROMPT, security_notes, features_json
-  );
-
-  let response = router::chat_completion(
-    TaskSize::Large,
-    router::SYSTEM_MESSAGE_DOCUMENTATION,
-    &prompt,
-    Some("security_review"),
-  )
-  .await?;
-
-  // Strip markdown code fences if present
-  let json_str = response
-    .trim()
-    .strip_prefix("```json")
-    .or_else(|| response.trim().strip_prefix("```"))
-    .unwrap_or(response.trim());
-  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
-
-  let review_entries: Vec<LLMReviewEntry> = serde_json::from_str(json_str)
-    .map_err(|e| {
-      eprintln!(
-        "Failed to parse security review JSON: {}\nResponse:\n{}",
-        e, json_str
-      );
-      format!("Failed to parse security review JSON: {}", e)
-    })?;
-
-  // Convert each entry into ParsedThreats using the same parser
-  let mut results = Vec::new();
-  let mut t_offset = threat_start;
-  let mut i_offset = invariant_start;
-
-  for entry in review_entries {
-    if entry.threats.is_empty() {
-      continue;
-    }
-    let feature_topic = topic::new_topic(&entry.feature_topic);
-
-    // Build a synthetic JSON response to reuse parse_threats_response
-    let synthetic = serde_json::to_string(&entry.threats)
-      .map_err(|e| format!("Failed to re-serialize review threats: {}", e))?;
-
-    let parsed =
-      parse_threats_response(&synthetic, &feature_topic, t_offset, i_offset)?;
-
-    // Advance offsets past the IDs we just used
-    t_offset += parsed.threats.len() as i32;
-    i_offset += parsed.invariants.len() as i32;
-
-    results.push(parsed);
-  }
-
-  Ok(results)
 }
 
 /// Prompt for normalizing a documentation file for plain text readability.
@@ -794,30 +501,23 @@ pub async fn normalize_documentation(
 }
 
 /// Prompt for linking requirements to contract members.
-const LINK_REQUIREMENTS_PROMPT: &str = "Below is a smart contract and a feature with its \
-requirements, extracted from project documentation.\n\n\
+const LINK_SOURCE_TO_FEATURES_PROMPT: &str = "Below is a smart contract and a feature \
+extracted from project documentation.\n\n\
 The contract is rendered as a JSON object with an N-prefixed topic ID on the \
 contract itself and on each of its members (functions, state variables, \
 modifiers, events, structs, enums, errors). Member bodies are omitted — \
 only signatures are shown.\n\n\
-The feature has R-prefixed requirement topic IDs on each requirement.\n\n\
-Your task is to determine which of the feature's requirements are relevant \
-to this contract's members. A requirement is relevant to a member if the \
-member's implementation would need to satisfy or could violate that \
-requirement.\n\n\
-For each relevant requirement, return the requirement's R-prefixed topic ID \
-and an array of N-prefixed member topic IDs that the requirement applies to. \
-A requirement may apply to multiple members, and a member may be relevant to \
-multiple requirements.\n\n\
+The feature has an F-prefixed topic ID.\n\n\
+Your task is to determine which of this contract's members participate in \
+implementing this feature. A member participates in a feature if the \
+member's implementation would need to satisfy, enforce, or could violate \
+the feature's described behavior.\n\n\
 Rules:\n\
-- Only link requirements to members where there is a clear, direct \
-  relationship. Do not force links.\n\
-- If none of the feature's requirements apply to this contract, return an \
+- Only link members where there is a clear, direct relationship to the \
+  feature. Do not force links.\n\
+- If none of the contract's members participate in this feature, return an \
   empty array `[]`.\n\
-- Omit requirements that do not apply to any member of this contract.\n\
-- Return ONLY a JSON array of objects, each with:\n\
-  - `requirement_topic`: the R-prefixed topic ID string\n\
-  - `source_topics`: an array of N-prefixed member topic ID strings\n\
+- Return ONLY a JSON array of N-prefixed member topic ID strings.\n\
 - No other text.\n\n";
 
 /// A pre-rendered (contract JSON, feature JSON) pair for the linking task.
@@ -858,8 +558,10 @@ pub fn collect_contract_feature_pairs(
     }
   }
 
-  // Collect features
-  let feature_json =
+  // Collect features and build pairs
+  let mut pairs = Vec::new();
+  for (ft, feature) in &audit_data.features {
+    let feature_json =
       match context::render_feature_to_json(ft, feature, audit_data, None) {
         Some(json) => json,
         None => continue,
@@ -880,14 +582,12 @@ pub fn collect_contract_feature_pairs(
   pairs
 }
 
-/// Collect contract×feature pairs for a single feature, optionally filtered to
-/// a single requirement. Used by reactive triggers after user creates a feature
-/// or requirement.
+/// Collect contract×feature pairs for a single feature. Used by reactive
+/// triggers after user creates a feature.
 pub fn collect_single_feature_pairs(
   feature_topic: &topic::Topic,
   audit_data: &AuditData,
   source_text_cache: &std::collections::HashMap<String, String>,
-  requirement_filter: Option<&topic::Topic>,
 ) -> Vec<ContractFeaturePair> {
   use crate::solidity::parser::ASTNode;
 
@@ -900,7 +600,7 @@ pub fn collect_single_feature_pairs(
     feature_topic,
     feature,
     audit_data,
-    requirement_filter,
+    None,
   ) {
     Some(json) => json,
     None => return Vec::new(),
@@ -921,7 +621,9 @@ pub fn collect_single_feature_pairs(
         ) {
           Some(json) => json,
           None => continue,
-          let label = format!("{}_{}", contract_topic.id(), feature_topic.id());
+        };
+        let contract_topic = topic::new_node_topic(&node.node_id());
+        let label = format!("{}_{}", contract_topic.id(), feature_topic.id());
         pairs.push(ContractFeaturePair {
           contract_topic,
           contract_json,
@@ -935,28 +637,21 @@ pub fn collect_single_feature_pairs(
   pairs
 }
 
-/// A single requirement-to-source link returned by the LLM.
-#[derive(Deserialize)]
-struct LLMRequirementLink {
-  requirement_topic: String,
-  source_topics: Vec<String>,
-}
-
-/// Result of linking requirements to source code: maps requirement topics
-/// to their linked source (member) topics.
-pub struct ParsedRequirementLinks {
+/// Result of linking source code members to features: maps source member
+/// topics to the features they participate in.
+pub struct ParsedSourceFeatureLinks {
   pub links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
 }
 
-/// Link requirements to contract members via LLM (Option D: one call per
-/// contract×feature pair, large model).
+/// Link source code members to features via LLM (one call per
+/// contract×feature pair).
 ///
 /// The caller collects pairs while holding the lock, then passes them here
-/// after releasing it. Returns a merged map of requirement topics to source
-/// member topics across all contracts and features.
-pub async fn link_requirements_to_source(
+/// after releasing it. Returns a merged map of source member topics to
+/// feature topics across all contracts and features.
+pub async fn link_source_to_features(
   pairs: &[ContractFeaturePair],
-) -> Result<ParsedRequirementLinks, String> {
+) -> Result<ParsedSourceFeatureLinks, String> {
   if pairs.is_empty() {
     return Err("No contract-feature pairs to process".to_string());
   }
@@ -965,9 +660,15 @@ pub async fn link_requirements_to_source(
   for pair in pairs {
     let prompt = format!(
       "{}Contract:\n{}\n\nFeature:\n{}",
-      LINK_REQUIREMENTS_PROMPT, pair.contract_json, pair.feature_json
+      LINK_SOURCE_TO_FEATURES_PROMPT, pair.contract_json, pair.feature_json
     );
     let label = pair.label.clone();
+    let feature_topic = {
+      // Extract F-prefixed topic from the feature JSON label
+      let parts: Vec<&str> = label.split('_').collect();
+      let ft_id = parts.get(1).unwrap_or(&"");
+      topic::new_topic(ft_id)
+    };
     handles.push(tokio::spawn(async move {
       let result = router::chat_completion(
         TaskSize::Large,
@@ -976,73 +677,77 @@ pub async fn link_requirements_to_source(
         Some(&label),
       )
       .await;
-      (label, result)
+      (label, feature_topic, result)
     }));
   }
 
   let mut links: BTreeMap<topic::Topic, Vec<topic::Topic>> = BTreeMap::new();
-  Ok((_, Ok(response))) => match parse_requirement_links(&response) {
-        Ok(parsed) => {
-          for (req_topic, source_topics) in parsed {
-            links.entry(req_topic).or_default().extend(source_topics);
+  for handle in handles {
+    match handle.await {
+      Ok((_, feature_topic, Ok(response))) => {
+        match parse_source_feature_links(&response) {
+          Ok(source_topics) => {
+            for st in source_topics {
+              links
+                .entry(st)
+                .or_default()
+                .push(feature_topic.clone());
+            }
           }
+          Err(e) => eprintln!("parse_source_feature_links failed: {}", e),
         }
-        Err(e) => eprintln!("parse_requirement_links failed: {}", e),
-      },
-      Ok((label, Err(e))) => {
-        eprintln!("link_requirements_to_source failed for {}: {}", label, e);
+      }
+      Ok((label, _, Err(e))) => {
+        eprintln!("link_source_to_features failed for {}: {}", label, e);
       }
       Err(e) => {
-        eprintln!("link_requirements_to_source task panicked: {}", e);
+        eprintln!("link_source_to_features task panicked: {}", e);
       }
     }
   }
 
-  // Deduplicate source topics per requirement
-  for source_topics in links.values_mut() {
-    source_topics.sort();
-    source_topics.dedup();
+  // Deduplicate feature topics per source
+  for feature_topics in links.values_mut() {
+    feature_topics.sort();
+    feature_topics.dedup();
   }
 
   if links.is_empty() {
-    return Err("No requirement-to-source links found".to_string());
+    return Err("No source-to-feature links found".to_string());
   }
 
-  Ok(ParsedRequirementLinks { links })
+  Ok(ParsedSourceFeatureLinks { links })
 }
 
-/// Parse the LLM response for requirement-to-source links.
-fn parse_requirement_links(
+/// Parse the LLM response for source-to-feature links.
+/// The LLM returns a JSON array of N-prefixed member topic ID strings.
+fn parse_source_feature_links(
   response: &str,
-) -> Result<Vec<(topic::Topic, Vec<topic::Topic>)>, String> {
+) -> Result<Vec<topic::Topic>, String> {
   let json_str = response
     .trim()
     .strip_prefix("```json")
     .or_else(|| response.trim().strip_prefix("```"))
     .unwrap_or(response.trim());
-    let raw_links: Vec<LLMRequirementLink> = serde_json::from_str(json_str)
+  let json_str = json_str
+    .strip_suffix("```")
+    .unwrap_or(json_str)
+    .trim();
+  let raw_topics: Vec<String> = serde_json::from_str(json_str)
     .map_err(|e| {
       eprintln!(
-        "Failed to parse requirement links JSON: {}\nResponse:\n{}",
+        "Failed to parse source-feature links JSON: {}\nResponse:\n{}",
         e, json_str
       );
-      format!("Failed to parse requirement links JSON: {}", e)
+      format!("Failed to parse source-feature links JSON: {}", e)
     })?;
 
-  let mut result = Vec::new();
-  for link in raw_links {
-    let req_topic = topic::new_topic(&link.requirement_topic);
-    let source_topics: Vec<topic::Topic> = link
-      .source_topics
+  Ok(
+    raw_topics
       .into_iter()
       .map(|id| topic::new_topic(&id))
-      .collect();
-    if !source_topics.is_empty() {
-      result.push((req_topic, source_topics));
-    }
-  }
-
-  Ok(result)
+      .collect(),
+  )
 }
 
 /// Generate documentation for all members of a specific contract.

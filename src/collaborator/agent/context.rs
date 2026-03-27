@@ -80,6 +80,9 @@ fn resolve_topic_name(topic: &topic::Topic, audit_data: &AuditData) -> String {
     Some(TopicMetadata::RequirementTopic { description, .. }) => {
       description.clone()
     }
+    Some(TopicMetadata::BehaviorTopic { description, .. }) => {
+      description.clone()
+    }
     Some(TopicMetadata::ThreatTopic { description, .. }) => {
       description.clone()
     }
@@ -196,6 +199,7 @@ fn plaintext_name_from_metadata(metadata: &TopicMetadata) -> String {
     TopicMetadata::CommentTopic { comment_type, .. } => comment_type.clone(),
     TopicMetadata::FeatureTopic { name, .. } => name.clone(),
     TopicMetadata::RequirementTopic { description, .. } => description.clone(),
+    TopicMetadata::BehaviorTopic { description, .. } => description.clone(),
     TopicMetadata::ThreatTopic { description, .. } => description.clone(),
     TopicMetadata::InvariantTopic { description, .. } => description.clone(),
     TopicMetadata::DocumentationTopic { .. } => {
@@ -1949,6 +1953,17 @@ pub fn build_agent_topic_context(
       mentions,
     }),
 
+    TopicMetadata::BehaviorTopic { .. } => Some(AgentTopicContext {
+      topic: topic_id_string,
+      name,
+      kind: "Behavior".to_string(),
+      sub_kind: None,
+      condition: None,
+      context,
+      expanded_context: None,
+      mentions,
+    }),
+
     TopicMetadata::ThreatTopic { .. } => Some(AgentTopicContext {
       topic: topic_id_string,
       name,
@@ -2023,49 +2038,11 @@ pub fn render_all_features_with_threats(
         })
         .collect();
 
-      let threats: Vec<serde_json::Value> = feature
-        .threat_topics
-        .iter()
-        .filter_map(|tt| {
-          let (desc, severity) = match audit_data.topic_metadata.get(tt) {
-            Some(TopicMetadata::ThreatTopic {
-              description,
-              severity,
-              ..
-            }) => (description.clone(), severity.as_str().to_string()),
-            _ => return None,
-          };
-
-          let threat = audit_data.threats.get(tt)?;
-          let invariants: Vec<String> = threat
-            .invariant_topics
-            .iter()
-            .filter_map(|it| {
-              if let Some(TopicMetadata::InvariantTopic {
-                description, ..
-              }) = audit_data.topic_metadata.get(it)
-              {
-                Some(description.clone())
-              } else {
-                None
-              }
-            })
-            .collect();
-
-          Some(serde_json::json!({
-            "description": desc,
-            "severity": severity,
-            "invariants": invariants,
-          }))
-        })
-        .collect();
-
       Some(serde_json::json!({
         "feature_topic": ft.id(),
         "name": name,
         "description": description,
         "requirements": reqs,
-        "threats": threats,
       }))
     })
     .collect();

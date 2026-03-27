@@ -349,6 +349,12 @@ pub fn highlighted_name(metadata: &TopicMetadata) -> String {
         html_escape(description)
       )
     }
+    TopicMetadata::BehaviorTopic { description, .. } => {
+      format!(
+        "<span class=\"behavior\">{}</span>",
+        html_escape(description)
+      )
+    }
     TopicMetadata::ThreatTopic { description, .. } => {
       format!(
         "<span class=\"threat\">{}</span>",
@@ -633,7 +639,8 @@ pub fn render_source_text(
     ..
   }) = audit_data.topic_metadata.get(topic)
   {
-    let keyword = format!("threat [{}]", severity.as_str());
+    let sev_str = severity.map(|s| s.as_str()).unwrap_or("pending");
+    let keyword = format!("threat [{}]", sev_str);
     let header = render_authored_header(&keyword, *author_id, created_at);
     let content = format!(
       "{}<p style=\"margin: 0\">{}</p>",
@@ -651,7 +658,8 @@ pub fn render_source_text(
     ..
   }) = audit_data.topic_metadata.get(topic)
   {
-    let keyword = format!("inv [{}]", severity.as_str());
+    let sev_str = severity.map(|s| s.as_str()).unwrap_or("pending");
+    let keyword = format!("inv [{}]", sev_str);
     let header = render_authored_header(&keyword, *author_id, created_at);
     let content = format!(
       "{}<p style=\"margin: 0\">{}</p>",
@@ -1673,6 +1681,7 @@ fn render_topic_node(
     metadata,
     TopicMetadata::FeatureTopic { .. }
       | TopicMetadata::RequirementTopic { .. }
+      | TopicMetadata::BehaviorTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. }
   );
@@ -1758,6 +1767,7 @@ fn topic_kind_label(metadata: &TopicMetadata) -> &'static str {
     TopicMetadata::CommentTopic { .. } => "comment",
     TopicMetadata::FeatureTopic { .. } => "feature",
     TopicMetadata::RequirementTopic { .. } => "requirement",
+    TopicMetadata::BehaviorTopic { .. } => "behavior",
     TopicMetadata::ThreatTopic { .. } => "threat",
     TopicMetadata::InvariantTopic { .. } => "invariant",
   }

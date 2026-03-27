@@ -98,10 +98,6 @@ pub fn create_router(state: AppState) -> Router {
       get(handlers::get_feature_requirements),
     )
     .route(
-      "/api/v1/audits/:audit_id/features/:feature_id/threats",
-      get(handlers::get_feature_threats),
-    )
-    .route(
       "/api/v1/audits/:audit_id/analyze",
       post(handlers::analyze),
     )
@@ -139,28 +135,82 @@ pub fn create_router(state: AppState) -> Router {
       "/api/v1/audits/:audit_id/requirements/:requirement_id",
       get(handlers::get_requirement),
     )
+    // ============================================
+    // Source-to-feature link routes
+    // ============================================
     .route(
-      "/api/v1/audits/:audit_id/requirements/:requirement_id/source_topics",
-      post(handlers::add_requirement_source_topic),
+      "/api/v1/audits/:audit_id/source_feature_links",
+      post(handlers::add_source_feature_link),
     )
     .route(
-      "/api/v1/audits/:audit_id/requirements/:requirement_id/source_topics/:topic_id",
-      delete(handlers::remove_requirement_source_topic),
+      "/api/v1/audits/:audit_id/source_feature_links/:source_topic/:feature_id",
+      delete(handlers::remove_source_feature_link),
+    )
+    // ============================================
+    // Reconciliation routes
+    // ============================================
+    .route(
+      "/api/v1/audits/:audit_id/reconciliation/:feature_id",
+      get(handlers::get_reconciliation),
+    )
+    // ============================================
+    // Subject property routes
+    // ============================================
+    .route(
+      "/api/v1/audits/:audit_id/subjects/:topic_id/purpose",
+      get(handlers::get_functional_purpose).put(handlers::set_functional_purpose),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/subjects/:topic_id/semantics",
+      get(handlers::get_functional_semantics).put(handlers::set_functional_semantics),
+    )
+    // ============================================
+    // Impact analysis routes
+    // ============================================
+    .route(
+      "/api/v1/audits/:audit_id/impact_analysis",
+      post(handlers::create_threat_feature_link),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/impact_analysis/:threat_id/:feature_id",
+      delete(handlers::delete_threat_feature_link),
+    )
+    // ============================================
+    // Condition routes
+    // ============================================
+    .route(
+      "/api/v1/audits/:audit_id/conditions",
+      post(handlers::create_condition),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/conditions/:subject_topic",
+      get(handlers::get_subject_conditions),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/conditions/id/:condition_id",
+      delete(handlers::delete_condition),
+    )
+    // ============================================
+    // Behavior routes
+    // ============================================
+    .route(
+      "/api/v1/audits/:audit_id/behaviors",
+      get(handlers::get_behaviors).post(handlers::create_behavior),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/behaviors/:behavior_id",
+      get(handlers::get_behavior).delete(handlers::delete_behavior),
     )
     // ============================================
     // Threat routes
     // ============================================
     .route(
-      "/api/v1/audits/:audit_id/features/:feature_id/threats",
+      "/api/v1/audits/:audit_id/threats",
       post(handlers::create_threat),
     )
     .route(
-      "/api/v1/audits/:audit_id/features/:feature_id/threats/:threat_id",
-      delete(handlers::delete_threat),
-    )
-    .route(
       "/api/v1/audits/:audit_id/threats/:threat_id",
-      get(handlers::get_threat),
+      get(handlers::get_threat).delete(handlers::delete_threat),
     )
     // ============================================
     // Invariant routes
