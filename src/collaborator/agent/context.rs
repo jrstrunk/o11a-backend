@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::Serialize;
 use serde_json::json;
 
@@ -1380,15 +1382,34 @@ fn flatten_inline_recursive(
   }
 }
 
+/// Controls selective rendering of documentation sections.
+///
+/// When provided, only sections on the path from the root ancestor to the
+/// target are rendered. Ancestor sections render only their direct content
+/// (paragraphs, lists, etc.) and skip sibling subsections not on the path.
+/// The target section is rendered fully with all its children.
+pub struct DocRenderContext {
+  /// Node IDs of sections that are ancestors of the target.
+  /// These render only their direct (non-section) content.
+  pub ancestor_node_ids: HashSet<i32>,
+  /// The node ID of the target section to render fully.
+  pub target_node_id: i32,
+}
+
 /// Render a DocumentationNode as a structured AST snippet (JSON value).
 ///
 /// Only meaningful structural nodes (Section, Paragraph, List, CodeBlock,
 /// BlockQuote) get their own JSON objects with topic IDs. Everything else
 /// (Root, Heading, Sentence, ListItem, inline content) is flattened
 /// transitively into the parent. Text values use raw markdown formatting.
+///
+/// When `render_ctx` is provided, sections are rendered selectively: ancestor
+/// sections include only direct content, the target section renders fully,
+/// and all other sections are skipped.
 pub fn render_documentation_ast_snippet(
   node: &DocumentationNode,
   audit_data: &AuditData,
+  render_ctx: Option<&DocRenderContext>,
 ) -> serde_json::Value {
   let resolved = node.resolve(&audit_data.nodes);
 
@@ -1406,13 +1427,21 @@ pub fn render_documentation_ast_snippet(
   let id = topic::new_documentation_topic(node_id).id().to_string();
   let comments = lookup_doc_node_comments(node_id, audit_data);
 
-  let recurse = |child: &DocumentationNode| -> serde_json::Value {
-    render_documentation_ast_snippet(child, audit_data)
+  let recurse = |child: &DocumentationNode,
+                 ctx: Option<&DocRenderContext>|
+   -> serde_json::Value {
+    render_documentation_ast_snippet(child, audit_data, ctx)
   };
 
   let render_children =
-    |children: &[DocumentationNode]| -> Vec<serde_json::Value> {
-      children.iter().map(|c| recurse(c)).collect()
+    |children: &[DocumentationNode],
+     ctx: Option<&DocRenderContext>|
+     -> Vec<serde_json::Value> {
+      children
+        .iter()
+        .map(|c| recurse(c, ctx))
+        .filter(|v| !v.is_null())
+        .collect()
     };
 
   let obj = match resolved {
@@ -1420,15 +1449,26 @@ pub fn render_documentation_ast_snippet(
 
     // Root: return array of rendered children
     DocumentationNode::Root { children, .. } => {
-      return json!(render_children(children));
+      return json!(render_children(children, render_ctx));
     }
 
-    // Heading: render its section child if present, otherwise flatten text
+    // Heading: render its section child if present, otherwise flatten text.
+    // When selective rendering is active, skip headings whose sections are
+    // not on the path to the target.
     DocumentationNode::Heading {
       section, children, ..
     } => {
       if let Some(sec) = section {
-        return recurse(sec);
+        if let Some(ctx) = render_ctx {
+          let sec_resolved = sec.resolve(&audit_data.nodes);
+          let sec_id = sec_resolved.node_id();
+          if sec_id != ctx.target_node_id
+            && !ctx.ancestor_node_ids.contains(&sec_id)
+          {
+            return json!(null);
+          }
+        }
+        return recurse(sec, render_ctx);
       }
       let (text, _) = flatten_inline_content(children, audit_data);
       return json!(text);
@@ -1443,12 +1483,30 @@ pub fn render_documentation_ast_snippet(
     // === Structural nodes with topic IDs ===
     DocumentationNode::Section {
       title, children, ..
-    } => json!({
-      "type": "section",
-      "id": id,
-      "title": title,
-      "children": render_children(children),
-    }),
+    } => {
+      // Selective rendering: ancestor sections render only direct content,
+      // the target section renders fully, others are skipped.
+      let children_ctx = if let Some(ctx) = render_ctx {
+        if node_id == ctx.target_node_id {
+          // Target section: render all children fully (no selective context)
+          None
+        } else if ctx.ancestor_node_ids.contains(&node_id) {
+          // Ancestor section: pass context through so child sections are filtered
+          render_ctx
+        } else {
+          // Not on path: skip entirely
+          return json!(null);
+        }
+      } else {
+        None
+      };
+      json!({
+        "type": "section",
+        "id": id,
+        "title": title,
+        "children": render_children(children, children_ctx),
+      })
+    }
 
     DocumentationNode::Paragraph { children, .. } => {
       let (text, refs) = flatten_inline_content(children, audit_data);
@@ -1477,7 +1535,7 @@ pub fn render_documentation_ast_snippet(
               all_refs.extend(refs);
               json!(text)
             }
-            _ => recurse(item),
+            _ => recurse(item, None),
           }
         })
         .collect();
@@ -1517,7 +1575,7 @@ pub fn render_documentation_ast_snippet(
     DocumentationNode::BlockQuote { children, .. } => json!({
       "type": "block_quote",
       "id": id,
-      "children": render_children(children),
+      "children": render_children(children, None),
     }),
 
     // === Inline/leaf nodes at top level (uncommon) ===
@@ -1566,11 +1624,11 @@ pub fn render_documentation_ast_snippet(
     DocumentationNode::Table { children, .. } => json!({
       "type": "table",
       "id": id,
-      "children": render_children(children),
+      "children": render_children(children, None),
     }),
 
     DocumentationNode::TableRow { children, .. } => {
-      let cells: Vec<serde_json::Value> = render_children(children);
+      let cells: Vec<serde_json::Value> = render_children(children, None);
       return json!(cells);
     }
 
@@ -1758,7 +1816,7 @@ fn convert_reference(
       )
     }
     Some(Node::Documentation(doc_node)) => {
-      render_documentation_ast_snippet(doc_node, audit_data)
+      render_documentation_ast_snippet(doc_node, audit_data, None)
     }
     _ => json!({"type": "unknown_ref", "id": ref_topic.id()}),
   };
@@ -1799,6 +1857,99 @@ fn convert_reference(
 // ============================================================================
 // Public API: Build Agent Context
 // ============================================================================
+
+/// Build context for a documentation section topic, including ancestor
+/// section headers and their direct content above the target.
+///
+/// When the section has ancestors in its scope (e.g., an H3 under H2 under H1),
+/// this renders from the outermost ancestor section with selective context so
+/// that only the path to the target is included.
+fn build_documentation_section_context(
+  topic: &topic::Topic,
+  scope: &core::Scope,
+  audit_data: &AuditData,
+) -> Vec<AgentSourceGroup> {
+  let ancestors = scope.ancestor_topics();
+
+  // Find the outermost ancestor that is a documentation section.
+  // Ancestors are ordered [component, member, ...containing_blocks].
+  let root_ancestor = ancestors.iter().find(|t| {
+    matches!(
+      t.kind(),
+      Some(topic::TopicKind::Documentation)
+    ) && matches!(
+      audit_data.topic_metadata.get(t),
+      Some(TopicMetadata::TitledTopic {
+        kind: TitledTopicKind::DocumentationSection,
+        ..
+      })
+    )
+  });
+
+  let root_ancestor = match root_ancestor {
+    Some(ancestor) => ancestor,
+    None => {
+      // No ancestor sections — render self directly.
+      let node = match audit_data.nodes.get(topic) {
+        Some(Node::Documentation(doc_node)) => doc_node,
+        _ => return vec![],
+      };
+      let rendered =
+        render_documentation_ast_snippet(node, audit_data, None);
+      let scope_title = build_scope_title(topic, audit_data);
+      return vec![AgentSourceGroup {
+        scope: scope_title,
+        in_scope: true,
+        scope_references: vec![rendered],
+        nested_references: vec![],
+      }];
+    }
+  };
+
+  // Build the set of ancestor node IDs (all doc section ancestors on the path).
+  let ancestor_node_ids: HashSet<i32> = ancestors
+    .iter()
+    .filter_map(|t| {
+      if matches!(
+        audit_data.topic_metadata.get(t),
+        Some(TopicMetadata::TitledTopic {
+          kind: TitledTopicKind::DocumentationSection,
+          ..
+        })
+      ) {
+        t.underlying_id().ok()
+      } else {
+        None
+      }
+    })
+    .collect();
+
+  let target_node_id = match topic.underlying_id() {
+    Ok(id) => id,
+    Err(_) => return vec![],
+  };
+
+  let render_ctx = DocRenderContext {
+    ancestor_node_ids,
+    target_node_id,
+  };
+
+  // Look up the root ancestor's node and render selectively.
+  let root_node = match audit_data.nodes.get(root_ancestor) {
+    Some(Node::Documentation(doc_node)) => doc_node,
+    _ => return vec![],
+  };
+  let rendered =
+    render_documentation_ast_snippet(root_node, audit_data, Some(&render_ctx));
+
+  let scope_title = build_scope_title(root_ancestor, audit_data);
+  vec![AgentSourceGroup {
+    scope: scope_title,
+    in_scope: true,
+    scope_references: vec![rendered],
+    nested_references: vec![],
+  }]
+}
 
 /// Build the agent context for a given topic.
 ///
@@ -1901,10 +2052,16 @@ pub fn build_agent_topic_context(
       })
     }
 
-    TopicMetadata::TitledTopic { kind, .. } => {
+    TopicMetadata::TitledTopic { kind, scope, .. } => {
       let kind_str = match kind {
         TitledTopicKind::DocumentationSection => "DocumentationSection",
       };
+
+      // For documentation sections with ancestors, render from the root
+      // ancestor with selective context so that ancestor headers and their
+      // direct content are included above the target section.
+      let context =
+        build_documentation_section_context(&topic, scope, audit_data);
 
       Some(AgentTopicContext {
         topic: topic_id_string,

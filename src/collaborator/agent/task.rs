@@ -95,7 +95,7 @@ pub fn render_documentation_files(audit_data: &AuditData) -> Vec<String> {
     let rendered: Vec<serde_json::Value> = doc_ast
       .nodes
       .iter()
-      .map(|node| context::render_documentation_ast_snippet(node, audit_data))
+      .map(|node| context::render_documentation_ast_snippet(node, audit_data, None))
       .collect();
 
     let file_json = serde_json::json!({
