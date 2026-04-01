@@ -769,8 +769,9 @@ pub async fn synthesize_features(
 // ============================================================================
 
 /// Prompt for extracting behaviors from a contract's source code.
-const EXTRACT_BEHAVIORS_PROMPT: &str = "Below is a smart contract with its full source code and \
-functional semantics (project-specific meanings for declarations).\n\n\
+const EXTRACT_BEHAVIORS_PROMPT: &str = "Below is a smart contract with its functions and \
+modifiers (state variables are excluded) and functional semantics \
+(project-specific meanings for declarations).\n\n\
 Your task is to extract **behaviors** — what each function/modifier in this \
 contract actually does, described in business-level terms using the \
 functional semantics provided.\n\n\
@@ -781,20 +782,19 @@ the semantic \"proportional reward multiplier\" and `stakerBalance` has \
 \"user's staked token balance\", describe the behavior as \"calculates \
 proportional reward share for the staker\" rather than \"multiplies \
 propFactor by stakerBalance.\"\n\n\
-Each behavior belongs to exactly one member (function, modifier, or \
-state variable declaration). Each member may have multiple behaviors.\n\n\
+Each behavior belongs to exactly one function or modifier. \
+Each function/modifier may have multiple behaviors.\n\n\
 Return a JSON array of member groups, where each group has:\n\
-- `member_topic`: the N-prefixed topic ID of the function/modifier/variable\n\
+- `member_topic`: the N-prefixed topic ID of the function/modifier\n\
 - `behaviors`: an array of behavior description strings\n\n\
 Rules:\n\
+- Every function and modifier must have at least one behavior.\n\
 - Each behavior should be a concise, specific description of what the code does.\n\
 - Use functional semantics to give business-level meaning when available.\n\
 - Include both normal execution paths and edge case behaviors (reverts, \
 access control checks, state mutations).\n\
 - Do not describe implementation details like \"calls _transfer internally\" — \
 describe the observable effect: \"transfers tokens from sender to recipient.\"\n\
-- If a function has no meaningful behavior (pure getters with no logic), \
-you may omit it.\n\
 - Return ONLY the JSON array, no other text.\n\n";
 
 /// Raw member behavior group from LLM.

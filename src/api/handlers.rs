@@ -1768,6 +1768,57 @@ pub async fn get_threat_invariants(
 }
 
 /// Trigger the agent to build features from documentation.
+/// Find feature topics for any source code topic by checking source_feature_links
+/// on the topic itself, then on its containing member. Does not walk up to the
+/// contract level — a topic inside a member gets the member's features only.
+fn features_for_topic(
+  t: &topic::Topic,
+  audit_data: &core::AuditData,
+) -> Vec<topic::Topic> {
+  // Direct lookup
+  if let Some(fts) = audit_data.source_feature_links.get(t) {
+    if !fts.is_empty() {
+      return fts.clone();
+    }
+  }
+
+  // Walk up to the containing member only (not the contract)
+  if let Some(metadata) = audit_data.topic_metadata.get(t) {
+    let member = match metadata.scope() {
+      core::Scope::Member { member, .. } => Some(member),
+      core::Scope::ContainingBlock { member, .. } => Some(member),
+      _ => None,
+    };
+    if let Some(member_topic) = member {
+      if let Some(fts) = audit_data.source_feature_links.get(member_topic) {
+        if !fts.is_empty() {
+          return fts.clone();
+        }
+      }
+    }
+  }
+
+  Vec::new()
+}
+
+/// Collect requirement topics for a set of feature topics.
+fn requirements_for_features(
+  feature_topics: &[topic::Topic],
+  audit_data: &core::AuditData,
+) -> Vec<topic::Topic> {
+  let mut requirement_topics = Vec::new();
+  for ft in feature_topics {
+    if let Some(feature) = audit_data.features.get(ft) {
+      for rt in &feature.requirement_topics {
+        if !requirement_topics.contains(rt) {
+          requirement_topics.push(rt.clone());
+        }
+      }
+    }
+  }
+  requirement_topics
+}
+
 fn pipeline_state(state: &AppState) -> crate::collaborator::agent::pipeline::PipelineState {
   crate::collaborator::agent::pipeline::PipelineState {
     db: state.db.clone(),
@@ -2030,16 +2081,11 @@ pub async fn get_topic_requirements(
       }
     }
     _ => {
-      // Check source-to-feature links: source topic → features → requirements
-      if let Some(feature_topics) = audit_data.source_feature_links.get(&t) {
-        for ft in feature_topics {
-          if let Some(feature) = audit_data.features.get(ft) {
-            for rt in &feature.requirement_topics {
-              if !requirement_topics.contains(rt) {
-                requirement_topics.push(rt.clone());
-              }
-            }
-          }
+      // Check source-to-feature links with scope walk, then collect requirements
+      let fts = features_for_topic(&t, audit_data);
+      for rt in requirements_for_features(&fts, audit_data) {
+        if !requirement_topics.contains(&rt) {
+          requirement_topics.push(rt);
         }
       }
       // Check section_requirements index (D-section → requirements)
@@ -2113,16 +2159,11 @@ pub async fn get_documentation_panel(
         }
       }
       _ => {
-        // Look up features via source_feature_links, then requirements
-        if let Some(feature_topics) = audit_data.source_feature_links.get(&t) {
-          for ft in feature_topics {
-            if let Some(feature) = audit_data.features.get(ft) {
-              for rt in &feature.requirement_topics {
-                if !requirement_topics.contains(rt) {
-                  requirement_topics.push(rt.clone());
-                }
-              }
-            }
+        // Look up features via source_feature_links with scope walk, then requirements
+        let fts = features_for_topic(&t, audit_data);
+        for rt in requirements_for_features(&fts, audit_data) {
+          if !requirement_topics.contains(&rt) {
+            requirement_topics.push(rt);
           }
         }
       }
