@@ -10,6 +10,8 @@ pub enum TopicKind {
   Feature,
   Requirement,
   Behavior,
+  FunctionalProperty,
+  TypeConstraint,
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash, Serialize, Deserialize)]
@@ -34,6 +36,8 @@ impl Topic {
       Some(b'F') => Some(TopicKind::Feature),
       Some(b'R') => Some(TopicKind::Requirement),
       Some(b'B') => Some(TopicKind::Behavior),
+      Some(b'P') => Some(TopicKind::FunctionalProperty),
+      Some(b'Y') => Some(TopicKind::TypeConstraint),
       _ => None,
     }
   }
@@ -106,5 +110,17 @@ pub fn new_requirement_topic(id: i32) -> Topic {
 pub fn new_behavior_topic(id: i32) -> Topic {
   Topic {
     id: format!("B{}", id),
+  }
+}
+
+pub fn new_functional_property_topic(id: i32) -> Topic {
+  Topic {
+    id: format!("P{}", id),
+  }
+}
+
+pub fn new_type_constraint_topic(id: i32) -> Topic {
+  Topic {
+    id: format!("Y{}", id),
   }
 }

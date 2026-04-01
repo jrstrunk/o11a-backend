@@ -2306,3 +2306,357 @@ pub fn render_contract_members_for_linking(
 
   Some(serde_json::to_string(&obj).unwrap_or_default())
 }
+
+// ============================================================================
+// Behavior Extraction: Contract rendering with semantics
+// ============================================================================
+
+/// A pre-rendered contract with full member bodies and functional semantics
+/// for behavior extraction.
+pub struct ContractForBehaviorExtraction {
+  pub contract_topic: topic::Topic,
+  pub contract_name: String,
+  pub json: String,
+}
+
+/// Render a contract's members with full bodies and functional semantics
+/// annotated on declarations, for the behavior extraction LLM task.
+pub fn render_contract_for_behavior_extraction(
+  contract_node: &ASTNode,
+  audit_data: &AuditData,
+  source_text_cache: &std::collections::HashMap<String, String>,
+) -> Option<ContractForBehaviorExtraction> {
+  let (name, _kind, members) = match contract_node {
+    ASTNode::ContractDefinition {
+      signature, nodes, ..
+    } => {
+      let (name, kind) = match signature.as_ref() {
+        ASTNode::ContractSignature {
+          name,
+          contract_kind,
+          ..
+        } => (name.clone(), format!("{:?}", contract_kind).to_lowercase()),
+        _ => ("unknown".to_string(), "contract".to_string()),
+      };
+      (name, kind, nodes)
+    }
+    _ => return None,
+  };
+
+  let contract_topic = topic::new_node_topic(&contract_node.node_id());
+
+  // Render with bodies included
+  let render_ctx = ASTRenderContext {
+    target_topic: contract_topic.clone(),
+    omit_function_and_modifier_bodies: false,
+  };
+
+  // Build semantic annotations for declarations in this contract
+  let mut semantics: Vec<serde_json::Value> = Vec::new();
+  for (decl_topic, sem) in &audit_data.functional_semantics {
+    // Check if this declaration is scoped to this contract
+    if let Some(metadata) = audit_data.topic_metadata.get(decl_topic) {
+      let in_contract = match metadata.scope() {
+        core::Scope::Component { component, .. } => *component == contract_topic,
+        core::Scope::Member { component, .. } => *component == contract_topic,
+        core::Scope::ContainingBlock { component, .. } => *component == contract_topic,
+        _ => false,
+      };
+      if in_contract {
+        semantics.push(json!({
+          "declaration_topic": decl_topic.id(),
+          "name": metadata.name().unwrap_or(""),
+          "semantic": sem.text,
+        }));
+      }
+    }
+  }
+
+  let member_snippets: Vec<serde_json::Value> = members
+    .iter()
+    .map(|m| render_solidity_ast_snippet(m, &render_ctx, audit_data, source_text_cache))
+    .collect();
+
+  let obj = json!({
+    "contract_topic": contract_topic.id(),
+    "name": name,
+    "members": member_snippets,
+    "functional_semantics": semantics,
+  });
+
+  Some(ContractForBehaviorExtraction {
+    contract_topic,
+    contract_name: name,
+    json: serde_json::to_string(&obj).unwrap_or_default(),
+  })
+}
+
+/// Collect all contracts rendered for behavior extraction.
+pub fn collect_contracts_for_behavior_extraction(
+  audit_data: &AuditData,
+  source_text_cache: &std::collections::HashMap<String, String>,
+) -> Vec<ContractForBehaviorExtraction> {
+  let mut results = Vec::new();
+  for (_path, ast) in &audit_data.asts {
+    let sol_ast = match ast {
+      core::AST::Solidity(sol_ast) => sol_ast,
+      _ => continue,
+    };
+    for node in &sol_ast.nodes {
+      if let ASTNode::ContractDefinition { .. } = node {
+        if let Some(rendered) = render_contract_for_behavior_extraction(
+          node,
+          audit_data,
+          source_text_cache,
+        ) {
+          results.push(rendered);
+        }
+      }
+    }
+  }
+  results
+}
+
+// ============================================================================
+// Semantic Linking: Mechanical Layer
+// ============================================================================
+
+/// Result of mechanical semantic linking: confirmed section→contract associations
+/// derived from inline code references in documentation.
+pub struct MechanicalLinkResult {
+  /// Maps D-prefixed section topics to the N-prefixed contract topics they reference
+  pub section_to_contracts: std::collections::HashMap<topic::Topic, Vec<topic::Topic>>,
+  /// Maps D-prefixed section topics to the specific N-prefixed declaration topics
+  /// that were resolved from inline code references
+  pub section_to_declarations: std::collections::HashMap<topic::Topic, Vec<topic::Topic>>,
+}
+
+/// Walk the documentation ASTs and resolve inline code references to find
+/// confirmed section→contract associations. This is the mechanical layer
+/// of semantic linking — perfect confidence because the documentation
+/// literally names the declaration.
+pub fn mechanical_semantic_links(
+  audit_data: &AuditData,
+) -> MechanicalLinkResult {
+  let mut section_to_contracts: std::collections::HashMap<topic::Topic, Vec<topic::Topic>> =
+    std::collections::HashMap::new();
+  let mut section_to_declarations: std::collections::HashMap<topic::Topic, Vec<topic::Topic>> =
+    std::collections::HashMap::new();
+
+  for (_path, ast) in &audit_data.asts {
+    let doc_ast = match ast {
+      core::AST::Documentation(doc_ast) => doc_ast,
+      _ => continue,
+    };
+
+    for node in &doc_ast.nodes {
+      collect_mechanical_links_recursive(
+        node,
+        None, // no parent section yet
+        audit_data,
+        &mut section_to_contracts,
+        &mut section_to_declarations,
+      );
+    }
+  }
+
+  MechanicalLinkResult {
+    section_to_contracts,
+    section_to_declarations,
+  }
+}
+
+/// Recursively walk documentation nodes, tracking the current section.
+/// When a CodeIdentifier with a resolved reference is found, walk up
+/// the reference's scope to find the containing contract and record
+/// the section→contract and section→declaration associations.
+fn collect_mechanical_links_recursive(
+  node: &crate::documentation::parser::DocumentationNode,
+  current_section: Option<&topic::Topic>,
+  audit_data: &AuditData,
+  section_to_contracts: &mut std::collections::HashMap<topic::Topic, Vec<topic::Topic>>,
+  section_to_declarations: &mut std::collections::HashMap<topic::Topic, Vec<topic::Topic>>,
+) {
+  match node {
+    DocumentationNode::Section { node_id, children, .. } => {
+      let section_topic = topic::new_documentation_topic(*node_id);
+      for child in children {
+        collect_mechanical_links_recursive(
+          child,
+          Some(&section_topic),
+          audit_data,
+          section_to_contracts,
+          section_to_declarations,
+        );
+      }
+    }
+
+    DocumentationNode::Heading { section, children, .. } => {
+      // Process heading text with current section context
+      for child in children {
+        collect_mechanical_links_recursive(
+          child, current_section, audit_data,
+          section_to_contracts, section_to_declarations,
+        );
+      }
+      // Process section content
+      if let Some(sec) = section {
+        collect_mechanical_links_recursive(
+          sec, current_section, audit_data,
+          section_to_contracts, section_to_declarations,
+        );
+      }
+    }
+
+    DocumentationNode::CodeIdentifier {
+      referenced_topic: Some(ref_topic),
+      ..
+    } => {
+      if let Some(section_topic) = current_section {
+        // Record section → declaration
+        let decls = section_to_declarations
+          .entry(section_topic.clone())
+          .or_default();
+        if !decls.contains(ref_topic) {
+          decls.push(ref_topic.clone());
+        }
+
+        // Walk up the declaration's scope to find the containing contract
+        if let Some(metadata) = audit_data.topic_metadata.get(ref_topic) {
+          let contract_topic = match metadata.scope() {
+            core::Scope::Component { component, .. } => Some(component.clone()),
+            core::Scope::Member { component, .. } => Some(component.clone()),
+            core::Scope::ContainingBlock { component, .. } => Some(component.clone()),
+            _ => None,
+          };
+          if let Some(ct) = contract_topic {
+            let contracts = section_to_contracts
+              .entry(section_topic.clone())
+              .or_default();
+            if !contracts.contains(&ct) {
+              contracts.push(ct.clone());
+            }
+          }
+        }
+      }
+    }
+
+    // Recurse into other node types
+    DocumentationNode::Root { children, .. }
+    | DocumentationNode::Paragraph { children, .. }
+    | DocumentationNode::Sentence { children, .. }
+    | DocumentationNode::InlineCode { children, .. }
+    | DocumentationNode::List { children, .. }
+    | DocumentationNode::ListItem { children, .. }
+    | DocumentationNode::BlockQuote { children, .. }
+    | DocumentationNode::Emphasis { children, .. }
+    | DocumentationNode::Strong { children, .. }
+    | DocumentationNode::CodeBlock { children, .. } => {
+      for child in children {
+        collect_mechanical_links_recursive(
+          child, current_section, audit_data,
+          section_to_contracts, section_to_declarations,
+        );
+      }
+    }
+
+    // Leaf nodes and nodes without relevant children
+    _ => {}
+  }
+}
+
+/// Render a lightweight list of all contracts with their names and topic IDs
+/// for LLM pass 1 of semantic linking.
+pub fn render_contract_list_for_semantic_linking(
+  audit_data: &AuditData,
+  source_text_cache: &std::collections::HashMap<String, String>,
+) -> Vec<(topic::Topic, String)> {
+  use crate::solidity::parser::ASTNode;
+
+  let mut contracts = Vec::new();
+  for (_path, ast) in &audit_data.asts {
+    let sol_ast = match ast {
+      core::AST::Solidity(sol_ast) => sol_ast,
+      _ => continue,
+    };
+    for node in &sol_ast.nodes {
+      if let ASTNode::ContractDefinition { .. } = node {
+        let contract_topic = topic::new_node_topic(&node.node_id());
+        if let Some(json) = render_contract_members_for_linking(
+          node,
+          audit_data,
+          source_text_cache,
+        ) {
+          contracts.push((contract_topic, json));
+        }
+      }
+    }
+  }
+
+  contracts
+}
+
+/// Render a documentation section's text content as a plain string for LLM context.
+pub fn render_section_text(
+  section_topic: &topic::Topic,
+  audit_data: &AuditData,
+) -> Option<String> {
+  let node_id = section_topic.numeric_id()? as i32;
+  let doc_topic = topic::new_documentation_topic(node_id);
+
+  // Find the section's title from metadata
+  let title = match audit_data.topic_metadata.get(&doc_topic) {
+    Some(TopicMetadata::TitledTopic { title, .. }) => Some(title.as_str()),
+    _ => None,
+  };
+
+  // Render the section content from the documentation AST
+  let rendered = render_documentation_ast_snippet(
+    find_doc_node_by_id(audit_data, node_id)?,
+    audit_data,
+    None,
+  );
+
+  let json_text = serde_json::to_string(&rendered).unwrap_or_default();
+
+  if let Some(t) = title {
+    Some(format!("Section: {}\n{}", t, json_text))
+  } else {
+    Some(json_text)
+  }
+}
+
+/// Find a documentation node by its node_id across all documentation ASTs.
+fn find_doc_node_by_id<'a>(
+  audit_data: &'a AuditData,
+  target_id: i32,
+) -> Option<&'a crate::documentation::parser::DocumentationNode> {
+  fn search_node<'a>(
+    node: &'a crate::documentation::parser::DocumentationNode,
+    target_id: i32,
+  ) -> Option<&'a crate::documentation::parser::DocumentationNode> {
+    if node.node_id() == target_id {
+      return Some(node);
+    }
+    for child in node.children() {
+      if let Some(found) = search_node(child, target_id) {
+        return Some(found);
+      }
+    }
+    None
+  }
+
+  for (_path, ast) in &audit_data.asts {
+    let doc_ast = match ast {
+      core::AST::Documentation(doc_ast) => doc_ast,
+      _ => continue,
+    };
+    for node in &doc_ast.nodes {
+      if let Some(found) = search_node(node, target_id) {
+        return Some(found);
+      }
+    }
+  }
+
+  None
+}

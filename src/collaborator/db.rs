@@ -1,6 +1,6 @@
 use crate::collaborator::models::*;
 use crate::collaborator::{formatter, parser};
-use crate::core::{self, topic, DataContext, Behavior, Feature, Requirement};
+use crate::core::{self, topic, DataContext, Feature, Requirement};
 use sqlx::SqlitePool;
 
 // ============================================================================
@@ -148,6 +148,13 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .execute(pool)
   .await;
 
+  // Migration: add section_topic to requirements if missing
+  let _ = sqlx::query(
+    "ALTER TABLE requirements ADD COLUMN section_topic TEXT",
+  )
+  .execute(pool)
+  .await;
+
   // Requirement source topic associations
   sqlx::query(
     r#"
@@ -258,6 +265,35 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   )
   .execute(pool)
   .await?;
+
+  // Semantic links table (doc section → code declaration)
+  sqlx::query(
+    r#"
+        CREATE TABLE IF NOT EXISTS semantic_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audit_id TEXT NOT NULL,
+            documentation_topic TEXT NOT NULL,
+            declaration_topic TEXT NOT NULL,
+            semantic_text TEXT NOT NULL,
+            UNIQUE(audit_id, documentation_topic, declaration_topic)
+        )
+        "#,
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_semantic_links_audit ON semantic_links(audit_id)",
+  )
+  .execute(pool)
+  .await?;
+
+  // Migration: add member_topic to behaviors if missing
+  let _ = sqlx::query(
+    "ALTER TABLE behaviors ADD COLUMN member_topic TEXT NOT NULL DEFAULT ''",
+  )
+  .execute(pool)
+  .await;
 
   // Subject properties table (functional purpose and semantics)
   sqlx::query(
@@ -373,6 +409,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         CREATE TABLE IF NOT EXISTS behaviors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             audit_id TEXT NOT NULL,
+            member_topic TEXT NOT NULL,
             description TEXT NOT NULL,
             author_id INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -999,6 +1036,7 @@ pub async fn load_all_features(
               topic: req_topic.clone(),
               description: req.description.clone(),
               feature_topic: feature_topic.clone(),
+              section_topic: req.section_topic.as_ref().map(|s| topic::new_topic(s)),
               author_id: req.author_id,
               created_at: req.created_at.clone(),
             },
@@ -1123,6 +1161,32 @@ pub async fn load_all_features(
     }
   }
 
+  // Load semantic links
+  let semantic_link_rows =
+    sqlx::query_as::<_, SemanticLinkRow>("SELECT * FROM semantic_links")
+      .fetch_all(pool)
+      .await?;
+
+  for row in &semantic_link_rows {
+    if let Some(audit_data) = data_context.get_audit_mut(&row.audit_id) {
+      let link = core::SemanticLink {
+        documentation_topic: topic::new_topic(&row.documentation_topic),
+        declaration_topic: topic::new_topic(&row.declaration_topic),
+        semantic_text: row.semantic_text.clone(),
+      };
+      audit_data.semantic_links.push(link);
+
+      // Also populate functional_semantics with provenance
+      audit_data.functional_semantics.insert(
+        topic::new_topic(&row.declaration_topic),
+        core::FunctionalSemantic {
+          text: row.semantic_text.clone(),
+          documentation_topic: Some(topic::new_topic(&row.documentation_topic)),
+        },
+      );
+    }
+  }
+
   // Load subject properties (functional purpose and semantics)
   let prop_rows =
     sqlx::query_as::<_, SubjectPropertyRow>(
@@ -1139,7 +1203,10 @@ pub async fn load_all_features(
           audit_data.functional_purposes.insert(t, row.value.clone());
         }
         "functional_semantics" => {
-          audit_data.functional_semantics.insert(t, row.value.clone());
+          audit_data.functional_semantics.insert(t, core::FunctionalSemantic {
+            text: row.value.clone(),
+            documentation_topic: None, // provenance loaded separately from semantic_links
+          });
         }
         _ => {}
       }
@@ -1232,61 +1299,77 @@ pub async fn load_all_features(
       .fetch_all(pool)
       .await?;
 
-  let beh_source_topics =
-    sqlx::query_as::<_, BehaviorSourceTopicRow>(
-      "SELECT * FROM behavior_source_topics",
-    )
-    .fetch_all(pool)
-    .await?;
-
-  let mut src_by_beh: std::collections::HashMap<i64, Vec<&BehaviorSourceTopicRow>> =
-    std::collections::HashMap::new();
-  for bst in &beh_source_topics {
-    src_by_beh.entry(bst.behavior_id).or_default().push(bst);
-  }
-
   for row in &behavior_rows {
     if let Some(audit_data) = data_context.get_audit_mut(&row.audit_id) {
       let beh_topic = topic::new_behavior_topic(row.id as i32);
-
-      let mut source_topics = Vec::new();
-      if let Some(srcs) = src_by_beh.get(&row.id) {
-        for s in srcs {
-          source_topics.push(topic::new_topic(&s.topic_id));
-        }
-      }
-
-      // Derive feature associations from source-to-feature links
-      let mut feature_topics = Vec::new();
-      for st in &source_topics {
-        if let Some(fts) = audit_data.source_feature_links.get(st) {
-          for ft in fts {
-            if !feature_topics.contains(ft) {
-              feature_topics.push(ft.clone());
-            }
-          }
-        }
-      }
+      let member_topic = topic::new_topic(&row.member_topic);
 
       audit_data.topic_metadata.insert(
         beh_topic.clone(),
         core::TopicMetadata::BehaviorTopic {
           topic: beh_topic.clone(),
           description: row.description.clone(),
-          feature_topics,
+          member_topic: member_topic.clone(),
           author_id: row.author_id,
           created_at: row.created_at.clone(),
         },
       );
 
-      audit_data.behaviors.insert(
-        beh_topic,
-        core::Behavior { source_topics },
-      );
+      audit_data.behaviors.insert(beh_topic, core::Behavior {});
     }
   }
 
   Ok(count)
+}
+
+// ============================================================================
+// Semantic link operations
+// ============================================================================
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct SemanticLinkRow {
+  pub id: i64,
+  pub audit_id: String,
+  pub documentation_topic: String,
+  pub declaration_topic: String,
+  pub semantic_text: String,
+}
+
+/// Adds a semantic link (doc section → code declaration)
+pub async fn add_semantic_link(
+  pool: &SqlitePool,
+  audit_id: &str,
+  documentation_topic: &str,
+  declaration_topic: &str,
+  semantic_text: &str,
+) -> Result<(), sqlx::Error> {
+  sqlx::query(
+    r#"
+        INSERT INTO semantic_links (audit_id, documentation_topic, declaration_topic, semantic_text)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(audit_id, documentation_topic, declaration_topic) DO UPDATE SET semantic_text = ?
+        "#,
+  )
+  .bind(audit_id)
+  .bind(documentation_topic)
+  .bind(declaration_topic)
+  .bind(semantic_text)
+  .bind(semantic_text)
+  .execute(pool)
+  .await?;
+  Ok(())
+}
+
+/// Deletes all semantic links for an audit
+pub async fn delete_all_semantic_links(
+  pool: &SqlitePool,
+  audit_id: &str,
+) -> Result<(), sqlx::Error> {
+  sqlx::query("DELETE FROM semantic_links WHERE audit_id = ?")
+    .bind(audit_id)
+    .execute(pool)
+    .await?;
+  Ok(())
 }
 
 // ============================================================================
@@ -1635,33 +1718,28 @@ pub async fn get_condition_evaluations(
 pub struct BehaviorRow {
   pub id: i64,
   pub audit_id: String,
+  pub member_topic: String,
   pub description: String,
   pub author_id: i64,
   pub created_at: String,
-}
-
-/// Database row for a behavior source topic association
-#[derive(Debug, sqlx::FromRow)]
-pub struct BehaviorSourceTopicRow {
-  pub id: i64,
-  pub behavior_id: i64,
-  pub topic_id: String,
 }
 
 /// Creates a new behavior and returns the row
 pub async fn create_behavior(
   pool: &SqlitePool,
   audit_id: &str,
+  member_topic: &str,
   description: &str,
   author_id: i64,
 ) -> Result<BehaviorRow, sqlx::Error> {
   let result = sqlx::query(
     r#"
-        INSERT INTO behaviors (audit_id, description, author_id)
-        VALUES (?, ?, ?)
+        INSERT INTO behaviors (audit_id, member_topic, description, author_id)
+        VALUES (?, ?, ?, ?)
         "#,
   )
   .bind(audit_id)
+  .bind(member_topic)
   .bind(description)
   .bind(author_id)
   .execute(pool)
@@ -1674,54 +1752,15 @@ pub async fn create_behavior(
     .await
 }
 
-/// Deletes a behavior and its source topic associations
+/// Deletes a behavior
 pub async fn delete_behavior(
   pool: &SqlitePool,
   behavior_id: i64,
 ) -> Result<(), sqlx::Error> {
-  sqlx::query("DELETE FROM behavior_source_topics WHERE behavior_id = ?")
-    .bind(behavior_id)
-    .execute(pool)
-    .await?;
   sqlx::query("DELETE FROM behaviors WHERE id = ?")
     .bind(behavior_id)
     .execute(pool)
     .await?;
-  Ok(())
-}
-
-/// Adds a source topic to a behavior
-pub async fn add_behavior_source_topic(
-  pool: &SqlitePool,
-  behavior_id: i64,
-  topic_id: &str,
-) -> Result<(), sqlx::Error> {
-  sqlx::query(
-    r#"
-        INSERT OR IGNORE INTO behavior_source_topics (behavior_id, topic_id)
-        VALUES (?, ?)
-        "#,
-  )
-  .bind(behavior_id)
-  .bind(topic_id)
-  .execute(pool)
-  .await?;
-  Ok(())
-}
-
-/// Removes a source topic from a behavior
-pub async fn remove_behavior_source_topic(
-  pool: &SqlitePool,
-  behavior_id: i64,
-  topic_id: &str,
-) -> Result<(), sqlx::Error> {
-  sqlx::query(
-    "DELETE FROM behavior_source_topics WHERE behavior_id = ? AND topic_id = ?",
-  )
-  .bind(behavior_id)
-  .bind(topic_id)
-  .execute(pool)
-  .await?;
   Ok(())
 }
 
@@ -1733,7 +1772,8 @@ pub async fn remove_behavior_source_topic(
 #[derive(Debug, sqlx::FromRow)]
 pub struct RequirementRow {
   pub id: i64,
-  pub feature_id: i64,
+  pub feature_id: i64, // 0 means unattached (no feature yet)
+  pub section_topic: Option<String>,
   pub description: String,
   pub author_id: i64,
   pub created_at: String,
@@ -1821,6 +1861,20 @@ pub async fn remove_requirement_documentation_topic(
   .bind(topic_id)
   .execute(pool)
   .await?;
+  Ok(())
+}
+
+/// Sets the section_topic on a requirement
+pub async fn set_requirement_section(
+  pool: &SqlitePool,
+  requirement_id: i64,
+  section_topic: &str,
+) -> Result<(), sqlx::Error> {
+  sqlx::query("UPDATE requirements SET section_topic = ? WHERE id = ?")
+    .bind(section_topic)
+    .bind(requirement_id)
+    .execute(pool)
+    .await?;
   Ok(())
 }
 

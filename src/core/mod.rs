@@ -217,6 +217,29 @@ pub struct Feature {
   pub requirement_topics: Vec<topic::Topic>,
 }
 
+/// A functional semantic with provenance — what a declaration represents in the
+/// context of the project, linked to the documentation topic it was derived from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionalSemantic {
+  /// The semantic meaning text (e.g., "proportional reward multiplier")
+  pub text: String,
+  /// The D-prefixed documentation topic this semantic was derived from, if any
+  pub documentation_topic: Option<topic::Topic>,
+}
+
+/// A link between a documentation section and a code declaration, established
+/// during the semantic linking pipeline step. These links define what each
+/// declaration means in the context of the project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticLink {
+  /// The D-prefixed documentation section topic
+  pub documentation_topic: topic::Topic,
+  /// The N-prefixed code declaration topic
+  pub declaration_topic: topic::Topic,
+  /// The semantic meaning derived from this link
+  pub semantic_text: String,
+}
+
 /// A behavioral requirement belonging to a feature.
 /// Requirements are what the documentation claims the system does. They are
 /// verified via reconciliation against behaviors, not by direct source linking.
@@ -288,11 +311,9 @@ pub struct ConditionEvaluation {
 /// A behavior observed during code review. Behaviors capture what the code
 /// actually does and are reconciliation artifacts — compared against
 /// requirements to surface gaps between documentation and implementation.
+/// Each behavior belongs to exactly one code member (one-to-many).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Behavior {
-  /// N-prefixed topic IDs of source code locations where this behavior was observed
-  pub source_topics: Vec<topic::Topic>,
-}
+pub struct Behavior {}
 
 /// A threat describing how an attacker could compromise a feature.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,15 +364,22 @@ pub struct AuditData {
   pub requirements: BTreeMap<topic::Topic, Requirement>,
   /// Functional purpose stored per subject topic: "why does this exist?"
   pub functional_purposes: BTreeMap<topic::Topic, String>,
-  /// Functional semantics stored per subject topic: "what does this represent?"
-  pub functional_semantics: BTreeMap<topic::Topic, String>,
+  /// Functional semantics with provenance: "what does this represent?" + doc source
+  pub functional_semantics: BTreeMap<topic::Topic, FunctionalSemantic>,
+  /// Links between documentation sections and code declarations from semantic linking.
+  pub semantic_links: Vec<SemanticLink>,
+  /// Reverse index: D-prefixed section topic → R-prefixed requirement topics.
+  /// Derived from RequirementTopic.section_topic, rebuilt with rebuild_feature_context.
+  pub section_requirements: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Reverse index: N-prefixed member topic → B-prefixed behavior topics.
+  /// Derived from BehaviorTopic.member_topic, rebuilt with rebuild_feature_context.
+  pub member_behaviors: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Impact analysis links between threats and features.
   pub threat_feature_links: Vec<ThreatFeatureLink>,
   /// Conditions keyed by their database ID. Each belongs to a non-pure subject
   /// and contains standardized question/answer evaluations.
   pub conditions: Vec<Condition>,
-  /// Behaviors keyed by B-prefixed topic ID. Each is associated with features
-  /// via source-to-feature links on its source locations.
+  /// Behaviors keyed by B-prefixed topic ID. Each belongs to one code member.
   pub behaviors: BTreeMap<topic::Topic, Behavior>,
   /// Threats keyed by A-prefixed topic ID. Each belongs to one feature.
   pub threats: BTreeMap<topic::Topic, Threat>,
@@ -1467,15 +1495,17 @@ pub enum TopicMetadata {
     topic: topic::Topic,
     description: String,
     feature_topic: topic::Topic,
+    /// The D-prefixed documentation section this requirement was extracted from
+    section_topic: Option<topic::Topic>,
     author_id: i64,
     created_at: String,
   },
-  /// A behavior observed during code review
+  /// A behavior observed during code review, belonging to one code member
   BehaviorTopic {
     topic: topic::Topic,
     description: String,
-    /// Feature topics derived from source-to-feature links on the behavior's source locations
-    feature_topics: Vec<topic::Topic>,
+    /// The N-prefixed code member (function/modifier/contract) this behavior belongs to
+    member_topic: topic::Topic,
     author_id: i64,
     created_at: String,
   },
@@ -1947,6 +1977,30 @@ fn build_invariant_nested_refs(
 /// - `topic_context` for FeatureTopics (linked requirements)
 /// - `topic_context` for RequirementTopics (parent feature)
 pub fn rebuild_feature_context(audit_data: &mut AuditData) {
+  // Rebuild section_requirements: section D-topic → R-topics
+  audit_data.section_requirements.clear();
+  for (req_topic, metadata) in &audit_data.topic_metadata {
+    if let TopicMetadata::RequirementTopic { section_topic: Some(st), .. } = metadata {
+      audit_data
+        .section_requirements
+        .entry(st.clone())
+        .or_default()
+        .push(req_topic.clone());
+    }
+  }
+
+  // Rebuild member_behaviors: member N-topic → B-topics
+  audit_data.member_behaviors.clear();
+  for (beh_topic, metadata) in &audit_data.topic_metadata {
+    if let TopicMetadata::BehaviorTopic { member_topic, .. } = metadata {
+      audit_data
+        .member_behaviors
+        .entry(member_topic.clone())
+        .or_default()
+        .push(beh_topic.clone());
+    }
+  }
+
   // Build reverse index: doc_topic -> [requirement_topics]
   let mut doc_to_requirements: HashMap<topic::Topic, Vec<topic::Topic>> = HashMap::new();
   for (req_topic, requirement) in &audit_data.requirements {
@@ -2192,6 +2246,9 @@ pub fn new_audit_data(
     requirements: BTreeMap::new(),
     functional_purposes: BTreeMap::new(),
     functional_semantics: BTreeMap::new(),
+    semantic_links: Vec::new(),
+    section_requirements: BTreeMap::new(),
+    member_behaviors: BTreeMap::new(),
     threat_feature_links: Vec::new(),
     conditions: Vec::new(),
     behaviors: BTreeMap::new(),

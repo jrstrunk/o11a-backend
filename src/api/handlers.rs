@@ -806,8 +806,7 @@ pub struct RequirementTopicResponse {
 pub struct BehaviorTopicResponse {
   pub topic_id: String,
   pub description: String,
-  pub feature_topics: Vec<String>,
-  pub source_topics: Vec<String>,
+  pub member_topic: String,
   pub author_id: i64,
   pub created_at: String,
 }
@@ -1000,15 +999,14 @@ fn topic_metadata_to_response(
 
     crate::core::TopicMetadata::BehaviorTopic {
       description,
-      feature_topics,
+      member_topic,
       author_id,
       created_at,
       ..
     } => TopicMetadataResponse::Behavior(BehaviorTopicResponse {
       topic_id: topic.id.clone(),
       description: description.clone(),
-      feature_topics: feature_topics.iter().map(|ft| ft.id.clone()).collect(),
-      source_topics: Vec::new(), // source_topics are on the Behavior struct, not metadata
+      member_topic: member_topic.id.clone(),
       author_id: *author_id,
       created_at: created_at.clone(),
     }),
@@ -1778,7 +1776,8 @@ fn pipeline_state(state: &AppState) -> crate::collaborator::agent::pipeline::Pip
 }
 
 /// POST /api/v1/audits/:audit_id/analyze
-/// Runs the initial analysis pipeline: build features → link source to features.
+/// Runs the full analysis pipeline:
+/// build_requirements → build_semantic_links → build_behaviors → synthesize_features
 pub async fn analyze(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
@@ -1786,18 +1785,18 @@ pub async fn analyze(
   println!("POST /api/v1/audits/{}/analyze", audit_id);
 
   let ps = pipeline_state(&state);
-  crate::collaborator::agent::pipeline::build_features(&ps, &audit_id)
-    .await
-    .map_err(|e| {
-      eprintln!("build_features failed: {}", e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-  crate::collaborator::agent::pipeline::link_source_to_features(&ps, &audit_id)
-    .await
-    .map_err(|e| {
-      eprintln!("link_source_to_features failed: {}", e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+  tokio::spawn(async move {
+    crate::collaborator::agent::pipeline::run_full_pipeline(&ps, &audit_id).await
+  })
+  .await
+  .map_err(|e| {
+    eprintln!("analyze task panicked: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?
+  .map_err(|e| {
+    eprintln!("analyze pipeline failed: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?;
 
   Ok(StatusCode::OK)
 }
@@ -1855,25 +1854,6 @@ pub async fn create_feature(
     .insert(feature_topic.clone(), metadata.clone());
 
   let response = topic_metadata_to_response(&feature_topic, &metadata);
-
-  // Spawn background task: link source to this feature
-  let ps = pipeline_state(&state);
-  let bg_audit_id = audit_id.clone();
-  let bg_feature_topic = feature_topic.clone();
-  tokio::spawn(async move {
-    use crate::collaborator::agent::pipeline;
-    if let Err(e) =
-      pipeline::link_source_to_feature(&ps, &bg_audit_id, &bg_feature_topic)
-        .await
-    {
-      eprintln!(
-        "Background link_source_to_feature failed for {}: {}",
-        bg_feature_topic.id(),
-        e
-      );
-    }
-  });
-
   Ok(Json(response))
 }
 
@@ -2062,7 +2042,15 @@ pub async fn get_topic_requirements(
           }
         }
       }
-      // Check documentation topic → requirements
+      // Check section_requirements index (D-section → requirements)
+      if let Some(section_reqs) = audit_data.section_requirements.get(&t) {
+        for rt in section_reqs {
+          if !requirement_topics.contains(rt) {
+            requirement_topics.push(rt.clone());
+          }
+        }
+      }
+      // Check documentation topic → requirements (leaf-level D-topics)
       for (req_topic, req) in &audit_data.requirements {
         if req.documentation_topics.contains(&t) {
           if !requirement_topics.contains(req_topic) {
@@ -2215,6 +2203,7 @@ pub async fn create_requirement(
     topic: req_topic.clone(),
     description: row.description,
     feature_topic: feature_topic.clone(),
+    section_topic: None,
     author_id: row.author_id,
     created_at: row.created_at,
   };
@@ -2438,7 +2427,7 @@ pub struct ReconciliationRequirement {
 pub struct ReconciliationBehavior {
   pub topic_id: String,
   pub description: String,
-  pub source_topics: Vec<String>,
+  pub member_topic: String,
 }
 
 /// GET /api/v1/audits/:audit_id/reconciliation/:feature_id
@@ -2490,39 +2479,35 @@ pub async fn get_reconciliation(
     })
     .collect();
 
-  // Collect behaviors associated with this feature via source-to-feature links
+  // Collect behaviors associated with this feature via member→feature links
   let behaviors: Vec<ReconciliationBehavior> = audit_data
     .behaviors
-    .iter()
-    .filter_map(|(bt, behavior)| {
-      // Check if any of the behavior's source topics link to this feature
-      let linked = behavior.source_topics.iter().any(|st| {
-        audit_data
-          .source_feature_links
-          .get(st)
-          .map(|fts| fts.contains(&feature_topic))
-          .unwrap_or(false)
-      });
+    .keys()
+    .filter_map(|bt| {
+      let (description, member_topic) = match audit_data.topic_metadata.get(bt) {
+        Some(core::TopicMetadata::BehaviorTopic {
+          description,
+          member_topic,
+          ..
+        }) => (description.clone(), member_topic.clone()),
+        _ => return None,
+      };
+
+      // Check if this behavior's member links to this feature
+      let linked = audit_data
+        .source_feature_links
+        .get(&member_topic)
+        .map(|fts| fts.contains(&feature_topic))
+        .unwrap_or(false);
 
       if !linked {
         return None;
       }
 
-      let description = match audit_data.topic_metadata.get(bt) {
-        Some(core::TopicMetadata::BehaviorTopic { description, .. }) => {
-          description.clone()
-        }
-        _ => return None,
-      };
-
       Some(ReconciliationBehavior {
         topic_id: bt.id.clone(),
         description,
-        source_topics: behavior
-          .source_topics
-          .iter()
-          .map(|st| st.id.clone())
-          .collect(),
+        member_topic: member_topic.id.clone(),
       })
     })
     .collect();
@@ -2620,7 +2605,10 @@ pub async fn set_functional_semantics(
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data = ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-    audit_data.functional_semantics.insert(t, row.value.clone());
+    audit_data.functional_semantics.insert(t, core::FunctionalSemantic {
+      text: row.value.clone(),
+      documentation_topic: None, // provenance set during semantic linking
+    });
   }
 
   Ok(Json(SubjectPropertyResponse {
@@ -3038,14 +3026,12 @@ pub async fn delete_condition(
 #[derive(Debug, Deserialize)]
 pub struct CreateBehaviorRequest {
   pub description: String,
+  pub member_topic: String,
   pub author_id: i64,
-  #[serde(default)]
-  pub source_topics: Vec<String>,
 }
 
 /// POST /api/v1/audits/:audit_id/behaviors
-/// Creates a new behavior. Feature associations are derived automatically
-/// from source-to-feature links on the behavior's source locations.
+/// Creates a new behavior on a code member.
 pub async fn create_behavior(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
@@ -3056,6 +3042,7 @@ pub async fn create_behavior(
   let row = db::create_behavior(
     &state.db,
     &audit_id,
+    &payload.member_topic,
     &payload.description,
     payload.author_id,
   )
@@ -3065,45 +3052,15 @@ pub async fn create_behavior(
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
-  // Persist source topics
-  for st_id in &payload.source_topics {
-    let _ = db::add_behavior_source_topic(&state.db, row.id, st_id).await;
-  }
-
   let beh_topic = topic::new_behavior_topic(row.id as i32);
-  let source_topics: Vec<topic::Topic> = payload
-    .source_topics
-    .iter()
-    .map(|id| topic::new_topic(id))
-    .collect();
+  let member_topic = topic::new_topic(&payload.member_topic);
 
-  // Derive feature associations from source-to-feature links
-  let mut feature_topics = Vec::new();
-  {
-    let ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in create_behavior: {}", e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-    for st in &source_topics {
-      if let Some(fts) = audit_data.source_feature_links.get(st) {
-        for ft in fts {
-          if !feature_topics.contains(ft) {
-            feature_topics.push(ft.clone());
-          }
-        }
-      }
-    }
-  }
-
-  let behavior = core::Behavior {
-    source_topics,
-  };
+  let behavior = core::Behavior {};
 
   let metadata = core::TopicMetadata::BehaviorTopic {
     topic: beh_topic.clone(),
     description: row.description,
-    feature_topics,
+    member_topic,
     author_id: row.author_id,
     created_at: row.created_at,
   };

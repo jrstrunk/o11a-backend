@@ -1,50 +1,36 @@
-//! Agent tasks for building an audit's organizational model from documentation.
-//!
-//! This module drives LLM-based extraction of features, requirements, threats,
-//! and invariants from developer-provided project documentation. The output is
-//! an organizational index that independent security auditors use to structure
-//! their review of the codebase — it is not a replacement for the documentation
-//! itself.
+//! Agent tasks for building an audit's security model from documentation and
+//! source code.
 //!
 //! # Design principles
 //!
 //! **Documentation is untrusted.** It represents the developer's *claimed*
-//! behavior, not verified truth. The structures built here frame what an
-//! auditor must verify, without anchoring them to the developer's stated
-//! implementation.
+//! behavior, not verified truth.
 //!
-//! **Features are behavioral.** Feature names and descriptions are written at
-//! a user-visible or protocol-level abstraction, regardless of whether the
-//! source document is a high-level overview or a technical deep-dive. This
-//! ensures that features extracted from different document types merge cleanly
-//! during consolidation.
+//! **Requirements capture documented claims.** Each requirement states what
+//! the documentation says the system does, grouped by the documentation
+//! section it was extracted from.
 //!
-//! **Requirements define verification scope.** Each requirement states *what*
-//! an auditor must verify for a feature, broadly enough that the auditor is
-//! not constrained to the developer's stated approach. Linked documentation
-//! topics provide the developer's claimed design as context, but the
-//! requirement itself frames the verification goal. This encourages auditors
-//! to think critically and consider attack vectors beyond what the
-//! documentation explicitly addresses.
+//! **Features are synthesized from reconciliation.** Features are not created
+//! upfront — they emerge from reconciling documentation-derived requirements
+//! with code-derived behaviors.
 //!
-//! **Threats and invariants are adversarial.** The threat model is built by
-//! thinking offensively about each feature — what could an attacker exploit?
-//! Invariants are concrete, verifiable properties that must hold to prevent
-//! each threat. Security notes (developer-provided roles, known threats, and
-//! invariants) are incorporated but not taken at face value.
+//! **Functional semantics bridge docs and code.** Semantic linking connects
+//! documentation sections to code declarations, defining what each declaration
+//! represents in project context. This is done before behavior extraction so
+//! behaviors carry business-level meaning.
 //!
 //! # Pipeline
 //!
-//! 1. **Normalize** (`normalize_documentation`): Rewrite raw documentation
-//!    files for plain text readability (strip emojis, inline HTML, navigation,
-//!    badges, etc.) without altering content.
-//! 2. **Extract** (`build_features_from_documentation`): Process each
-//!    documentation file independently to extract behavioral features and
-//!    verification-scoped requirements, then consolidate across files —
-//!    merging duplicates and dissolving broad features into more specific ones.
-//! 3. **Link** (`link_source_to_features`): For each (contract, feature)
-//!    pair, determine which contract members participate in the feature.
-//!    One LLM call per pair using the large model for quality.
+//! 1. **Normalize** (`normalize_documentation`): Strip emojis, HTML, etc.
+//! 2. **Extract requirements** (`extract_requirements_from_documentation`):
+//!    Per-document extraction grouped by section, then consolidation.
+//! 3. **Semantic linking** (`semantic_link_pass1`, `semantic_link_pass2`):
+//!    Connect doc sections to code declarations via mechanical resolution
+//!    + two LLM passes, producing functional semantics with provenance.
+//! 4. **Extract behaviors** (`extract_behaviors_from_contract`): Per-contract
+//!    extraction with functional semantics in context.
+//! 5. **Synthesize features** (`synthesize_features`): Single-pass LLM
+//!    reconciliation of all requirements and behaviors into features.
 
 use std::collections::BTreeMap;
 
@@ -53,10 +39,7 @@ use serde::Deserialize;
 use crate::collaborator::agent::context;
 use crate::collaborator::agent::router::{self, TaskSize};
 use crate::collaborator::models::AUTHOR_AGENT;
-use crate::core::{
-  self, AST, AuditData, Feature, Invariant, Requirement, Threat,
-  ThreatSeverity, topic,
-};
+use crate::core::{self, AST, AuditData, Feature, Requirement, topic};
 
 /// Raw requirement as returned by the LLM (no topic ID yet).
 #[derive(Deserialize)]
@@ -65,22 +48,6 @@ struct LLMRequirement {
   documentation_topics: Vec<String>,
 }
 
-/// Raw feature as returned by the LLM (no topic ID yet).
-#[derive(Deserialize)]
-struct LLMFeature {
-  name: String,
-  description: String,
-  requirements: Vec<LLMRequirement>,
-}
-
-/// Raw threat as returned by the LLM for threat analysis.
-/// Invariants are plain description strings; severity is inherited from the threat.
-#[derive(Deserialize, serde::Serialize)]
-struct LLMThreat {
-  description: String,
-  severity: String,
-  invariants: Vec<String>,
-}
 
 /// Render all documentation ASTs as separate per-file JSON strings for iterative processing.
 pub fn render_documentation_files(audit_data: &AuditData) -> Vec<String> {
@@ -109,116 +76,88 @@ pub fn render_documentation_files(audit_data: &AuditData) -> Vec<String> {
   files
 }
 
-/// Prompt for extracting features from a single documentation file.
-const BUILD_FEATURES_PROMPT: &str = "Below is a documentation file for a smart contract project, \
+/// Prompt for extracting requirements from a single documentation file, grouped by section.
+const EXTRACT_REQUIREMENTS_PROMPT: &str = "Below is a documentation file for a smart contract project, \
 rendered as structured JSON with topic IDs (D-prefixed, like \"D42\") \
 on each section, paragraph, list, and code block.\n\n\
-Your task is to identify all distinct smart contract **features** \
-(or **goals**) described in this document. A feature is \
-a discrete capability or behavior of the system. Be specific with the \
-features, avoiding overlap where one \"feature\" encompasses multiple \
-distinct implementations.\n\n\
-These features and requirements will be used by independent security \
-auditors to organize their review of the codebase. The documentation is \
-developer-provided and **not trusted** — it represents claimed behavior, \
-not verified truth.\n\n\
-Feature names and descriptions must be written at a **behavioral** \
-abstraction level — describe *what* the system does, not *how* it is \
-implemented. Even if the documentation is highly technical (e.g., \
-describing specific contract functions, modifiers, or storage layouts), \
-extract the user-visible or protocol-level behavior based on the design \
-intent of the document, not the specific implementation details. For example, \
-if the document describes a `pause()` modifier with an `onlyAdmin` check, the \
-feature should be \"Admins can pause the protocol\", not \"pause() modifier \
-with onlyAdmin guard\".\n\n\
-Requirements define the **scope of what an auditor must verify** for each \
-feature. State them broadly enough that the auditor is not anchored to a \
-developer's stated implementation — the auditor should think critically \
-and consider attack vectors beyond what the documentation explicitly \
-addresses. For example, prefer \"withdrawals must be safe from reentrancy\" \
-over \"balance must be zeroed before the external call\", because the \
-latter assumes a specific implementation strategy and may cause the \
-auditor to overlook other reentrancy vectors. The linked documentation \
-topics provide the developer's claimed design as context, but the \
-requirement itself should frame the verification goal, not repeat the \
-documentation since it is untrusted and unverified.\n\n\
-For each feature, provide:\n\
-- `name`: a short, descriptive name\n\
-- `description`: a summary of the feature\n\
-- `requirements`: an array of requirement objects, where each object has:\n\
-  - `description`: a behavioral requirement that the implementation must satisfy. \
-Each requirement should be a single, specific, testable statement. \
-Include both **happy-path** requirements (what the system should do) and \
-**non-happy-path** requirements (what the system must prevent). If the \
-documentation describes security threats, attack vectors, access control \
-rules, or invariants, capture those as requirements too.\n\
-  - `documentation_topics`: an array of D-prefixed topic ID strings \
-(e.g., [\"D12\", \"D34\"]) for every documentation section, paragraph, \
-list, or code block that informed this specific requirement. Each \
-requirement must have at least one documentation topic.\n\n\
+Your task is to extract **requirements** from this document. Requirements are \
+what the documentation claims the system does — each one captures a documented \
+behavior, constraint, access control rule, or security property.\n\n\
+These requirements will be used by independent security auditors to organize \
+their review of the codebase. The documentation is developer-provided and \
+**not trusted** — it represents claimed behavior, not verified truth.\n\n\
+Requirements define the **scope of what an auditor must verify**. State them \
+broadly enough that the auditor is not anchored to a developer's stated \
+implementation — the auditor should think critically and consider attack \
+vectors beyond what the documentation explicitly addresses. For example, \
+prefer \"withdrawals must be safe from reentrancy\" over \"balance must be \
+zeroed before the external call\", because the latter assumes a specific \
+implementation strategy.\n\n\
+Group requirements under the documentation **section** they were extracted from, \
+using the section's D-prefixed topic ID. Each section that contains behavioral \
+content should produce one or more requirements.\n\n\
+Return a JSON array of section groups, where each group has:\n\
+- `section_topic`: the D-prefixed topic ID of the section header (e.g., \"D5\")\n\
+- `requirements`: an array of requirement objects, each with:\n\
+  - `description`: a single, specific, testable statement of what the system must do or prevent\n\
+  - `documentation_topics`: an array of D-prefixed topic IDs for every paragraph, \
+list, or code block within this section that informed this specific requirement\n\n\
 Rules:\n\
-- Every documentation topic ID that describes system behavior, \
-requirements, constraints, security concerns, or invariants should appear \
-in at least one requirement. Exclude boilerplate \
-like tables of contents, version history, author credits, and headings.\n\
-- A documentation topic may appear in multiple requirements if it is \
-relevant to more than one.\n\
+- Every documentation topic ID that describes system behavior, requirements, \
+constraints, security concerns, or invariants should appear in at least one \
+requirement. Exclude boilerplate like tables of contents, version history, \
+author credits, and headings.\n\
+- A documentation topic may appear in multiple requirements if relevant to more than one.\n\
 - Do not invent topic IDs. Only use IDs present in the documentation.\n\
-- When in doubt whether something is one feature or two, prefer \
-splitting into more specific features.\n\
-- Each feature should have at least one requirement.\n\
-- Return ONLY a JSON array of feature objects, no other text.\n\n\
+- Include both **happy-path** requirements (what the system should do) and \
+**non-happy-path** requirements (what the system must prevent).\n\
+- If the documentation describes security threats, attack vectors, access control \
+rules, or invariants, capture those as requirements.\n\
+- Each section group should have at least one requirement.\n\
+- Sections with no behavioral content (boilerplate, navigation, etc.) should be omitted.\n\
+- Return ONLY a JSON array of section group objects, no other text.\n\n\
 Documentation:\n";
 
-/// Prompt for consolidating features extracted from multiple documents.
-const CONSOLIDATE_FEATURES_PROMPT: &str = "Below are features and requirements extracted \
-independently from multiple documentation files for a smart contract project. \
-Because each file was processed separately, some features may overlap or \
-describe the same capability.\n\n\
-Your task is to consolidate these into a single, deduplicated list of features. \
-For each group of similar features, merge them into one feature that \
-combines all their requirements. Preserve every requirement and its \
-documentation_topics — do not drop any.\n\n\
-For each consolidated feature, provide:\n\
-- `name`: a short, descriptive name\n\
-- `description`: a summary of the feature\n\
-- `requirements`: the combined array of requirement objects from all merged \
-features. Each requirement object has:\n\
-  - `description`: the requirement text\n\
-  - `documentation_topics`: the D-prefixed topic ID strings\n\n\
+/// Prompt for consolidating requirements extracted from multiple documents.
+const CONSOLIDATE_REQUIREMENTS_PROMPT: &str = "Below are requirements extracted independently \
+from multiple documentation files for a smart contract project, grouped by \
+documentation section. Because each file was processed separately, some \
+requirements may overlap or describe the same claim.\n\n\
+Your task is to consolidate these into a single, deduplicated list of \
+requirements grouped by section. For each group of similar requirements \
+across different sections, merge them into the most specific section and \
+combine their documentation_topics.\n\n\
+Return a JSON array of section groups, where each group has:\n\
+- `section_topic`: the D-prefixed topic ID\n\
+- `requirements`: array of requirement objects with `description` and `documentation_topics`\n\n\
 Rules:\n\
-- Merge features that describe the same capability or system behavior. Do not \
-merge unrelated features just because they share a theme, keep each \
-feature as distinct as possible, merging only duplicate features.\n\
-- Do not drop any requirements.\n\
-- Do not modify documentation_topics arrays, just combine them.\n\
-- You may rewrite feature names and descriptions to better reflect the \
-merged content.\n\
-- If a broad feature encompasses multiple more specific features that \
-were extracted separately, dissolve the broad feature and distribute its \
-requirements into the matching specific features. For example, if one \
-document produced a broad \"Staking and Rewards\" feature and another \
-produced separate \"Token Staking\", \"Stake Withdrawal\", and \"Reward \
-Distribution\" features, remove \"Staking and Rewards\" and assign each \
-of its requirements to whichever specific feature it belongs to. If a \
-requirement applies to multiple specific features, add it to each.\n\
-- If a feature was created for a documented invariant, remove it as a feature and \
-apply it as a requirement to each feature it applies to. For example, \
-\"Unauthorized users should not be able to perform admin actions\" is an invariant, not a feature, so it should be applied as a requirement to the features that it applies to.\n\
-- Return ONLY a JSON array of feature objects, no other text.\n\n\
-Features to consolidate:\n";
+- Merge duplicate requirements that describe the same claim, keeping the more \
+specific wording and combining documentation_topics.\n\
+- Do not drop any unique requirements.\n\
+- Do not modify documentation_topics arrays, just combine them when merging.\n\
+- If a requirement appears in multiple sections, keep it in the most specific section.\n\
+- Return ONLY a JSON array of section group objects, no other text.\n\n\
+Requirements to consolidate:\n";
 
-/// Result of parsing LLM features: features and their requirements as separate maps.
-pub struct ParsedFeatures {
-  pub features: BTreeMap<topic::Topic, Feature>,
-  pub requirements: BTreeMap<topic::Topic, Requirement>,
-  pub topic_metadata: BTreeMap<topic::Topic, core::TopicMetadata>,
+/// Raw section group as returned by the requirement extraction LLM.
+#[derive(Deserialize)]
+struct LLMSectionGroup {
+  section_topic: String,
+  requirements: Vec<LLMRequirement>,
 }
 
-/// Parse the LLM response into features and requirements,
-/// assigning sequential F-prefixed and R-prefixed topic IDs.
-fn parse_features_response(response: &str) -> Result<ParsedFeatures, String> {
-  // Strip markdown code fences if present
+/// Result of parsing LLM requirements: requirements grouped by section, no features.
+pub struct ParsedRequirements {
+  pub requirements: BTreeMap<topic::Topic, Requirement>,
+  pub topic_metadata: BTreeMap<topic::Topic, core::TopicMetadata>,
+  /// Section D-topic → R-topic list, preserving document structure
+  pub section_requirements: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+}
+
+/// Parse the LLM response for section-grouped requirements.
+fn parse_requirements_response(
+  response: &str,
+) -> Result<ParsedRequirements, String> {
   let json_str = response
     .trim()
     .strip_prefix("```json")
@@ -226,49 +165,576 @@ fn parse_features_response(response: &str) -> Result<ParsedFeatures, String> {
     .unwrap_or(response.trim());
   let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
 
-  let raw_features: Vec<LLMFeature> =
+  let raw_sections: Vec<LLMSectionGroup> =
     serde_json::from_str(json_str).map_err(|e| {
       eprintln!(
-        "Failed to parse features JSON: {}\nResponse:\n{}",
+        "Failed to parse requirements JSON: {}\nResponse:\n{}",
         e, json_str
       );
-      format!("Failed to parse features JSON: {}", e)
+      format!("Failed to parse requirements JSON: {}", e)
     })?;
 
-  let mut features = BTreeMap::new();
   let mut requirements = BTreeMap::new();
   let mut topic_metadata = BTreeMap::new();
+  let mut section_requirements = BTreeMap::new();
   let mut req_counter = 0i32;
 
-  for (i, raw) in raw_features.into_iter().enumerate() {
-    let feature_topic = topic::new_feature_topic((i + 1) as i32);
+  for section in raw_sections {
+    let section_topic = topic::new_topic(&section.section_topic);
+    let mut section_req_topics = Vec::new();
 
-    let mut requirement_topics = Vec::new();
-    for raw_req in raw.requirements {
+    for raw_req in section.requirements {
       req_counter += 1;
       let req_topic = topic::new_requirement_topic(req_counter);
-      requirement_topics.push(req_topic.clone());
+      section_req_topics.push(req_topic.clone());
+
       let doc_topics: Vec<topic::Topic> = raw_req
         .documentation_topics
         .into_iter()
         .map(|id| topic::new_topic(&id))
         .collect();
+
       topic_metadata.insert(
         req_topic.clone(),
         core::TopicMetadata::RequirementTopic {
           topic: req_topic.clone(),
           description: raw_req.description,
-          feature_topic: feature_topic.clone(),
+          feature_topic: topic::new_topic(""),
+          section_topic: Some(section_topic.clone()),
           author_id: AUTHOR_AGENT,
           created_at: String::new(),
         },
       );
+
       requirements.insert(
         req_topic,
         Requirement {
           documentation_topics: doc_topics,
         },
       );
+    }
+
+    if !section_req_topics.is_empty() {
+      section_requirements.insert(section_topic, section_req_topics);
+    }
+  }
+
+  Ok(ParsedRequirements {
+    requirements,
+    topic_metadata,
+    section_requirements,
+  })
+}
+
+/// Extract requirements from documentation files via LLM, grouped by section.
+pub async fn extract_requirements_from_documentation(
+  documentation_files: &[String],
+) -> Result<ParsedRequirements, String> {
+  if documentation_files.is_empty() {
+    return Err("No documentation found in audit".to_string());
+  }
+
+  if documentation_files.len() == 1 {
+    let prompt = format!(
+      "{}{}",
+      EXTRACT_REQUIREMENTS_PROMPT, &documentation_files[0]
+    );
+    let response = router::chat_completion(
+      TaskSize::Large,
+      router::SYSTEM_MESSAGE_DOCUMENTATION,
+      &prompt,
+      None,
+    )
+    .await?;
+    return parse_requirements_response(&response);
+  }
+
+  let mut handles = Vec::new();
+  for (i, doc_json) in documentation_files.iter().enumerate() {
+    let prompt = format!("{}{}", EXTRACT_REQUIREMENTS_PROMPT, doc_json);
+    let label = format!("requirements_{}", i);
+    handles.push(tokio::spawn(async move {
+      router::chat_completion(
+        TaskSize::Large,
+        router::SYSTEM_MESSAGE_DOCUMENTATION,
+        &prompt,
+        Some(&label),
+      )
+      .await
+    }));
+  }
+
+  let mut per_doc_results: Vec<String> = Vec::new();
+  for (i, handle) in handles.into_iter().enumerate() {
+    match handle.await {
+      Ok(Ok(response)) => per_doc_results.push(response),
+      Ok(Err(e)) => {
+        eprintln!("extract_requirements failed for document {}: {}", i, e);
+      }
+      Err(e) => {
+        eprintln!(
+          "extract_requirements task panicked for document {}: {}",
+          i, e
+        );
+      }
+    }
+  }
+
+  if per_doc_results.is_empty() {
+    return Err("All document requirement extractions failed".to_string());
+  }
+
+  if per_doc_results.len() == 1 {
+    return parse_requirements_response(&per_doc_results[0]);
+  }
+
+  let combined = per_doc_results.join("\n");
+  let prompt = format!("{}{}", CONSOLIDATE_REQUIREMENTS_PROMPT, combined);
+  let response = router::chat_completion(
+    TaskSize::Large,
+    router::SYSTEM_MESSAGE_DOCUMENTATION,
+    &prompt,
+    Some("requirements_consolidate"),
+  )
+  .await?;
+
+  parse_requirements_response(&response)
+}
+
+// ============================================================================
+// Semantic Linking LLM Tasks
+// ============================================================================
+
+/// LLM pass 1: Given a documentation section and a list of contract signatures,
+/// identify which contracts are relevant to this section.
+const SEMANTIC_LINK_PASS1_PROMPT: &str = "Below is a documentation section from a smart contract \
+project and a list of contracts with their member signatures.\n\n\
+Some contracts have been pre-identified as relevant through inline code \
+references in the documentation (marked as \"confirmed\"). Your task is to \
+review these confirmations and identify any additional contracts that this \
+documentation section is relevant to.\n\n\
+A contract is relevant if the documentation section describes behavior, \
+requirements, or properties that apply to that contract's functionality.\n\n\
+Return a JSON array of N-prefixed contract topic ID strings for ALL relevant \
+contracts (both confirmed and newly identified). If no contracts are relevant, \
+return an empty array `[]`.\n\
+Return ONLY the JSON array, no other text.\n\n";
+
+/// LLM pass 2: Given a documentation section and a contract's declarations,
+/// identify which declarations this section provides semantic meaning for.
+const SEMANTIC_LINK_PASS2_PROMPT: &str = "Below is a documentation section from a smart contract \
+project and a contract's declarations (functions, state variables, modifiers, \
+events, etc.) with their signatures.\n\n\
+Some declarations have been pre-identified as referenced by the documentation \
+(marked as \"confirmed\"). Your task is to identify which declarations this \
+documentation section provides **semantic meaning** for — that is, the section \
+explains what the declaration represents or does in the context of the project.\n\n\
+For each matched declaration, provide:\n\
+- `declaration_topic`: the N-prefixed topic ID of the declaration\n\
+- `semantic_text`: a concise description of what this declaration represents \
+in project context (e.g., \"proportional reward multiplier\", \"user's staked \
+token balance\", \"transfers campaign tokens from creator into contract\")\n\n\
+Rules:\n\
+- Only match declarations where the documentation section genuinely explains \
+their meaning. Do not force matches.\n\
+- Confirmed declarations should appear in the output with their semantic text.\n\
+- The semantic text should be project-specific meaning, not a generic type \
+description. \"uint256 balance\" is not a semantic — \"user's total staked \
+balance\" is.\n\
+- Return ONLY a JSON array of objects, no other text.\n\n";
+
+/// Result of LLM pass 1: relevant contract topics for a section.
+pub struct SemanticLinkPass1Result {
+  pub section_topic: topic::Topic,
+  pub contract_topics: Vec<topic::Topic>,
+}
+
+/// A single semantic link from LLM pass 2.
+#[derive(Deserialize)]
+struct LLMSemanticLink {
+  declaration_topic: String,
+  semantic_text: String,
+}
+
+/// Result of LLM pass 2: semantic links for a (section, contract) pair.
+pub struct SemanticLinkPass2Result {
+  pub section_topic: topic::Topic,
+  pub links: Vec<core::SemanticLink>,
+}
+
+/// LLM pass 1: For each section, identify relevant contracts.
+/// Takes pre-rendered section text, contract list JSON, and confirmed associations.
+pub async fn semantic_link_pass1(
+  section_topic: &topic::Topic,
+  section_text: &str,
+  contracts_json: &str,
+  confirmed_contracts: &[topic::Topic],
+) -> Result<SemanticLinkPass1Result, String> {
+  let confirmed_str = if confirmed_contracts.is_empty() {
+    String::new()
+  } else {
+    let ids: Vec<&str> = confirmed_contracts.iter().map(|t| t.id()).collect();
+    format!("\nConfirmed relevant contracts: {}\n", ids.join(", "))
+  };
+
+  let prompt = format!(
+    "{}{}Section:\n{}\n\nContracts:\n{}",
+    SEMANTIC_LINK_PASS1_PROMPT, confirmed_str, section_text, contracts_json
+  );
+
+  let label = format!("semantic_pass1_{}", section_topic.id());
+  let response = router::chat_completion(
+    TaskSize::Small,
+    router::SYSTEM_MESSAGE_CODE,
+    &prompt,
+    Some(&label),
+  )
+  .await?;
+
+  let json_str = response
+    .trim()
+    .strip_prefix("```json")
+    .or_else(|| response.trim().strip_prefix("```"))
+    .unwrap_or(response.trim());
+  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
+
+  let contract_ids: Vec<String> = serde_json::from_str(json_str).map_err(|e| {
+    eprintln!(
+      "Failed to parse semantic link pass1 JSON: {}\nResponse:\n{}",
+      e, json_str
+    );
+    format!("Failed to parse semantic link pass1: {}", e)
+  })?;
+
+  Ok(SemanticLinkPass1Result {
+    section_topic: section_topic.clone(),
+    contract_topics: contract_ids
+      .into_iter()
+      .map(|id| topic::new_topic(&id))
+      .collect(),
+  })
+}
+
+/// LLM pass 2: For a (section, contract) pair, identify semantic meanings.
+pub async fn semantic_link_pass2(
+  section_topic: &topic::Topic,
+  section_text: &str,
+  contract_json: &str,
+  confirmed_declarations: &[topic::Topic],
+) -> Result<SemanticLinkPass2Result, String> {
+  let confirmed_str = if confirmed_declarations.is_empty() {
+    String::new()
+  } else {
+    let ids: Vec<&str> = confirmed_declarations.iter().map(|t| t.id()).collect();
+    format!("\nConfirmed referenced declarations: {}\n", ids.join(", "))
+  };
+
+  let prompt = format!(
+    "{}{}Section:\n{}\n\nContract declarations:\n{}",
+    SEMANTIC_LINK_PASS2_PROMPT, confirmed_str, section_text, contract_json
+  );
+
+  let label = format!("semantic_pass2_{}", section_topic.id());
+  let response = router::chat_completion(
+    TaskSize::Large,
+    router::SYSTEM_MESSAGE_CODE,
+    &prompt,
+    Some(&label),
+  )
+  .await?;
+
+  let json_str = response
+    .trim()
+    .strip_prefix("```json")
+    .or_else(|| response.trim().strip_prefix("```"))
+    .unwrap_or(response.trim());
+  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
+
+  let raw_links: Vec<LLMSemanticLink> =
+    serde_json::from_str(json_str).map_err(|e| {
+      eprintln!(
+        "Failed to parse semantic link pass2 JSON: {}\nResponse:\n{}",
+        e, json_str
+      );
+      format!("Failed to parse semantic link pass2: {}", e)
+    })?;
+
+  let links = raw_links
+    .into_iter()
+    .map(|l| core::SemanticLink {
+      documentation_topic: section_topic.clone(),
+      declaration_topic: topic::new_topic(&l.declaration_topic),
+      semantic_text: l.semantic_text,
+    })
+    .collect();
+
+  Ok(SemanticLinkPass2Result {
+    section_topic: section_topic.clone(),
+    links,
+  })
+}
+
+/// Collect all documentation section topics that have content (TitledTopic entries).
+pub fn collect_documentation_sections(
+  audit_data: &AuditData,
+) -> Vec<topic::Topic> {
+  audit_data
+    .topic_metadata
+    .iter()
+    .filter_map(|(t, m)| {
+      if matches!(m, core::TopicMetadata::TitledTopic { kind: core::TitledTopicKind::DocumentationSection, .. }) {
+        Some(t.clone())
+      } else {
+        None
+      }
+    })
+    .collect()
+}
+
+// ============================================================================
+// Feature Synthesis via Reconciliation
+// ============================================================================
+
+/// Prompt for synthesizing features from requirements and behaviors.
+const SYNTHESIZE_FEATURES_PROMPT: &str = "Below are two lists from a smart contract audit:\n\n\
+1. **Requirements** — what the documentation claims the system does, grouped \
+by documentation section. Each requirement has an R-prefixed topic ID.\n\
+2. **Behaviors** — what the source code actually does, grouped by code member. \
+Each behavior has a B-prefixed topic ID.\n\n\
+Your task is to **synthesize features** by grouping related requirements and \
+behaviors together. A feature represents a coherent capability or area of the \
+system where documented claims and implemented behaviors overlap.\n\n\
+For each feature, provide:\n\
+- `name`: a short, descriptive feature name\n\
+- `description`: a summary synthesized from both the documented intent and \
+the implemented reality\n\
+- `requirement_topics`: array of R-prefixed topic IDs grouped into this feature\n\
+- `behavior_topics`: array of B-prefixed topic IDs grouped into this feature\n\n\
+Rules:\n\
+- Group requirements and behaviors that describe the same capability together.\n\
+- A requirement or behavior may belong to at most one feature.\n\
+- Requirements with no matching behaviors should still form a feature — this \
+represents **unimplemented specification** (the docs claim something the code \
+doesn't do). Set behavior_topics to an empty array.\n\
+- Behaviors with no matching requirements should still form a feature — this \
+represents **undocumented implementation** (the code does something the docs \
+don't describe). Set requirement_topics to an empty array.\n\
+- Do not force weak matches. It's better to surface an orphan than to create \
+a misleading grouping.\n\
+- Feature names should be behavioral (what the system does), not technical.\n\
+- Return ONLY a JSON array of feature objects, no other text.\n\n";
+
+/// Raw feature from reconciliation LLM.
+#[derive(Deserialize)]
+struct LLMSynthesizedFeature {
+  name: String,
+  description: String,
+  requirement_topics: Vec<String>,
+  behavior_topics: Vec<String>,
+}
+
+/// Result of feature synthesis.
+pub struct SynthesizedFeatures {
+  pub features: BTreeMap<topic::Topic, Feature>,
+  pub topic_metadata: BTreeMap<topic::Topic, core::TopicMetadata>,
+  /// Which requirements belong to which feature (R-topic → F-topic)
+  pub requirement_to_feature: BTreeMap<topic::Topic, topic::Topic>,
+  /// Which behaviors belong to which feature (B-topic → F-topic)
+  pub behavior_to_feature: BTreeMap<topic::Topic, topic::Topic>,
+}
+
+/// Render all requirements grouped by section for the reconciliation prompt.
+fn render_requirements_for_reconciliation(
+  audit_data: &AuditData,
+) -> String {
+  let mut sections: Vec<serde_json::Value> = Vec::new();
+
+  for (section_topic, req_topics) in &audit_data.section_requirements {
+    let section_title = audit_data
+      .topic_metadata
+      .get(section_topic)
+      .and_then(|m| m.name())
+      .unwrap_or("")
+      .to_string();
+
+    let reqs: Vec<serde_json::Value> = req_topics
+      .iter()
+      .filter_map(|rt| {
+        if let Some(core::TopicMetadata::RequirementTopic {
+          description, ..
+        }) = audit_data.topic_metadata.get(rt)
+        {
+          Some(serde_json::json!({
+            "topic": rt.id(),
+            "description": description,
+          }))
+        } else {
+          None
+        }
+      })
+      .collect();
+
+    if !reqs.is_empty() {
+      sections.push(serde_json::json!({
+        "section": section_title,
+        "section_topic": section_topic.id(),
+        "requirements": reqs,
+      }));
+    }
+  }
+
+  // Also include requirements not in any section
+  let in_sections: std::collections::HashSet<&topic::Topic> = audit_data
+    .section_requirements
+    .values()
+    .flat_map(|v| v.iter())
+    .collect();
+
+  let orphan_reqs: Vec<serde_json::Value> = audit_data
+    .requirements
+    .keys()
+    .filter(|rt| !in_sections.contains(rt))
+    .filter_map(|rt| {
+      if let Some(core::TopicMetadata::RequirementTopic {
+        description, ..
+      }) = audit_data.topic_metadata.get(rt)
+      {
+        Some(serde_json::json!({
+          "topic": rt.id(),
+          "description": description,
+        }))
+      } else {
+        None
+      }
+    })
+    .collect();
+
+  if !orphan_reqs.is_empty() {
+    sections.push(serde_json::json!({
+      "section": "(ungrouped)",
+      "requirements": orphan_reqs,
+    }));
+  }
+
+  serde_json::to_string(&sections).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Render all behaviors grouped by member for the reconciliation prompt.
+fn render_behaviors_for_reconciliation(
+  audit_data: &AuditData,
+) -> String {
+  let mut members: Vec<serde_json::Value> = Vec::new();
+
+  for (member_topic, beh_topics) in &audit_data.member_behaviors {
+    let member_name = audit_data
+      .topic_metadata
+      .get(member_topic)
+      .and_then(|m| m.name())
+      .unwrap_or("")
+      .to_string();
+
+    let behs: Vec<serde_json::Value> = beh_topics
+      .iter()
+      .filter_map(|bt| {
+        if let Some(core::TopicMetadata::BehaviorTopic {
+          description, ..
+        }) = audit_data.topic_metadata.get(bt)
+        {
+          Some(serde_json::json!({
+            "topic": bt.id(),
+            "description": description,
+          }))
+        } else {
+          None
+        }
+      })
+      .collect();
+
+    if !behs.is_empty() {
+      members.push(serde_json::json!({
+        "member": member_name,
+        "member_topic": member_topic.id(),
+        "behaviors": behs,
+      }));
+    }
+  }
+
+  serde_json::to_string(&members).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Render requirements and behaviors for the reconciliation prompt.
+/// Called while holding the lock, returns owned strings.
+pub fn render_reconciliation_context(
+  audit_data: &AuditData,
+) -> (String, String) {
+  let requirements_json = render_requirements_for_reconciliation(audit_data);
+  let behaviors_json = render_behaviors_for_reconciliation(audit_data);
+  (requirements_json, behaviors_json)
+}
+
+/// Synthesize features by reconciling all requirements with all behaviors
+/// in a single LLM pass.
+pub async fn synthesize_features(
+  requirements_json: &str,
+  behaviors_json: &str,
+) -> Result<SynthesizedFeatures, String> {
+
+  let prompt = format!(
+    "{}Requirements:\n{}\n\nBehaviors:\n{}",
+    SYNTHESIZE_FEATURES_PROMPT,
+    requirements_json,
+    behaviors_json
+  );
+
+  let response = router::chat_completion(
+    TaskSize::Large,
+    router::SYSTEM_MESSAGE_DOCUMENTATION,
+    &prompt,
+    Some("synthesize_features"),
+  )
+  .await?;
+
+  let json_str = response
+    .trim()
+    .strip_prefix("```json")
+    .or_else(|| response.trim().strip_prefix("```"))
+    .unwrap_or(response.trim());
+  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
+
+  let raw_features: Vec<LLMSynthesizedFeature> =
+    serde_json::from_str(json_str).map_err(|e| {
+      eprintln!(
+        "Failed to parse synthesized features JSON: {}\nResponse:\n{}",
+        e, json_str
+      );
+      format!("Failed to parse synthesized features: {}", e)
+    })?;
+
+  let mut features = BTreeMap::new();
+  let mut topic_metadata = BTreeMap::new();
+  let mut requirement_to_feature = BTreeMap::new();
+  let mut behavior_to_feature = BTreeMap::new();
+
+  for (i, raw) in raw_features.into_iter().enumerate() {
+    let feature_topic = topic::new_feature_topic((i + 1) as i32);
+
+    let requirement_topics: Vec<topic::Topic> = raw
+      .requirement_topics
+      .into_iter()
+      .map(|id| topic::new_topic(&id))
+      .collect();
+
+    let behavior_topics: Vec<topic::Topic> = raw
+      .behavior_topics
+      .into_iter()
+      .map(|id| topic::new_topic(&id))
+      .collect();
+
+    for rt in &requirement_topics {
+      requirement_to_feature.insert(rt.clone(), feature_topic.clone());
+    }
+    for bt in &behavior_topics {
+      behavior_to_feature.insert(bt.clone(), feature_topic.clone());
     }
 
     topic_metadata.insert(
@@ -290,93 +756,103 @@ fn parse_features_response(response: &str) -> Result<ParsedFeatures, String> {
     );
   }
 
-  Ok(ParsedFeatures {
+  Ok(SynthesizedFeatures {
     features,
-    requirements,
     topic_metadata,
+    requirement_to_feature,
+    behavior_to_feature,
   })
 }
 
-/// Extract project features and requirements from documentation files via LLM.
-///
-/// Each documentation file is processed independently in parallel, then a
-/// consolidation pass merges similar features. If there is only one file,
-/// the consolidation pass is skipped.
-///
-/// The caller renders documentation files while holding the lock, then passes
-/// the JSON strings to this function after releasing it.
-pub async fn build_features_from_documentation(
-  documentation_files: &[String],
-) -> Result<ParsedFeatures, String> {
-  if documentation_files.is_empty() {
-    return Err("No documentation found in audit".to_string());
-  }
+// ============================================================================
+// Behavior Extraction LLM Tasks
+// ============================================================================
 
-  // Single document: extract and return directly
-  if documentation_files.len() == 1 {
-    let prompt =
-      format!("{}{}", BUILD_FEATURES_PROMPT, &documentation_files[0]);
-    let response = router::chat_completion(
-      TaskSize::Large,
-      router::SYSTEM_MESSAGE_DOCUMENTATION,
-      &prompt,
-      None,
-    )
-    .await?;
-    return parse_features_response(&response);
-  }
+/// Prompt for extracting behaviors from a contract's source code.
+const EXTRACT_BEHAVIORS_PROMPT: &str = "Below is a smart contract with its full source code and \
+functional semantics (project-specific meanings for declarations).\n\n\
+Your task is to extract **behaviors** — what each function/modifier in this \
+contract actually does, described in business-level terms using the \
+functional semantics provided.\n\n\
+For each function or modifier, produce one or more behaviors that describe \
+what it does. Use the functional semantics to describe behaviors at a \
+business level rather than mechanically. For example, if `propFactor` has \
+the semantic \"proportional reward multiplier\" and `stakerBalance` has \
+\"user's staked token balance\", describe the behavior as \"calculates \
+proportional reward share for the staker\" rather than \"multiplies \
+propFactor by stakerBalance.\"\n\n\
+Each behavior belongs to exactly one member (function, modifier, or \
+state variable declaration). Each member may have multiple behaviors.\n\n\
+Return a JSON array of member groups, where each group has:\n\
+- `member_topic`: the N-prefixed topic ID of the function/modifier/variable\n\
+- `behaviors`: an array of behavior description strings\n\n\
+Rules:\n\
+- Each behavior should be a concise, specific description of what the code does.\n\
+- Use functional semantics to give business-level meaning when available.\n\
+- Include both normal execution paths and edge case behaviors (reverts, \
+access control checks, state mutations).\n\
+- Do not describe implementation details like \"calls _transfer internally\" — \
+describe the observable effect: \"transfers tokens from sender to recipient.\"\n\
+- If a function has no meaningful behavior (pure getters with no logic), \
+you may omit it.\n\
+- Return ONLY the JSON array, no other text.\n\n";
 
-  // Multiple documents: extract in parallel, then consolidate
-  let mut handles = Vec::new();
-  for (i, doc_json) in documentation_files.iter().enumerate() {
-    let prompt = format!("{}{}", BUILD_FEATURES_PROMPT, doc_json);
-    let label = format!("features_{}", i);
-    handles.push(tokio::spawn(async move {
-      router::chat_completion(
-        TaskSize::Large,
-        router::SYSTEM_MESSAGE_DOCUMENTATION,
-        &prompt,
-        Some(&label),
-      )
-      .await
-    }));
-  }
+/// Raw member behavior group from LLM.
+#[derive(Deserialize)]
+struct LLMMemberBehaviors {
+  member_topic: String,
+  behaviors: Vec<String>,
+}
 
-  // Collect per-document results
-  let mut per_doc_features: Vec<String> = Vec::new();
-  for (i, handle) in handles.into_iter().enumerate() {
-    match handle.await {
-      Ok(Ok(response)) => per_doc_features.push(response),
-      Ok(Err(e)) => {
-        eprintln!("build_features failed for document {}: {}", i, e);
-      }
-      Err(e) => {
-        eprintln!("build_features task panicked for document {}: {}", i, e);
-      }
-    }
-  }
+/// Result of behavior extraction for a contract.
+pub struct ParsedBehaviors {
+  pub behaviors: Vec<(topic::Topic, String)>, // (member_topic, description)
+}
 
-  if per_doc_features.is_empty() {
-    return Err("All document feature extractions failed".to_string());
-  }
+/// Extract behaviors from a contract's source code via LLM.
+pub async fn extract_behaviors_from_contract(
+  contract_json: &str,
+  contract_name: &str,
+) -> Result<ParsedBehaviors, String> {
+  let prompt = format!(
+    "{}Contract:\n{}",
+    EXTRACT_BEHAVIORS_PROMPT, contract_json
+  );
 
-  // If only one document succeeded, skip consolidation
-  if per_doc_features.len() == 1 {
-    return parse_features_response(&per_doc_features[0]);
-  }
-
-  // Consolidation pass: merge similar features across documents
-  let combined = per_doc_features.join("\n");
-  let prompt = format!("{}{}", CONSOLIDATE_FEATURES_PROMPT, combined);
+  let label = format!("behaviors_{}", contract_name);
   let response = router::chat_completion(
     TaskSize::Large,
-    router::SYSTEM_MESSAGE_DOCUMENTATION,
+    router::SYSTEM_MESSAGE_CODE,
     &prompt,
-    Some("features_consolidate"),
+    Some(&label),
   )
   .await?;
 
-  parse_features_response(&response)
+  let json_str = response
+    .trim()
+    .strip_prefix("```json")
+    .or_else(|| response.trim().strip_prefix("```"))
+    .unwrap_or(response.trim());
+  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
+
+  let raw_groups: Vec<LLMMemberBehaviors> =
+    serde_json::from_str(json_str).map_err(|e| {
+      eprintln!(
+        "Failed to parse behaviors JSON: {}\nResponse:\n{}",
+        e, json_str
+      );
+      format!("Failed to parse behaviors JSON: {}", e)
+    })?;
+
+  let mut behaviors = Vec::new();
+  for group in raw_groups {
+    let member_topic = topic::new_topic(&group.member_topic);
+    for desc in group.behaviors {
+      behaviors.push((member_topic.clone(), desc));
+    }
+  }
+
+  Ok(ParsedBehaviors { behaviors })
 }
 
 /// Prompt for normalizing a documentation file for plain text readability.
@@ -500,280 +976,3 @@ pub async fn normalize_documentation(
   Ok(NormalizedDocumentation { files })
 }
 
-/// Prompt for linking requirements to contract members.
-const LINK_SOURCE_TO_FEATURES_PROMPT: &str = "Below is a smart contract and a feature \
-extracted from project documentation.\n\n\
-The contract is rendered as a JSON object with an N-prefixed topic ID on the \
-contract itself and on each of its members (functions, state variables, \
-modifiers, events, structs, enums, errors). Member bodies are omitted — \
-only signatures are shown.\n\n\
-The feature has an F-prefixed topic ID.\n\n\
-Your task is to determine which of this contract's members participate in \
-implementing this feature. A member participates in a feature if the \
-member's implementation would need to satisfy, enforce, or could violate \
-the feature's described behavior.\n\n\
-Rules:\n\
-- Only link members where there is a clear, direct relationship to the \
-  feature. Do not force links.\n\
-- If none of the contract's members participate in this feature, return an \
-  empty array `[]`.\n\
-- Return ONLY a JSON array of N-prefixed member topic ID strings.\n\
-- No other text.\n\n";
-
-/// A pre-rendered (contract JSON, feature JSON) pair for the linking task.
-pub struct ContractFeaturePair {
-  pub contract_topic: topic::Topic,
-  pub contract_json: String,
-  pub feature_json: String,
-  /// Label for dry-run output and logging.
-  pub label: String,
-}
-
-/// Collect all (contract, feature) pairs from audit data, pre-rendered as JSON.
-pub fn collect_contract_feature_pairs(
-  audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
-) -> Vec<ContractFeaturePair> {
-  use crate::solidity::parser::ASTNode;
-
-  // Collect contract AST nodes
-  let mut contracts: Vec<(&ASTNode, String)> = Vec::new();
-  for (_path, ast) in &audit_data.asts {
-    let sol_ast = match ast {
-      AST::Solidity(sol_ast) => sol_ast,
-      _ => continue,
-    };
-    for node in &sol_ast.nodes {
-      if let ASTNode::ContractDefinition { .. } = node {
-        let contract_json = match context::render_contract_members_for_linking(
-          node,
-          audit_data,
-          source_text_cache,
-        ) {
-          Some(json) => json,
-          None => continue,
-        };
-        contracts.push((node, contract_json));
-      }
-    }
-  }
-
-  // Collect features and build pairs
-  let mut pairs = Vec::new();
-  for (ft, feature) in &audit_data.features {
-    let feature_json =
-      match context::render_feature_to_json(ft, feature, audit_data, None) {
-        Some(json) => json,
-        None => continue,
-      };
-
-    for (node, contract_json) in &contracts {
-      let contract_topic = topic::new_node_topic(&node.node_id());
-      let label = format!("{}_{}", contract_topic.id(), ft.id());
-      pairs.push(ContractFeaturePair {
-        contract_topic,
-        contract_json: contract_json.clone(),
-        feature_json: feature_json.clone(),
-        label,
-      });
-    }
-  }
-
-  pairs
-}
-
-/// Collect contract×feature pairs for a single feature. Used by reactive
-/// triggers after user creates a feature.
-pub fn collect_single_feature_pairs(
-  feature_topic: &topic::Topic,
-  audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
-) -> Vec<ContractFeaturePair> {
-  use crate::solidity::parser::ASTNode;
-
-  let feature = match audit_data.features.get(feature_topic) {
-    Some(f) => f,
-    None => return Vec::new(),
-  };
-
-  let feature_json = match context::render_feature_to_json(
-    feature_topic,
-    feature,
-    audit_data,
-    None,
-  ) {
-    Some(json) => json,
-    None => return Vec::new(),
-  };
-
-  let mut pairs = Vec::new();
-  for (_path, ast) in &audit_data.asts {
-    let sol_ast = match ast {
-      AST::Solidity(sol_ast) => sol_ast,
-      _ => continue,
-    };
-    for node in &sol_ast.nodes {
-      if let ASTNode::ContractDefinition { .. } = node {
-        let contract_json = match context::render_contract_members_for_linking(
-          node,
-          audit_data,
-          source_text_cache,
-        ) {
-          Some(json) => json,
-          None => continue,
-        };
-        let contract_topic = topic::new_node_topic(&node.node_id());
-        let label = format!("{}_{}", contract_topic.id(), feature_topic.id());
-        pairs.push(ContractFeaturePair {
-          contract_topic,
-          contract_json,
-          feature_json: feature_json.clone(),
-          label,
-        });
-      }
-    }
-  }
-
-  pairs
-}
-
-/// Result of linking source code members to features: maps source member
-/// topics to the features they participate in.
-pub struct ParsedSourceFeatureLinks {
-  pub links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
-}
-
-/// Link source code members to features via LLM (one call per
-/// contract×feature pair).
-///
-/// The caller collects pairs while holding the lock, then passes them here
-/// after releasing it. Returns a merged map of source member topics to
-/// feature topics across all contracts and features.
-pub async fn link_source_to_features(
-  pairs: &[ContractFeaturePair],
-) -> Result<ParsedSourceFeatureLinks, String> {
-  if pairs.is_empty() {
-    return Err("No contract-feature pairs to process".to_string());
-  }
-
-  let mut handles = Vec::new();
-  for pair in pairs {
-    let prompt = format!(
-      "{}Contract:\n{}\n\nFeature:\n{}",
-      LINK_SOURCE_TO_FEATURES_PROMPT, pair.contract_json, pair.feature_json
-    );
-    let label = pair.label.clone();
-    let feature_topic = {
-      // Extract F-prefixed topic from the feature JSON label
-      let parts: Vec<&str> = label.split('_').collect();
-      let ft_id = parts.get(1).unwrap_or(&"");
-      topic::new_topic(ft_id)
-    };
-    handles.push(tokio::spawn(async move {
-      let result = router::chat_completion(
-        TaskSize::Large,
-        router::SYSTEM_MESSAGE_CODE,
-        &prompt,
-        Some(&label),
-      )
-      .await;
-      (label, feature_topic, result)
-    }));
-  }
-
-  let mut links: BTreeMap<topic::Topic, Vec<topic::Topic>> = BTreeMap::new();
-  for handle in handles {
-    match handle.await {
-      Ok((_, feature_topic, Ok(response))) => {
-        match parse_source_feature_links(&response) {
-          Ok(source_topics) => {
-            for st in source_topics {
-              links
-                .entry(st)
-                .or_default()
-                .push(feature_topic.clone());
-            }
-          }
-          Err(e) => eprintln!("parse_source_feature_links failed: {}", e),
-        }
-      }
-      Ok((label, _, Err(e))) => {
-        eprintln!("link_source_to_features failed for {}: {}", label, e);
-      }
-      Err(e) => {
-        eprintln!("link_source_to_features task panicked: {}", e);
-      }
-    }
-  }
-
-  // Deduplicate feature topics per source
-  for feature_topics in links.values_mut() {
-    feature_topics.sort();
-    feature_topics.dedup();
-  }
-
-  if links.is_empty() {
-    return Err("No source-to-feature links found".to_string());
-  }
-
-  Ok(ParsedSourceFeatureLinks { links })
-}
-
-/// Parse the LLM response for source-to-feature links.
-/// The LLM returns a JSON array of N-prefixed member topic ID strings.
-fn parse_source_feature_links(
-  response: &str,
-) -> Result<Vec<topic::Topic>, String> {
-  let json_str = response
-    .trim()
-    .strip_prefix("```json")
-    .or_else(|| response.trim().strip_prefix("```"))
-    .unwrap_or(response.trim());
-  let json_str = json_str
-    .strip_suffix("```")
-    .unwrap_or(json_str)
-    .trim();
-  let raw_topics: Vec<String> = serde_json::from_str(json_str)
-    .map_err(|e| {
-      eprintln!(
-        "Failed to parse source-feature links JSON: {}\nResponse:\n{}",
-        e, json_str
-      );
-      format!("Failed to parse source-feature links JSON: {}", e)
-    })?;
-
-  Ok(
-    raw_topics
-      .into_iter()
-      .map(|id| topic::new_topic(&id))
-      .collect(),
-  )
-}
-
-/// Generate documentation for all members of a specific contract.
-pub fn document_contract_members(
-  contract_topic_id: &str,
-  audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
-) {
-  todo!()
-}
-
-/// Generate documentation for a specific topic.
-pub fn document_topic(
-  topic_id: &str,
-  audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
-) {
-  todo!()
-}
-
-/// Answer a user question in the context of a specific topic.
-pub fn answer_question(
-  topic_id: &str,
-  question: &str,
-  audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
-) {
-  todo!()
-}
