@@ -1,15 +1,15 @@
 # o11a-backend
 The o11a backend has five modules that form a processing pipeline:
 
- 1. Parser - parses the audit source and allows clients to post new text blobs (added comments and docs) to be parsed in the context of the audit
+ 1. Parser - parses the audit source as well as new comments and docs added to the audit by users
  2. Analyzer - analyzes the audit source, producing a directory of definitions and their attributes, allowing clients to fetch structured audit data
- 3. Formatter - transforms the AST into formatter nodes
- 4. Collaborator - stores discussion topics and the comments under them, allowing clients to post new comments and approve or disapprove of comments from other users
- 5. Checker - checks variable constraints, manages the security model of features, requirements, behaviors, conditions, threats, and invariants, and allows clients to post new constraints to be checked, providing data on any conflicting constraints
+ 3. Formatter - renders nodes into formatted html strings
+ 4. Collaborator - stores comments for each discussion topic and provides AI agent tasks, allowing clients and AI agents to work together and post new comments discussing a topic, or approve and disapprove of comments from other users
+ 5. Checker - checks for conflicting variable properties at convergences, manages the security model of features, requirements, behaviors, conditions, threats, and invariants, and allows clients to post new properties to be checked
 
 # Parser
 
-The parser is responsible for reading source files in an audit and producing AST representations of them for the rest of the application to use.
+The parser is responsible for reading source and documentation files in an audit and producing AST representations of them for the rest of the application to use.
 
 The parser provides extra information not found in the original ASTs it parses in various ways, depending on the type of file. This allows the formatter to work with only the modified AST provided by the parser, not needing to reference the original source files. This is paramount when needing to format a single node in an isolated way.
 
@@ -21,9 +21,9 @@ The parser enhances original Solidity ASTs by adding semantic blocks, which are 
 
 ## Documentation Source Parsing
 
-Documentation (Markdown, but maybe later Plain Text and Djot) source files are compiled by a markdown rust crate that produces an AST directly within the application. Documentation files are looked for in the `src` and `docs` directories of the audit project recursively.
+Documentation (Markdown, but maybe later Plain Text and Djot) source files are compiled by a markdown rust crate that produces an AST directly within the application. Documentation files are read from the list of files in documents.txt file which should be present in the audit's root project directory.
 
-In Documentation files, sections and paragraphs become declarations and inline code snippets become references. These may contain references by name to the same variables and functions as the implementation. Because of this, Text files are parsed last, so that they can be parsed with the full context of the source code, and can resolve any references to the code by searching for a declaration that contains the same name.
+In Documentation files, sections and paragraphs become declarations and inline code snippets become references. These may contain references by name to the same variables and functions as the implementation. Because of this, documents are parsed last, so that they can be parsed with the full context of the source code, and can resolve any references to the code by searching for a declaration that contains the same name.
 
 # Analyzer
 The analyzer is responsible for traversing the Abstract Syntax Tree and performing static analysis on it.
@@ -69,16 +69,20 @@ The formatter can format nodes as source text or as signatures. Source text is n
 
 # Collaborator
 
-The collaborator allows users to comment on topics in the audit. The types of comments users can leave on topics depends on the type of topic. These comments can be collaborative discussions or structured properties of the topics.
+The collaborator allows users to comment on topics in the audit, facilitating collaborative discussions of topics.
 
 The types of topics and their prefixes are:
  - Source code nodes (N)
  - Documentation (D)
  - Comments (C)
- - Attack vectors (A)
+ - Features (F)
+ - Requirements (R)
+ - Threats (T)
  - Invariants (I)
+ - Functional Properties (P)
+ - Type Constraints (Y)
 
- The topic id is a string identifier that uniquely identifies a topic within the audit. Each source code contract, function, block, statement, expression, variable, and literal value has an unique topic id. Each text document/comment and section has an unique topic id. It is sequential number for that topic type preceeded by the topic type prefix. For example, the first added Attack Vector will be `A1`, and the second `A2`.
+ The topic id is a string identifier that uniquely identifies a topic within the audit. Each source code contract, function, block, statement, expression, variable, and literal value has an unique topic id. Each text document/comment and section has an unique topic id. It is sequential number for that topic type preceeded by the topic type prefix. For example, the first added Threat will be `T1`, and the second `T2`.
 
 ## Documentation
 
@@ -89,6 +93,10 @@ Relevant documentation may not be included in the source code originally, so the
 ## Discussion Comments
 
 Users can leave discussion comments on any topic. These comments are first class citizens in the system, like documentation. They are parsed in the same way, and are given topics within them that users can comment on and link to other topics.
+
+## AI Agent Collaboration
+
+The collaborator module includes logic for agent tasks, where AI agents can be used to review user comments, anwser questions, add topic properties, and check properties at a convergence. The AI Agent acts as another auditor in the system, collaborating with the human auditors.
 
 # Checker
 
@@ -102,11 +110,13 @@ The security model is the structured representation of what the documentation cl
 
 **Documentation is untrusted.** Developer docs represent claimed behavior, not verified truth. The system treats them as input to reason about, not as a source of correctness.
 
-**Features describe behavior, not implementation.** Feature names and descriptions are written at the user-visible or protocol level. A pause mechanism is a feature whether the docs describe it as "emergency stop" or "modifier onlyOwner on pause()".
+**Features are synthesized from reconciliation.** Features are not created upfront — they emerge from reconciling documentation-derived requirements with code-derived behaviors. This means features carry both the documented intent and the implementation reality, providing richer context for all downstream analysis than features derived from documentation alone.
 
-**Requirements capture all documented claims.** Requirements are what the documentation says the system does. They can describe any kind of documented behavior — functionality, constraints, access control, edge case handling. They are extracted from documentation and verified by confirming that corresponding behaviors exist in the implementation.
+**Requirements capture all documented claims.** Requirements are what the documentation says the system does. They can describe any kind of documented behavior — functionality, constraints, access control, edge case handling. They are extracted from documentation sections and retain their section structure until reconciliation groups them into features.
 
-**Behaviors capture what the code actually does.** Behaviors are observed during code review and represent the real implementation logic. They are reconciliation artifacts — compared against requirements to surface gaps between documentation and implementation.
+**Behaviors capture what the code actually does.** Behaviors are extracted from source code and represent the real implementation logic. They are generated with functional semantics in context, so they carry business-level meaning rather than mechanical descriptions. They retain their code scope structure until reconciliation groups them into features.
+
+**Functional semantics are the bridge between documentation and code.** Functional semantics link documentation concepts to code declarations — they define what each declaration represents in the context of the project. They are generated upfront through a layered linking process (mechanical resolution followed by LLM matching), before behavior extraction, so that behaviors can be described in business terms. Each functional semantic is persisted on the declaration with a provenance link to the documentation topic it was derived from.
 
 **Conditions are the structured analysis of a non-pure subject's interaction surface.** Each non-pure subject has conditions determined by its type — revert conditions for function calls, value domain constraints for state mutations, staleness and manipulability for state reads. Each condition is evaluated with standardized questions, and the answers are stored on the subject. Conditions are evaluated before threat generation, providing concrete, enumerable inputs for adversarial reasoning rather than relying on open-ended threat identification.
 
@@ -114,27 +124,41 @@ The security model is the structured representation of what the documentation cl
 
 **Invariants live on source code subjects.** Invariants are properties the code must uphold to protect against threats. They are attached directly to the source subjects where they are checked at convergences, not to abstract structures like behaviors. This eliminates indirection — when the auditor evaluates a convergence, the invariants that apply are immediately present. Invariants are generated from threats on non-pure subjects. Each invariant links back to its parent threat for traceability.
 
-**Source locations link to features.** Contract members are linked to the features they participate in. This allows behaviors created during code review to automatically associate with the right features, and enables reconciliation between documented requirements and observed behaviors.
-
 ### Initial Generation
 
-The security model is initially seeded from project documentation through an automated pipeline:
+The security model is initially seeded from project documentation and source code through an automated pipeline:
 
-**1. Feature Extraction.** Documentation files are processed to extract behavioral features and their requirements. When multiple documents exist, each is analyzed independently and the results are consolidated into a unified feature set. During consolidation, broad features with overlapping requirements are dissolved into more specific ones. Each requirement retains links to the documentation it was derived from, preserving traceability to the original developer claims.
+**1. Requirement Extraction.** Documentation files are processed to extract requirements, preserving the documentation's section structure. Each documentation section produces a list of requirements grouped under that section's header chain. Each requirement retains links to the documentation topic it was derived from, preserving traceability to the original developer claims. When multiple documents exist, each is analyzed independently. Requirements remain organized under their documentation sections until reconciliation groups them into features.
 
-**2. Source-to-Feature Linking.** Each contract member in scope is evaluated to determine which features it participates in. This produces source-to-feature links: a map from concrete code locations to the features they implement. A function can link to more than one feature. This mapping is the mechanism through which behaviors created during code review are automatically associated with the correct features — when an auditor adds a behavior while reviewing a function, the behavior inherits the feature association from the source location.
+**2. Semantic Linking.** Documentation sections are linked to source code declarations to establish functional semantics — the project-specific meaning of each declaration. This step is the bridge between documentation and code, and it runs before behavior extraction so that behaviors can be generated with business-level meaning rather than mechanical descriptions.
+
+Semantic linking uses a layered approach to manage the cost of matching documentation against potentially thousands of declarations:
+
+*Mechanical layer:* Inline code references in documentation are resolved to declarations (perfect confidence — the documentation literally names the declaration). Each resolved declaration's scope is walked upward to associate the documentation section with the containing contract. This produces confirmed section-to-contract associations and specific declaration anchors.
+
+*LLM pass one:* For each documentation section, the LLM sees the section text and the list of contracts with their member signatures (including NatSpec). Confirmed section-to-contract associations from the mechanical layer are included as known context. The LLM identifies which contracts are relevant to this section, confirming mechanical matches and adding new ones. This is a cheap call — the input is one section and a list of contract signatures, which is bounded regardless of project size.
+
+*LLM pass two:* For each matched section-contract pair, the LLM sees the section text and the contract's full declaration list with signatures and NatSpec. Inline-referenced declarations are included as confirmed anchors. The LLM identifies which specific declarations the section provides semantic meaning for and what those meanings are. The context is bounded — one section and one contract's declarations.
+
+Each functional semantic is persisted on the declaration with both the semantic text and a provenance link to the documentation topic it was derived from. This provenance enables auditor verification (trace back to the source passage), change tracking (documentation edits invalidate only affected semantics), and the full traceability chain once features are synthesized. Declarations that no documentation section matches don't get semantics in this step — they can receive semantics on-demand during convergence evaluation, or manually from the auditor.
+
+**3. Behavior Extraction.** Source code is processed to extract behaviors, preserving the code's scope structure. Each contract member produces a list of behaviors grouped under its scope (container, component, member). With functional semantics already populated on declarations, behavior extraction produces business-level descriptions rather than mechanical ones. A function containing `propFactor * stakerBalance` where `propFactor` has the semantic "proportional reward multiplier" and `stakerBalance` has the semantic "user's staked token balance" produces the behavior "calculates proportional reward share for the staker" rather than "multiplies propFactor by stakerBalance." Behaviors remain organized under their code scopes until reconciliation groups them into features.
+
+**4. Feature Synthesis via Reconciliation.** Requirements (grouped by documentation section), behaviors (grouped by code scope), and the semantic links between documentation sections and code declarations are reconciled to synthesize features. The semantic links serve as the bridge — they tell the reconciliation step which documentation sections relate to which code scopes. Requirements mentioning "proportional factor" link through the functional semantic on `propFactor` to behaviors in `distributeRewards()`. The reconciliation groups related requirements and behaviors into features, with each feature's description synthesized from both the documented intent and the implemented reality.
+
+Documentation section groups that don't link to any code produce features with requirements only — unimplemented specification. Code scope groups that don't link to any documentation produce features with behaviors only — undocumented implementation. Both are findings that the reconciliation surfaces structurally.
 
 Where requirements and invariants both describe things the code must do, they serve different concerns. Requirements capture what the documentation claims — the functionality described to users or the protocol. Invariants capture what the code must enforce to protect against threats — the defensive properties that prevent threats from materializing. A collateral lending feature has a documented requirement that users can deposit ETH, but the invariant that only the position owner can withdraw collateral exists to protect against a threat, not to fulfill a documented claim. Requirements are verified by matching them to behaviors during reconciliation; invariants are verified by checking them against convergences in the source code.
 
 ### On-the-Fly Generation
 
-The security model is not static after initial generation. As auditors review code and encounter security-relevant patterns, they add new features, requirements, behaviors, conditions, threats, and invariants directly from the code context. This on-the-fly generation is the primary mechanism through which the audit achieves comprehensive coverage.
+The security model is not static after initial generation. As auditors review code and encounter security-relevant patterns, they add new requirements, behaviors, conditions, threats, invariants, and functional semantics directly from the code context. This on-the-fly generation is the primary mechanism through which the audit achieves comprehensive coverage.
 
 When a user adds a new element to the security model, the relevant pipeline steps run automatically in the background:
 
-- **New feature** — Links source locations to the feature.
-- **New requirement** — Added to its parent feature. Requirements do not trigger threat generation or source linking; they are documentation claims that will be verified during reconciliation against behaviors.
-- **New behavior** — Created during code review and automatically associated with a feature via the source-to-feature link on the source location where it was observed. Behaviors are reconciliation artifacts and do not carry threat or invariant links.
+- **New requirement** — Added under the relevant documentation section or feature. Requirements do not trigger threat generation; they are documentation claims that will be verified during reconciliation against behaviors.
+- **New behavior** — Created during code review, grouped under the code scope where it was observed. If features have already been synthesized, the behavior is associated with the appropriate feature based on its code scope. Behaviors are reconciliation artifacts and do not carry threat or invariant links.
+- **New functional semantic** — Persisted on a declaration with provenance to its source documentation topic. If the semantic changes the meaning of a declaration, downstream properties (behaviors that reference the declaration, functional purpose on containing statements) may need re-evaluation.
 - **New condition** — Evaluated on a non-pure subject with standardized questions. Condition evaluations trigger re-evaluation of the subject's threats, as new condition answers may reveal risks not previously identified.
 - **New threat** — Generated on non-pure subjects from condition evaluations (see Managing Threats and Invariants below). Created without a mandatory link to a feature, allowing the discoverer to record it immediately. Invariants are generated from the threat and attached to the subject. The system triggers re-checks on the subject. The feature linkage is established during impact analysis.
 - **New invariant** — Attached to a source subject, linked to its parent threat. The system triggers re-checks against the subject and any related subjects within the invariant's scope.
@@ -145,12 +169,12 @@ This re-check mechanism is what makes the system's backward-only evaluation cont
 
 ### Reconciliation
 
-Reconciliation is the explicit step where the auditor compares documented requirements against observed behaviors for a given feature. The system presents the feature's requirements (from documentation) alongside the behaviors associated with the feature (via source-to-feature links). The auditor evaluates coverage in both directions:
+Reconciliation is both the final step of initial generation (where features are first synthesized) and an ongoing audit activity (where the auditor evaluates coverage). During initial generation, reconciliation groups requirements and behaviors into features using the semantic links as the bridge. As an audit activity, the auditor compares the feature's requirements against its behaviors and evaluates coverage in both directions:
 
 - **Requirements without matching behaviors** are unimplemented specification — the documentation claims the system does something, but no corresponding behavior was observed in the code.
 - **Behaviors without matching requirements** are undocumented implementation — the code does something significant that the documentation does not describe.
 
-Both are findings. The nature of the relationship between individual requirements and behaviors — whether a behavior fulfills, constrains, or conflicts with a requirement — is assessed by the auditor during this step, not at behavior creation time. This keeps behavior creation lightweight and focused on the code, while reconciliation provides the dedicated context for documentation-implementation comparison.
+Both are findings. The nature of the relationship between individual requirements and behaviors — whether a behavior fulfills, constrains, or conflicts with a requirement — is assessed by the auditor during this step. This keeps behavior extraction lightweight and focused on the code, while reconciliation provides the dedicated context for documentation-implementation comparison.
 
 Features structure the reconciliation into manageable units. Instead of reconciling all requirements against all behaviors in an audit at once, the auditor works through one feature at a time.
 
@@ -184,14 +208,16 @@ Feature
         "Only one campaign can exist per token"
         └── Source Links: [deployCampaign(), campaignsByToken]
 
-Source-to-Feature Links:
+Feature-to-Source Links (from reconciliation):
   deployCampaign()    → "Protocol Campaigns"
   withdrawRemaining() → "Protocol Campaigns"
   campaignsByToken    → "Protocol Campaigns"
 
 Source Subject: deployCampaign() → IERC20(token).transferFrom(...)   [non-pure: external call]
   ├── Functional Purpose: "Transfer campaign tokens from creator into contract"
-  ├── Functional Semantics: "token is the campaign reward token, amount is total campaign allocation"
+  ├── Functional Semantics:
+  │     ├── "token": "campaign reward token" (from docs: D3 "Campaign Token Setup")
+  │     └── "amount": "total campaign allocation" (from docs: D5 "Campaign Funding")
   ├── Condition: Revert "PAIR_EXISTS" on createPair
   │     ├── Can an attacker trigger? Yes — token address is deterministic (CREATE opcode)
   │     ├── Can normal operation trigger? No
@@ -262,7 +288,7 @@ Specification convergences verify that the implementation of a subject upholds t
 There are three types of properties that may be checked on the subjects of a specification convergence, depending on the kind of subject:
  - Project Implementation, Contracts, Blocks, Statements:
    1. Functional Purpose (what purpose it serves within the context of the application, derived from the feature it belongs to)
-   2. Behaviors (the observed behaviors that apply to this subject, associated via source-to-feature linking)
+   2. Behaviors (the observed behaviors that apply to this subject, associated via feature reconciliation)
    3. Dependencies (what the subject depends on to fulfill its purpose, expressed as links to other statements or mechanisms)
    4. Invariants (defensive properties the subject must uphold, derived from threats)
  - Non-Pure Subjects (state reads, state writes, external calls, delegatecalls, assembly blocks):
@@ -309,7 +335,7 @@ When reasoning passes between agents — an LLM doing an initial pass and a huma
 
 This applies in both directions. When the human states a purpose and the LLM generates threats, the LLM has an explicit anchor to reason from rather than inferring intent from a behavior description that could be interpreted multiple ways. When the LLM states a purpose and the human reviews, the human gets a window into the LLM's understanding that they can verify independently of whether the downstream outputs look reasonable.
 
-Functional purpose is generated on-demand using the same pattern as functional semantics: when a subject is first evaluated, the LLM is given the subject, its feature context, and the feature's documentation, and asked "why does this exist?" The result is cached on the subject and presented to the auditor for review. The auditor can correct, enrich, or confirm it before downstream analysis proceeds.
+Functional purpose is generated on-demand: when a subject is first evaluated, the LLM is given the subject, its feature context (once features are synthesized), the feature's documentation and requirements, and the subject's functional semantics, and asked "why does this exist?" The result is cached on the subject and presented to the auditor for review. The auditor can correct, enrich, or confirm it before downstream analysis proceeds.
 
 Try to avoid implementation details in functional purposes, and focus on the business logic. "Why" is not "to do the thing it does." It is "from the project perspective, what value does this statement provide?", and "what impact would it have on the users or system if it weren't there?"
 
@@ -319,21 +345,23 @@ When adding functional purposes, preset questions are presented to the user that
 
 Functional semantics define what an expression or value represents within the context of the application — the project-specific meaning of a variable, literal, or sub-expression. For example, `userBalance` might semantically represent "the user's total balance" in one project and "the user's locked balance" in another. `propFactor` might semantically represent "a balance multiplier." These meanings are not derivable from the code alone — they come from project documentation.
 
-Functional semantics are generated on-demand rather than through a structured upfront extraction pipeline. When a subject is first evaluated during the audit, the LLM is given the subject itself, the features the subject is linked to (via source-to-feature links), and the documentation linked to those features, with the question: "what is the semantic meaning of this subject within this feature?" The LLM synthesizes a semantic meaning from the full documentation context in a single pass, and the result is cached on the subject.
+Functional semantics are generated upfront during the semantic linking step of initial generation, before behavior extraction. This ordering is critical — behaviors extracted with functional semantics in context carry business-level meaning ("calculates proportional reward share") rather than mechanical descriptions ("multiplies propFactor by stakerBalance"), which makes reconciliation between documentation requirements and code behaviors a straightforward matching task.
 
-This on-demand approach is preferred over an upfront pipeline that would extract semantic claims from documentation, resolve them to declarations, and propagate properties to convergence points. Such a pipeline introduces a lossy transformation chain — each extraction and resolution step can distort or lose information, and errors propagate forward undetected. The on-demand approach avoids this by keeping the full documentation in context at the moment of evaluation, which also handles implicit and contextual semantics naturally. Documentation often defines meaning through surrounding context rather than explicit definition (e.g., a paragraph discussing "rewards accumulate proportionally to stake" implies a multiplicative relationship without stating it as a discrete claim), and the on-demand approach lets the LLM reason about these implications directly.
+Each functional semantic is persisted on the declaration with both the semantic text and a provenance link to the documentation topic it was derived from. The provenance enables the auditor to trace any semantic back to the documentation passage that established it, verify the LLM's interpretation against the original text, and identify which semantics are affected when documentation changes.
 
-Coverage is guaranteed by the programmatic audit's traversal of every subject. Every expression and value gets evaluated, so every subject that has a feature with documentation gets a semantic annotation. Nothing is missed due to the lack of upfront extraction.
+The semantic linking process uses a layered approach to manage cost (see Initial Generation). The mechanical layer resolves inline code references and walks scopes to produce section-to-contract associations. The LLM passes match documentation sections to contracts (pass one, cheap) and then match within each section-contract pair to specific declarations (pass two, bounded context). This avoids processing thousands of declarations against full documentation, instead decomposing the problem into many small, tractable matching tasks.
 
-Once generated, the functional semantic is presented to the human auditor for review. The auditor can correct it, enrich it with domain knowledge, or confirm it. The corrected semantic is cached and reused at every convergence involving that subject. The auditor can also add functional semantics manually at any point when they recognize a meaning the LLM missed.
+Declarations that are not matched to any documentation section during semantic linking can receive semantics through two fallback paths: on-demand generation during convergence evaluation (the LLM is given the declaration and its feature context and asked "what is the semantic meaning of this declaration within this feature?"), or manual annotation by the auditor at any point during code review. Both produce the same result — a functional semantic persisted on the declaration — but without documentation provenance.
+
+Once generated, the functional semantic is presented to the human auditor for review. The auditor can correct it, enrich it with domain knowledge, or confirm it. The corrected semantic is cached and reused at every convergence involving that subject.
 
 Functional semantics are checked at specification convergences. When the auditor or LLM evaluates a statement like `userBonus = interest * userBalance`, the functional semantic on `userBalance` ("the user's total balance") can contradict the containing statement's functional purpose ("calculate bonus based on locked token interest"). Similarly, if `propFactor` has the semantic "a balance multiplier" but appears in an addition operation `val = propFactor + bal`, the semantic contradicts the operator. These contradictions are only surfaceable when the documentation-derived semantic and the code-derived context are both present at the convergence point.
 
 ### Managing Requirements
 
-Requirements are what the documentation claims the system does. Each requirement captures a documented behavior — something the documentation says the system needs to accomplish. They can describe any kind of documented behavior: functionality, constraints, access control, edge case handling. For example, a "Protocol Campaigns" feature might have requirements like "protocols can permissionlessly deploy a campaign for their token" and "campaign creators can withdraw remaining tokens after campaign ends."
+Requirements are what the documentation claims the system does. Each requirement captures a documented behavior — something the documentation says the system needs to accomplish. They can describe any kind of documented behavior: functionality, constraints, access control, edge case handling. For example, documentation about campaign deployment might have requirements like "protocols can permissionlessly deploy a campaign for their token" and "campaign creators can withdraw remaining tokens after campaign ends."
 
-Requirements are defined at the feature level in the security model. They do not carry source links, threat links, or invariant links — security analysis operates at the source subject level. Requirements are verified not by checking them directly against source code, but by confirming during reconciliation that corresponding behaviors exist in the implementation.
+Requirements are extracted from documentation sections during initial generation, preserving the documentation's section structure. They do not carry source links, threat links, or invariant links — security analysis operates at the source subject level. Requirements are verified not by checking them directly against source code, but by confirming during reconciliation that corresponding behaviors exist in the implementation. Once reconciliation synthesizes features, requirements are grouped under their feature.
 
 All requirements on a feature are distinct and independent of each other. Requirements are added initially as unverified, then are able to be marked as verified by each party in the audit during reconciliation.
 
@@ -341,9 +369,9 @@ Requirements are generally explored as documentation is reviewed, but auditors c
 
 ### Managing Behaviors
 
-Behaviors are what the code actually does. Each behavior captures an observed implementation behavior — something the auditor noticed while reviewing code. A behavior is a description and source links to the code where it was observed.
+Behaviors are what the code actually does. Each behavior captures an observed implementation behavior — extracted from source code or identified by the auditor during code review. A behavior is a description and source links to the code where it was observed. Because behaviors are extracted after functional semantics are populated, they carry business-level meaning derived from the documentation-linked semantics on the declarations they involve.
 
-Behaviors are created during code review and automatically associated with a feature via the source-to-feature link on the source location where they were observed. This means the auditor never leaves the code context when adding a behavior — they describe what the code does, and the model knows which feature it belongs to.
+Behaviors are extracted preserving the code's scope structure (container, component, member). Once reconciliation synthesizes features, behaviors are grouped under their feature based on the semantic links between their code scope and the documentation sections that form the feature.
 
 Behaviors are purely reconciliation artifacts. They do not carry threat links or invariant links — security analysis operates at the source subject level through threats and invariants on convergences. Behaviors exist to enable the comparison between what the documentation claims (requirements) and what the code does (behaviors) during reconciliation.
 
@@ -431,13 +459,12 @@ Type constraint checks can be checked by a constraint algorithm. Specification c
 
 General audit flow is:
  1. Read and understand the docs and the purpose of the project
- 2. Run the initial generation pipeline to extract features and requirements from the documentation, and link source locations to features
- 3. Review and refine the generated security model, adding missing features or requirements as needed
- 4. Read the code, documenting behaviors as they are observed (behaviors automatically associate with features via source-to-feature links)
- 5. Step through all convergences — for each subject, functional purpose and functional semantics are generated on-demand; for non-pure subjects, conditions are evaluated with standardized questions, then threats are generated from the condition evaluations, and invariants from threats are attached and checked at convergences
- 6. Perform impact analysis — link threats to the features they affect, establishing severity and the relationship type ("is vulnerable to" or "defends against"); unlinked threats are flagged for review
- 7. Reconcile requirements against behaviors per feature, identifying unimplemented specification and undocumented implementation
- 8. As new features, requirements, behaviors, conditions, threats, or invariants are discovered during code review, add them to the security model — the re-check system propagates them to all relevant subjects, ensuring nothing is missed
+ 2. Run the initial generation pipeline: extract requirements from documentation, generate functional semantics via semantic linking, extract behaviors from source code with semantics in context, and synthesize features via reconciliation
+ 3. Review and refine the generated security model — verify functional semantics, add missing requirements, correct behavior descriptions, adjust feature groupings
+ 4. Step through all convergences — for each subject, functional purpose is generated on-demand; for non-pure subjects, conditions are evaluated with standardized questions, then threats are generated from the condition evaluations, and invariants from threats are attached and checked at convergences
+ 5. Perform impact analysis — link threats to the features they affect, establishing severity and the relationship type ("is vulnerable to" or "defends against"); unlinked threats are flagged for review
+ 6. Re-reconcile requirements against behaviors per feature as needed, identifying unimplemented specification and undocumented implementation
+ 7. As new requirements, behaviors, conditions, threats, invariants, or functional semantics are discovered during code review, add them to the security model — the re-check system propagates them to all relevant subjects, ensuring nothing is missed
 
 ### Managing Convergences
 
@@ -445,7 +472,7 @@ Convergences are the main point of verification in the audit process. They have 
 
 ## Subject Evaluation Context Strategy
 
-When evaluating subjects for invariant upholding or invariant recognition, we use **backward-only context** as the default strategy. When auditing a given subject, the system provides context about where the subject's values originated (their data provenance, taint sources, and upstream transformations), the subject's functional purpose (why it exists, derived from the feature), the subject's functional semantics (what it represents, derived on-demand from project documentation), its invariants (defensive properties it must uphold), and for non-pure subjects, its condition evaluations (structured analysis of the subject's interaction surface) and threats (implementation-specific risks derived from condition evaluations). The system does not, by default, include forward context about where those values propagate to downstream.
+When evaluating subjects for invariant upholding or invariant recognition, we use **backward-only context** as the default strategy. When auditing a given subject, the system provides context about where the subject's values originated (their data provenance, taint sources, and upstream transformations), the subject's functional purpose (why it exists, derived from the feature), the subject's functional semantics (what it represents, derived from project documentation via semantic linking, with provenance to the source documentation topic), its invariants (defensive properties it must uphold), and for non-pure subjects, its condition evaluations (structured analysis of the subject's interaction surface) and threats (implementation-specific risks derived from condition evaluations). The system does not, by default, include forward context about where those values propagate to downstream.
 
 This is a deliberate architectural choice, not a limitation. The system compensates for the absence of forward context through the **security model's on-the-fly generation and re-check mechanism**, which provides equivalent or superior coverage to bidirectional context while maintaining focused, low-noise audit passes.
 
