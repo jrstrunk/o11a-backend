@@ -2372,8 +2372,16 @@ pub fn render_contract_for_behavior_extraction(
     }
   }
 
+  // Filter to only functions and modifiers — state variables are excluded
+  // from behavior extraction
   let member_snippets: Vec<serde_json::Value> = members
     .iter()
+    .filter(|m| {
+      matches!(
+        m,
+        ASTNode::FunctionDefinition { .. } | ASTNode::ModifierDefinition { .. }
+      )
+    })
     .map(|m| render_solidity_ast_snippet(m, &render_ctx, audit_data, source_text_cache))
     .collect();
 
