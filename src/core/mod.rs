@@ -225,6 +225,16 @@ pub struct FunctionalSemantic {
   pub text: String,
   /// The D-prefixed documentation topic this semantic was derived from, if any
   pub documentation_topic: Option<topic::Topic>,
+  pub author_id: i64,
+  pub created_at: String,
+}
+
+/// A functional purpose — why a subject exists in the context of the project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionalPurpose {
+  pub text: String,
+  pub author_id: i64,
+  pub created_at: String,
 }
 
 /// A link between a documentation section and a code declaration, established
@@ -363,7 +373,7 @@ pub struct AuditData {
   /// Requirements keyed by R-prefixed topic ID. Each belongs to one feature.
   pub requirements: BTreeMap<topic::Topic, Requirement>,
   /// Functional purpose stored per subject topic: "why does this exist?"
-  pub functional_purposes: BTreeMap<topic::Topic, String>,
+  pub functional_purposes: BTreeMap<topic::Topic, FunctionalPurpose>,
   /// Functional semantics with provenance: "what does this represent?" + doc source
   pub functional_semantics: BTreeMap<topic::Topic, FunctionalSemantic>,
   /// Links between documentation sections and code declarations from semantic linking.

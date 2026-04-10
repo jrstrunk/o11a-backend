@@ -102,6 +102,22 @@ pub fn create_router(state: AppState) -> Router {
       post(handlers::analyze),
     )
     .route(
+      "/api/v1/audits/:audit_id/pipeline/requirements",
+      post(handlers::pipeline_requirements),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/pipeline/semantic_links",
+      post(handlers::pipeline_semantic_links),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/pipeline/behaviors",
+      post(handlers::pipeline_behaviors),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/pipeline/synthesize",
+      post(handlers::pipeline_synthesize),
+    )
+    .route(
       "/api/v1/audits/:audit_id/requirements/:requirement_id/documentation_topics",
       post(handlers::add_requirement_documentation_topic),
     )

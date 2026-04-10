@@ -1826,30 +1826,99 @@ fn pipeline_state(state: &AppState) -> crate::collaborator::agent::pipeline::Pip
   }
 }
 
+/// Spawn a pipeline step on a background task (required because pipeline
+/// functions hold std::sync::MutexGuard which is !Send, so they must run
+/// inside tokio::spawn to satisfy axum's Handler bounds).
+async fn run_pipeline_step<F, Fut>(
+  state: &AppState,
+  audit_id: String,
+  step_name: &str,
+  f: F,
+) -> Result<StatusCode, StatusCode>
+where
+  F: FnOnce(crate::collaborator::agent::pipeline::PipelineState, String) -> Fut
+    + Send
+    + 'static,
+  Fut: std::future::Future<Output = Result<(), String>> + Send,
+{
+  let ps = pipeline_state(state);
+  let name = step_name.to_string();
+  tokio::spawn(async move { f(ps, audit_id).await })
+    .await
+    .map_err(|e| {
+      eprintln!("{} task panicked: {}", name, e);
+      StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .map_err(|e| {
+      eprintln!("{} failed: {}", name, e);
+      StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+  Ok(StatusCode::OK)
+}
+
 /// POST /api/v1/audits/:audit_id/analyze
-/// Runs the full analysis pipeline:
-/// build_requirements → build_semantic_links → build_behaviors → synthesize_features
+/// Runs the full analysis pipeline.
 pub async fn analyze(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
   println!("POST /api/v1/audits/{}/analyze", audit_id);
-
-  let ps = pipeline_state(&state);
-  tokio::spawn(async move {
-    crate::collaborator::agent::pipeline::run_full_pipeline(&ps, &audit_id).await
+  run_pipeline_step(&state, audit_id, "analyze", |ps, id| async move {
+    crate::collaborator::agent::pipeline::run_full_pipeline(&ps, &id).await
   })
   .await
-  .map_err(|e| {
-    eprintln!("analyze task panicked: {}", e);
-    StatusCode::INTERNAL_SERVER_ERROR
-  })?
-  .map_err(|e| {
-    eprintln!("analyze pipeline failed: {}", e);
-    StatusCode::INTERNAL_SERVER_ERROR
-  })?;
+}
 
-  Ok(StatusCode::OK)
+/// POST /api/v1/audits/:audit_id/pipeline/requirements
+/// Step 1: Extract requirements from documentation, grouped by section.
+pub async fn pipeline_requirements(
+  State(state): State<AppState>,
+  Path(audit_id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+  println!("POST /api/v1/audits/{}/pipeline/requirements", audit_id);
+  run_pipeline_step(&state, audit_id, "build_requirements", |ps, id| async move {
+    crate::collaborator::agent::pipeline::build_requirements(&ps, &id).await
+  })
+  .await
+}
+
+/// POST /api/v1/audits/:audit_id/pipeline/semantic_links
+/// Step 2: Connect documentation sections to code declarations.
+pub async fn pipeline_semantic_links(
+  State(state): State<AppState>,
+  Path(audit_id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+  println!("POST /api/v1/audits/{}/pipeline/semantic_links", audit_id);
+  run_pipeline_step(&state, audit_id, "build_semantic_links", |ps, id| async move {
+    crate::collaborator::agent::pipeline::build_semantic_links(&ps, &id).await
+  })
+  .await
+}
+
+/// POST /api/v1/audits/:audit_id/pipeline/behaviors
+/// Step 3: Extract behaviors from source code with semantics in context.
+pub async fn pipeline_behaviors(
+  State(state): State<AppState>,
+  Path(audit_id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+  println!("POST /api/v1/audits/{}/pipeline/behaviors", audit_id);
+  run_pipeline_step(&state, audit_id, "build_behaviors", |ps, id| async move {
+    crate::collaborator::agent::pipeline::build_behaviors(&ps, &id).await
+  })
+  .await
+}
+
+/// POST /api/v1/audits/:audit_id/pipeline/synthesize
+/// Step 4: Synthesize features by reconciling requirements with behaviors.
+pub async fn pipeline_synthesize(
+  State(state): State<AppState>,
+  Path(audit_id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+  println!("POST /api/v1/audits/{}/pipeline/synthesize", audit_id);
+  run_pipeline_step(&state, audit_id, "synthesize_features", |ps, id| async move {
+    crate::collaborator::agent::pipeline::synthesize_features(&ps, &id).await
+  })
+  .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -2607,7 +2676,11 @@ pub async fn set_functional_purpose(
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data = ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-    audit_data.functional_purposes.insert(t, row.value.clone());
+    audit_data.functional_purposes.insert(t, core::FunctionalPurpose {
+      text: row.value.clone(),
+      author_id: row.author_id,
+      created_at: row.created_at.clone(),
+    });
   }
 
   Ok(Json(SubjectPropertyResponse {
@@ -2649,6 +2722,8 @@ pub async fn set_functional_semantics(
     audit_data.functional_semantics.insert(t, core::FunctionalSemantic {
       text: row.value.clone(),
       documentation_topic: None, // provenance set during semantic linking
+      author_id: row.author_id,
+      created_at: row.created_at.clone(),
     });
   }
 
