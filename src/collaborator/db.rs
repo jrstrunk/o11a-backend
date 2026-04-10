@@ -1182,6 +1182,8 @@ pub async fn load_all_features(
         core::FunctionalSemantic {
           text: row.semantic_text.clone(),
           documentation_topic: Some(topic::new_topic(&row.documentation_topic)),
+          author_id: 0,
+          created_at: String::new(),
         },
       );
     }
@@ -1200,12 +1202,18 @@ pub async fn load_all_features(
       let t = topic::new_topic(&row.topic_id);
       match row.property_type.as_str() {
         "functional_purpose" => {
-          audit_data.functional_purposes.insert(t, row.value.clone());
+          audit_data.functional_purposes.insert(t, core::FunctionalPurpose {
+            text: row.value.clone(),
+            author_id: row.author_id,
+            created_at: row.created_at.clone(),
+          });
         }
         "functional_semantics" => {
           audit_data.functional_semantics.insert(t, core::FunctionalSemantic {
             text: row.value.clone(),
             documentation_topic: None, // provenance loaded separately from semantic_links
+            author_id: row.author_id,
+            created_at: row.created_at.clone(),
           });
         }
         _ => {}

@@ -38,6 +38,8 @@ pub struct ConversationEntry {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationEntryKind {
+  FunctionalSemantics,
+  FunctionalPurpose,
   Comment,
   Mention,
 }
@@ -1459,6 +1461,58 @@ pub fn build_conversation(
   audit_data.topic_metadata.get(&topic)?;
 
   let mut entries: Vec<ConversationEntry> = Vec::new();
+
+  // Functional semantics (what this topic represents in project context)
+  if let Some(sem) = audit_data.functional_semantics.get(&topic) {
+    let provenance_html = if let Some(ref doc_topic) = sem.documentation_topic {
+      let doc_name = audit_data
+        .topic_metadata
+        .get(doc_topic)
+        .and_then(|m| m.name())
+        .unwrap_or(doc_topic.id());
+      format!(
+        " <span class=\"provenance\">(from <a data-topic=\"{}\">{}</a>)</span>",
+        doc_topic.id(),
+        html_escape(doc_name)
+      )
+    } else {
+      String::new()
+    };
+
+    let header = render_authored_header("semantics", sem.author_id, &sem.created_at);
+    let html = format!(
+      "<div class=\"functional-semantics\" style=\"{}\">{}\
+       <p style=\"margin: 0\">{}{}</p></div>",
+      COMBINED_PANEL_STYLE,
+      header,
+      html_escape(&sem.text),
+      provenance_html
+    );
+    entries.push(ConversationEntry {
+      topic_id: topic_id.to_string(),
+      kind: ConversationEntryKind::FunctionalSemantics,
+      created_at: Some(sem.created_at.clone()),
+      html,
+    });
+  }
+
+  // Functional purpose (why this topic exists)
+  if let Some(purpose) = audit_data.functional_purposes.get(&topic) {
+    let header = render_authored_header("purpose", purpose.author_id, &purpose.created_at);
+    let html = format!(
+      "<div class=\"functional-purpose\" style=\"{}\">{}\
+       <p style=\"margin: 0\">{}</p></div>",
+      COMBINED_PANEL_STYLE,
+      header,
+      html_escape(&purpose.text)
+    );
+    entries.push(ConversationEntry {
+      topic_id: topic_id.to_string(),
+      kind: ConversationEntryKind::FunctionalPurpose,
+      created_at: Some(purpose.created_at.clone()),
+      html,
+    });
+  }
 
   // Direct comments on this topic
   if let Some(comment_topics) = audit_data.comment_index.get(&topic) {

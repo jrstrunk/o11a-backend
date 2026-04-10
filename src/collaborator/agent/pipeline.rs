@@ -558,6 +558,8 @@ pub async fn build_semantic_links(
       core::FunctionalSemantic {
         text: link.semantic_text.clone(),
         documentation_topic: Some(link.documentation_topic.clone()),
+        author_id: AUTHOR_AGENT,
+        created_at: String::new(),
       },
     );
   }
