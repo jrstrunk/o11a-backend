@@ -337,27 +337,54 @@ contracts (both confirmed and newly identified). If no contracts are relevant, \
 return an empty array `[]`.\n\
 Return ONLY the JSON array, no other text.\n\n";
 
-/// LLM pass 2: Given a documentation section and a contract's declarations,
-/// identify which declarations this section provides semantic meaning for.
+/// LLM pass 2: Given a documentation section and a contract's member signatures,
+/// identify which members this section is relevant to.
 const SEMANTIC_LINK_PASS2_PROMPT: &str = "Below is a documentation section from a smart contract \
-project and a contract's declarations (functions, state variables, modifiers, \
-events, etc.) with their signatures.\n\n\
-Some declarations have been pre-identified as referenced by the documentation \
-(marked as \"confirmed\"). Your task is to identify which declarations this \
-documentation section provides **semantic meaning** for — that is, the section \
-explains what the declaration represents or does in the context of the project.\n\n\
-For each matched declaration, provide:\n\
-- `declaration_topic`: the N-prefixed topic ID of the declaration\n\
-- `semantic_text`: a concise description of what this declaration represents \
-in project context (e.g., \"proportional reward multiplier\", \"user's staked \
-token balance\", \"transfers campaign tokens from creator into contract\")\n\n\
+project and a contract's member signatures (functions, modifiers, state \
+variables, events, etc.).\n\n\
+Some members have been pre-identified as relevant through inline code \
+references in the documentation (marked as \"confirmed\"). Your task is to \
+review these confirmations and identify any additional members that this \
+documentation section is relevant to.\n\n\
+A member is relevant if the documentation section describes behavior, \
+requirements, or properties that apply to that member's functionality.\n\n\
+Return a JSON array of N-prefixed member topic ID strings for ALL relevant \
+members (both confirmed and newly identified). If no members are relevant, \
+return an empty array `[]`.\n\
+Return ONLY the JSON array, no other text.\n\n";
+
+/// LLM pass 3: Given a documentation section, a list of declarations needing
+/// semantics, and the member's source code for disambiguation.
+const SEMANTIC_LINK_PASS3_PROMPT: &str = "Below is a documentation section from a smart contract \
+project, followed by a list of declarations that need semantic meaning \
+assigned, followed by the source code of the containing function/modifier \
+for reference.\n\n\
+Your task is to assign **semantic meaning** to each declaration based on \
+what the **documentation says** it represents in the project. The semantic \
+should reflect the developer's documented intent, NOT what the code does \
+with the declaration.\n\n\
+The source code is provided ONLY to help you identify which declarations \
+the documentation is describing — for example, to confirm that `pID` in the \
+documentation refers to the `participationId` parameter. Do NOT derive \
+meaning from how the code uses a variable. If the documentation says a \
+variable is a \"proportional reward factor\" but the code uses it as a \
+divisor, the semantic should still be \"proportional reward factor\" — that \
+mismatch is valuable information for auditors.\n\n\
+For each declaration, provide:\n\
+- `declaration_topic`: the N-prefixed topic ID\n\
+- `semantic_text`: a concise description of what the documentation says this \
+declaration represents in project context (e.g., \"proportional reward \
+multiplier\", \"user's staked token balance\", \"reward distribution mechanism\")\n\n\
 Rules:\n\
-- Only match declarations where the documentation section genuinely explains \
-their meaning. Do not force matches.\n\
-- Confirmed declarations should appear in the output with their semantic text.\n\
+- Derive semantics from the documentation section, not from code behavior.\n\
+- If the documentation does not describe a declaration's meaning, omit it \
+from the output — do not invent a semantic from the code.\n\
 - The semantic text should be project-specific meaning, not a generic type \
 description. \"uint256 balance\" is not a semantic — \"user's total staked \
 balance\" is.\n\
+- Functions and modifiers can receive semantics too — their semantic is \
+what they represent (e.g., \"reward distribution mechanism\", \"access \
+control check for admin role\").\n\
 - Return ONLY a JSON array of objects, no other text.\n\n";
 
 /// Result of LLM pass 1: relevant contract topics for a section.
@@ -366,15 +393,21 @@ pub struct SemanticLinkPass1Result {
   pub contract_topics: Vec<topic::Topic>,
 }
 
-/// A single semantic link from LLM pass 2.
+/// Result of LLM pass 2: relevant member topics for a (section, contract) pair.
+pub struct SemanticLinkPass2Result {
+  pub section_topic: topic::Topic,
+  pub member_topics: Vec<topic::Topic>,
+}
+
+/// A single semantic link from LLM pass 3.
 #[derive(Deserialize)]
 struct LLMSemanticLink {
   declaration_topic: String,
   semantic_text: String,
 }
 
-/// Result of LLM pass 2: semantic links for a (section, contract) pair.
-pub struct SemanticLinkPass2Result {
+/// Result of LLM pass 3: semantic links for a (section, member) pair.
+pub struct SemanticLinkPass3Result {
   pub section_topic: topic::Topic,
   pub links: Vec<core::SemanticLink>,
 }
@@ -432,26 +465,73 @@ pub async fn semantic_link_pass1(
   })
 }
 
-/// LLM pass 2: For a (section, contract) pair, identify semantic meanings.
+/// LLM pass 2: For a (section, contract) pair, identify relevant members.
 pub async fn semantic_link_pass2(
   section_topic: &topic::Topic,
   section_text: &str,
   contract_json: &str,
-  confirmed_declarations: &[topic::Topic],
+  confirmed_members: &[topic::Topic],
 ) -> Result<SemanticLinkPass2Result, String> {
-  let confirmed_str = if confirmed_declarations.is_empty() {
+  let confirmed_str = if confirmed_members.is_empty() {
     String::new()
   } else {
-    let ids: Vec<&str> = confirmed_declarations.iter().map(|t| t.id()).collect();
-    format!("\nConfirmed referenced declarations: {}\n", ids.join(", "))
+    let ids: Vec<&str> = confirmed_members.iter().map(|t| t.id()).collect();
+    format!("\nConfirmed relevant members: {}\n", ids.join(", "))
   };
 
   let prompt = format!(
-    "{}{}Section:\n{}\n\nContract declarations:\n{}",
+    "{}{}Section:\n{}\n\nContract members:\n{}",
     SEMANTIC_LINK_PASS2_PROMPT, confirmed_str, section_text, contract_json
   );
 
   let label = format!("semantic_pass2_{}", section_topic.id());
+  let response = router::chat_completion(
+    TaskSize::Small,
+    router::SYSTEM_MESSAGE_CODE,
+    &prompt,
+    Some(&label),
+  )
+  .await?;
+
+  let json_str = response
+    .trim()
+    .strip_prefix("```json")
+    .or_else(|| response.trim().strip_prefix("```"))
+    .unwrap_or(response.trim());
+  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
+
+  let member_ids: Vec<String> = serde_json::from_str(json_str).map_err(|e| {
+    eprintln!(
+      "Failed to parse semantic link pass2 JSON: {}\nResponse:\n{}",
+      e, json_str
+    );
+    format!("Failed to parse semantic link pass2: {}", e)
+  })?;
+
+  Ok(SemanticLinkPass2Result {
+    section_topic: section_topic.clone(),
+    member_topics: member_ids
+      .into_iter()
+      .map(|id| topic::new_topic(&id))
+      .collect(),
+  })
+}
+
+/// LLM pass 3: For a (section, member) pair, assign semantic meanings to
+/// declarations based on documentation. Source code is provided only for
+/// disambiguation — semantics must reflect documented intent, not code behavior.
+pub async fn semantic_link_pass3(
+  section_topic: &topic::Topic,
+  section_text: &str,
+  declarations_json: &str,
+  member_source: &str,
+) -> Result<SemanticLinkPass3Result, String> {
+  let prompt = format!(
+    "{}Documentation section:\n{}\n\nDeclarations needing semantics:\n{}\n\nSource code (for disambiguation only):\n{}",
+    SEMANTIC_LINK_PASS3_PROMPT, section_text, declarations_json, member_source
+  );
+
+  let label = format!("semantic_pass3_{}", section_topic.id());
   let response = router::chat_completion(
     TaskSize::Large,
     router::SYSTEM_MESSAGE_CODE,
@@ -470,10 +550,10 @@ pub async fn semantic_link_pass2(
   let raw_links: Vec<LLMSemanticLink> =
     serde_json::from_str(json_str).map_err(|e| {
       eprintln!(
-        "Failed to parse semantic link pass2 JSON: {}\nResponse:\n{}",
+        "Failed to parse semantic link pass3 JSON: {}\nResponse:\n{}",
         e, json_str
       );
-      format!("Failed to parse semantic link pass2: {}", e)
+      format!("Failed to parse semantic link pass3: {}", e)
     })?;
 
   let links = raw_links
@@ -485,7 +565,7 @@ pub async fn semantic_link_pass2(
     })
     .collect();
 
-  Ok(SemanticLinkPass2Result {
+  Ok(SemanticLinkPass3Result {
     section_topic: section_topic.clone(),
     links,
   })

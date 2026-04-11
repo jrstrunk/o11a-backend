@@ -2202,105 +2202,8 @@ pub fn build_agent_topic_context(
   }
 }
 
-/// Render all features with their threats and invariants as JSON for the
-/// security coverage review prompt.
-pub fn render_all_features_with_threats(
-  audit_data: &AuditData,
-) -> String {
-  let features: Vec<serde_json::Value> = audit_data
-    .features
-    .iter()
-    .filter_map(|(ft, feature)| {
-      let (name, description) =
-        match audit_data.topic_metadata.get(ft) {
-          Some(TopicMetadata::FeatureTopic {
-            name, description, ..
-          }) => (name.clone(), description.clone()),
-          _ => return None,
-        };
-
-      let reqs: Vec<serde_json::Value> = feature
-        .requirement_topics
-        .iter()
-        .filter_map(|rt| {
-          if let Some(TopicMetadata::RequirementTopic {
-            description, ..
-          }) = audit_data.topic_metadata.get(rt)
-          {
-            Some(serde_json::json!({ "description": description }))
-          } else {
-            None
-          }
-        })
-        .collect();
-
-      Some(serde_json::json!({
-        "feature_topic": ft.id(),
-        "name": name,
-        "description": description,
-        "requirements": reqs,
-      }))
-    })
-    .collect();
-
-  serde_json::to_string(&features).unwrap_or_else(|_| "[]".to_string())
-}
-
-/// Render a single feature and its requirements as JSON for the threat-building prompt.
-/// Returns `None` if the feature topic has no metadata.
-/// Render a single feature with its requirements (including R-prefixed topic IDs)
-/// as a JSON string for LLM consumption.
-///
-/// When `requirement_filter` is `Some`, only that requirement is included in the
-/// output. This is used by reactive triggers to link a single new requirement
-/// without re-processing all existing ones.
-pub fn render_feature_to_json(
-  feature_topic: &topic::Topic,
-  feature: &core::Feature,
-  audit_data: &AuditData,
-  requirement_filter: Option<&topic::Topic>,
-) -> Option<String> {
-  let (name, description) = match audit_data.topic_metadata.get(feature_topic) {
-    Some(TopicMetadata::FeatureTopic { name, description, .. }) => {
-      (name.clone(), description.clone())
-    }
-    _ => return None,
-  };
-
-  let req_topics: Box<dyn Iterator<Item = &topic::Topic> + '_> =
-    match requirement_filter {
-      Some(single) => Box::new(std::iter::once(single)),
-      None => Box::new(feature.requirement_topics.iter()),
-    };
-
-  let reqs: Vec<serde_json::Value> = req_topics
-    .filter_map(|rt| {
-      if let Some(TopicMetadata::RequirementTopic { description, .. }) =
-        audit_data.topic_metadata.get(rt)
-      {
-        Some(serde_json::json!({
-          "requirement_topic": rt.id(),
-          "description": description,
-        }))
-      } else {
-        None
-      }
-    })
-    .collect();
-
-  let feature_obj = serde_json::json!({
-    "feature_topic": feature_topic.id(),
-    "name": name,
-    "description": description,
-    "requirements": reqs,
-  });
-
-  Some(serde_json::to_string(&feature_obj).unwrap_or_default())
-}
-
-/// Render a contract's members (signatures only, no bodies) as a JSON array
-/// for the requirement-to-source linking prompt. Each member includes its
-/// N-prefixed topic ID.
+/// Render a contract's members (signatures only, no bodies) as a JSON object
+/// with N-prefixed topic IDs. Used by semantic linking pass 1.
 pub fn render_contract_members_for_linking(
   contract_node: &crate::solidity::parser::ASTNode,
   audit_data: &AuditData,
@@ -2462,6 +2365,221 @@ pub fn collect_contracts_for_behavior_extraction(
     }
   }
   results
+}
+
+// ============================================================================
+// Semantic Linking: Pass 3 Context Rendering
+// ============================================================================
+
+/// Render a list of declarations within a member that need semantic assignment.
+/// Returns a JSON string of declaration names and topic IDs.
+pub fn render_member_declarations_for_semantics(
+  member_topic: &topic::Topic,
+  audit_data: &AuditData,
+) -> String {
+  let mut declarations: Vec<serde_json::Value> = Vec::new();
+
+  // Include the member itself as a candidate
+  if let Some(metadata) = audit_data.topic_metadata.get(member_topic) {
+    if let Some(name) = metadata.name() {
+      declarations.push(json!({
+        "topic": member_topic.id(),
+        "name": name,
+        "kind": "member",
+      }));
+    }
+  }
+
+  // Collect declarations scoped to this member
+  for (decl_topic, metadata) in &audit_data.topic_metadata {
+    let in_member = match metadata.scope() {
+      core::Scope::Member { member, .. } => member == member_topic,
+      core::Scope::ContainingBlock { member, .. } => member == member_topic,
+      _ => false,
+    };
+    if !in_member {
+      continue;
+    }
+    if let Some(name) = metadata.name() {
+      let kind = match metadata {
+        TopicMetadata::NamedTopic { kind, .. } => format!("{:?}", kind),
+        _ => continue,
+      };
+      declarations.push(json!({
+        "topic": decl_topic.id(),
+        "name": name,
+        "kind": kind,
+      }));
+    }
+  }
+
+  serde_json::to_string(&declarations).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Render a member's full source code as a JSON snippet for pass 3 context.
+pub fn render_member_source_for_semantics(
+  member_topic: &topic::Topic,
+  audit_data: &AuditData,
+  source_text_cache: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+  // Find the AST node for this member
+  for (_path, ast) in &audit_data.asts {
+    let sol_ast = match ast {
+      core::AST::Solidity(sol_ast) => sol_ast,
+      _ => continue,
+    };
+    for contract_node in &sol_ast.nodes {
+      if let ASTNode::ContractDefinition { nodes, .. } = contract_node {
+        for member_node in nodes {
+          let node_topic = topic::new_node_topic(&member_node.node_id());
+          if node_topic == *member_topic {
+            let render_ctx = ASTRenderContext {
+              target_topic: member_topic.clone(),
+              omit_function_and_modifier_bodies: false,
+            };
+            let rendered = render_solidity_ast_snippet(
+              member_node,
+              &render_ctx,
+              audit_data,
+              source_text_cache,
+            );
+            return Some(
+              serde_json::to_string(&rendered).unwrap_or_default(),
+            );
+          }
+        }
+      }
+    }
+  }
+  None
+}
+
+/// For pass 2 mechanical step: given a section's resolved declarations,
+/// find the containing members. For declarations scoped at component level
+/// (state variables), find members that read/write them.
+/// Render component-scoped declarations (state variables, events, structs, enums)
+/// for a contract that need semantic assignment. These are declarations at
+/// the contract level, not inside any function or modifier.
+pub fn render_contract_declarations_for_semantics(
+  contract_topic: &topic::Topic,
+  audit_data: &AuditData,
+) -> String {
+  let mut declarations: Vec<serde_json::Value> = Vec::new();
+
+  for (decl_topic, metadata) in &audit_data.topic_metadata {
+    let at_component = match metadata.scope() {
+      core::Scope::Component { component, .. } => component == contract_topic,
+      _ => false,
+    };
+    if !at_component {
+      continue;
+    }
+    if let TopicMetadata::NamedTopic { name, kind, .. } = metadata {
+      declarations.push(json!({
+        "topic": decl_topic.id(),
+        "name": name,
+        "kind": format!("{:?}", kind),
+      }));
+    }
+  }
+
+  serde_json::to_string(&declarations).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Render contract-scoped declaration signatures as source context for pass 3.
+/// Returns a compact JSON of state variable declarations, event signatures, etc.
+pub fn render_contract_declaration_signatures(
+  contract_topic: &topic::Topic,
+  audit_data: &AuditData,
+  source_text_cache: &std::collections::HashMap<String, String>,
+) -> String {
+  for (_path, ast) in &audit_data.asts {
+    let sol_ast = match ast {
+      core::AST::Solidity(sol_ast) => sol_ast,
+      _ => continue,
+    };
+    for contract_node in &sol_ast.nodes {
+      let node_topic = topic::new_node_topic(&contract_node.node_id());
+      if node_topic != *contract_topic {
+        continue;
+      }
+      if let ASTNode::ContractDefinition { nodes, .. } = contract_node {
+        let render_ctx = ASTRenderContext {
+          target_topic: contract_topic.clone(),
+          omit_function_and_modifier_bodies: true,
+        };
+        // Filter to non-function/modifier members (state vars, events, structs, etc.)
+        let snippets: Vec<serde_json::Value> = nodes
+          .iter()
+          .filter(|n| {
+            !matches!(
+              n,
+              ASTNode::FunctionDefinition { .. }
+                | ASTNode::ModifierDefinition { .. }
+            )
+          })
+          .map(|n| {
+            render_solidity_ast_snippet(n, &render_ctx, audit_data, source_text_cache)
+          })
+          .collect();
+        return serde_json::to_string(&snippets)
+          .unwrap_or_else(|_| "[]".to_string());
+      }
+    }
+  }
+  "[]".to_string()
+}
+
+pub fn mechanical_section_to_members(
+  section_declarations: &[topic::Topic],
+  contract_topic: &topic::Topic,
+  audit_data: &AuditData,
+) -> Vec<topic::Topic> {
+  let mut members: Vec<topic::Topic> = Vec::new();
+
+  for decl_topic in section_declarations {
+    if let Some(metadata) = audit_data.topic_metadata.get(decl_topic) {
+      match metadata.scope() {
+        // Declaration is inside a member — add the member
+        core::Scope::Member { member, component, .. }
+        | core::Scope::ContainingBlock { member, component, .. }
+          if component == contract_topic =>
+        {
+          if !members.contains(member) {
+            members.push(member.clone());
+          }
+        }
+        // Declaration is at component level (state variable) — find members that use it
+        core::Scope::Component { component, .. }
+          if component == contract_topic =>
+        {
+          // Check function properties for mutations and calls referencing this variable
+          for (fn_topic, props) in &audit_data.function_properties {
+            let (mutations, _calls) = match props {
+              core::FunctionModProperties::FunctionProperties {
+                mutations,
+                calls,
+                ..
+              } => (mutations, calls),
+              core::FunctionModProperties::ModifierProperties {
+                mutations,
+                calls,
+                ..
+              } => (mutations, calls),
+            };
+            if mutations.contains(decl_topic) {
+              if !members.contains(fn_topic) {
+                members.push(fn_topic.clone());
+              }
+            }
+          }
+        }
+        _ => {}
+      }
+    }
+  }
+
+  members
 }
 
 // ============================================================================
