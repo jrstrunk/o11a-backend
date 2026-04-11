@@ -686,9 +686,10 @@ pub fn render_source_text(
       ))
     }
     Some(Node::Documentation(doc_node)) => {
-      Some(crate::documentation::formatter::node_to_html(
+      Some(crate::documentation::formatter::node_to_html_with_semantics(
         doc_node,
         &audit_data.nodes,
+        &audit_data.functional_semantics,
       ))
     }
     Some(Node::Comment(nodes)) => {

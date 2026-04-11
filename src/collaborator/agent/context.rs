@@ -1345,10 +1345,27 @@ fn flatten_inline_recursive(
     match resolved {
       DocumentationNode::Text { value, .. } => text.push_str(value),
 
-      DocumentationNode::InlineCode { value, .. } => {
+      DocumentationNode::InlineCode {
+        value, children, ..
+      } => {
         text.push('`');
         text.push_str(value);
         text.push('`');
+        // Inject functional semantics for resolved identifiers within this code span
+        for child in children {
+          if let DocumentationNode::CodeIdentifier {
+            referenced_topic: Some(t),
+            ..
+          } = child.resolve(&audit_data.nodes)
+          {
+            if let Some(sem) = audit_data.functional_semantics.get(t) {
+              text.push_str(" (");
+              text.push_str(&sem.text);
+              text.push(')');
+              break; // one semantic annotation per inline code span
+            }
+          }
+        }
       }
 
       DocumentationNode::CodeKeyword { value, .. }
@@ -1365,6 +1382,12 @@ fn flatten_inline_recursive(
         text.push_str(value);
         if let Some(t) = referenced_topic {
           refs.push(json!({"name": value, "topic": t.id()}));
+          // Inject functional semantic inline when outside of InlineCode
+          if let Some(sem) = audit_data.functional_semantics.get(t) {
+            text.push_str(" (");
+            text.push_str(&sem.text);
+            text.push(')');
+          }
         }
       }
 
@@ -1580,8 +1603,24 @@ pub fn render_documentation_ast_snippet(
 
     // === Inline/leaf nodes at top level (uncommon) ===
     DocumentationNode::Text { value, .. } => return json!(value),
-    DocumentationNode::InlineCode { value, .. } => {
-      return json!(format!("`{}`", value));
+    DocumentationNode::InlineCode {
+      value, children, ..
+    } => {
+      // Check children for resolved identifiers with semantics
+      let mut semantic_suffix = String::new();
+      for child in children {
+        if let DocumentationNode::CodeIdentifier {
+          referenced_topic: Some(t),
+          ..
+        } = child.resolve(&audit_data.nodes)
+        {
+          if let Some(sem) = audit_data.functional_semantics.get(t) {
+            semantic_suffix = format!(" ({})", sem.text);
+            break;
+          }
+        }
+      }
+      return json!(format!("`{}`{}", value, semantic_suffix));
     }
     DocumentationNode::ListItem { children, .. } => {
       let (text, _) = flatten_inline_content(children, audit_data);
