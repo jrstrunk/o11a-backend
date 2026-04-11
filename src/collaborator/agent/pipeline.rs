@@ -386,7 +386,8 @@ pub async fn build_behaviors(
 }
 
 /// Build semantic links between documentation sections and code declarations.
-/// Three layers: mechanical resolution, LLM pass 1, LLM pass 2.
+/// Three passes: section→contracts, section×contract→members, section×member→semantics.
+/// Each pass has a mechanical pre-step followed by LLM refinement.
 pub async fn build_semantic_links(
   state: &PipelineState,
   audit_id: &str,
@@ -395,7 +396,7 @@ pub async fn build_semantic_links(
 
   println!("pipeline::build_semantic_links for audit {}", audit_id);
 
-  // Step 1: Mechanical resolution
+  // Mechanical resolution (shared by passes 1 and 2)
   let (mechanical, sections, contracts) = {
     let ctx = state
       .data_context
@@ -423,7 +424,6 @@ pub async fn build_semantic_links(
     return Ok(());
   }
 
-  // Build a compact contract list JSON for pass 1
   let contract_list_json = {
     let list: Vec<serde_json::Value> = contracts
       .iter()
@@ -437,11 +437,10 @@ pub async fn build_semantic_links(
     serde_json::to_string(&list).unwrap_or_default()
   };
 
-  // Build contract JSON lookup by topic
   let contract_json_by_topic: std::collections::HashMap<&topic::Topic, &str> =
     contracts.iter().map(|(ct, json)| (ct, json.as_str())).collect();
 
-  // Step 2: LLM pass 1 — for each section, identify relevant contracts
+  // ---- Pass 1: section → contracts (mechanical + LLM) ----
   let mut section_contracts: std::collections::HashMap<
     topic::Topic,
     Vec<topic::Topic>,
@@ -453,7 +452,7 @@ pub async fn build_semantic_links(
       let ctx = state
         .data_context
         .lock()
-        .map_err(|e| format!("Mutex poisoned in build_semantic_links (pass1): {}", e))?;
+        .map_err(|e| format!("Mutex poisoned (pass1): {}", e))?;
       let audit_data = ctx
         .get_audit(audit_id)
         .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
@@ -483,26 +482,55 @@ pub async fn build_semantic_links(
       Ok(Ok(result)) => {
         section_contracts.insert(result.section_topic, result.contract_topics);
       }
-      Ok(Err(e)) => eprintln!("semantic_link_pass1 failed: {}", e),
-      Err(e) => eprintln!("semantic_link_pass1 panicked: {}", e),
+      Ok(Err(e)) => eprintln!("semantic_link pass1 failed: {}", e),
+      Err(e) => eprintln!("semantic_link pass1 panicked: {}", e),
     }
   }
 
-  // Step 3: LLM pass 2 — for each (section, contract) pair, extract semantics
-  let mut all_links: Vec<core::SemanticLink> = Vec::new();
+  println!("  Pass 1 complete: {} section-contract pairs",
+    section_contracts.values().map(|v| v.len()).sum::<usize>());
+
+  // ---- Pass 2: section × contract → members (mechanical + LLM) ----
+  let mut section_members: std::collections::HashMap<
+    topic::Topic,
+    Vec<topic::Topic>,
+  > = std::collections::HashMap::new();
 
   let mut pass2_handles = Vec::new();
   for (section_topic, contract_topics) in &section_contracts {
-    let section_text = {
+    let (section_text, confirmed_members) = {
       let ctx = state
         .data_context
         .lock()
-        .map_err(|e| format!("Mutex poisoned in build_semantic_links (pass2): {}", e))?;
+        .map_err(|e| format!("Mutex poisoned (pass2): {}", e))?;
       let audit_data = ctx
         .get_audit(audit_id)
         .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
-      context::render_section_text(section_topic, audit_data)
-        .unwrap_or_default()
+      let stxt = context::render_section_text(section_topic, audit_data)
+        .unwrap_or_default();
+
+      // Mechanical: resolve section declarations to containing members
+      let section_decls = mechanical
+        .section_to_declarations
+        .get(section_topic)
+        .cloned()
+        .unwrap_or_default();
+
+      let mut mech_members = Vec::new();
+      for ct in contract_topics {
+        let members = context::mechanical_section_to_members(
+          &section_decls,
+          ct,
+          audit_data,
+        );
+        for m in members {
+          if !mech_members.contains(&m) {
+            mech_members.push(m);
+          }
+        }
+      }
+
+      (stxt, mech_members)
     };
 
     for ct in contract_topics {
@@ -511,28 +539,155 @@ pub async fn build_semantic_links(
         None => continue,
       };
 
-      let confirmed_decls = mechanical
-        .section_to_declarations
-        .get(section_topic)
-        .cloned()
-        .unwrap_or_default();
-
       let st = section_topic.clone();
       let stxt = section_text.clone();
+      let confirmed = confirmed_members.clone();
       pass2_handles.push(tokio::spawn(async move {
-        task::semantic_link_pass2(&st, &stxt, &contract_json, &confirmed_decls)
-          .await
+        task::semantic_link_pass2(&st, &stxt, &contract_json, &confirmed).await
       }));
     }
   }
 
   for handle in pass2_handles {
     match handle.await {
-      Ok(Ok(result)) => all_links.extend(result.links),
-      Ok(Err(e)) => eprintln!("semantic_link_pass2 failed: {}", e),
-      Err(e) => eprintln!("semantic_link_pass2 panicked: {}", e),
+      Ok(Ok(result)) => {
+        let members = section_members
+          .entry(result.section_topic)
+          .or_default();
+        for mt in result.member_topics {
+          if !members.contains(&mt) {
+            members.push(mt);
+          }
+        }
+      }
+      Ok(Err(e)) => eprintln!("semantic_link pass2 failed: {}", e),
+      Err(e) => eprintln!("semantic_link pass2 panicked: {}", e),
     }
   }
+
+  println!("  Pass 2 complete: {} section-member pairs",
+    section_members.values().map(|v| v.len()).sum::<usize>());
+
+  // ---- Pass 3: semantics extraction (doc-first, code for disambiguation) ----
+  // Two kinds of targets:
+  //   a) section × member → semantics for declarations within functions/modifiers
+  //   b) section × contract → semantics for component-scoped declarations (state vars, events, etc.)
+  let mut all_links: Vec<core::SemanticLink> = Vec::new();
+
+  let mut pass3_handles = Vec::new();
+
+  // (a) Member-scoped: for each (section, member) pair
+  for (section_topic, member_topics) in &section_members {
+    let section_text = {
+      let ctx = state
+        .data_context
+        .lock()
+        .map_err(|e| format!("Mutex poisoned (pass3): {}", e))?;
+      let audit_data = ctx
+        .get_audit(audit_id)
+        .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+      context::render_section_text(section_topic, audit_data)
+        .unwrap_or_default()
+    };
+
+    for mt in member_topics {
+      let (declarations_json, member_source) = {
+        let ctx = state
+          .data_context
+          .lock()
+          .map_err(|e| format!("Mutex poisoned (pass3 member): {}", e))?;
+        let audit_data = ctx
+          .get_audit(audit_id)
+          .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+        let stc = ctx
+          .source_text_cache
+          .get(audit_id)
+          .cloned()
+          .unwrap_or_default();
+
+        let decls = context::render_member_declarations_for_semantics(
+          mt, audit_data,
+        );
+        let source = context::render_member_source_for_semantics(
+          mt, audit_data, &stc,
+        )
+        .unwrap_or_default();
+
+        (decls, source)
+      };
+
+      let st = section_topic.clone();
+      let stxt = section_text.clone();
+      pass3_handles.push(tokio::spawn(async move {
+        task::semantic_link_pass3(&st, &stxt, &declarations_json, &member_source)
+          .await
+      }));
+    }
+  }
+
+  // (b) Contract-scoped: for each (section, contract) pair, extract semantics
+  // for state variables, events, structs, enums at the contract level
+  for (section_topic, contract_topics) in &section_contracts {
+    let section_text = {
+      let ctx = state
+        .data_context
+        .lock()
+        .map_err(|e| format!("Mutex poisoned (pass3 contract): {}", e))?;
+      let audit_data = ctx
+        .get_audit(audit_id)
+        .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+      context::render_section_text(section_topic, audit_data)
+        .unwrap_or_default()
+    };
+
+    for ct in contract_topics {
+      let (declarations_json, signatures_source) = {
+        let ctx = state
+          .data_context
+          .lock()
+          .map_err(|e| format!("Mutex poisoned (pass3 contract render): {}", e))?;
+        let audit_data = ctx
+          .get_audit(audit_id)
+          .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+        let stc = ctx
+          .source_text_cache
+          .get(audit_id)
+          .cloned()
+          .unwrap_or_default();
+
+        let decls = context::render_contract_declarations_for_semantics(
+          ct, audit_data,
+        );
+        let sigs = context::render_contract_declaration_signatures(
+          ct, audit_data, &stc,
+        );
+
+        (decls, sigs)
+      };
+
+      // Skip if no component-scoped declarations to assign
+      if declarations_json == "[]" {
+        continue;
+      }
+
+      let st = section_topic.clone();
+      let stxt = section_text.clone();
+      pass3_handles.push(tokio::spawn(async move {
+        task::semantic_link_pass3(&st, &stxt, &declarations_json, &signatures_source)
+          .await
+      }));
+    }
+  }
+
+  for handle in pass3_handles {
+    match handle.await {
+      Ok(Ok(result)) => all_links.extend(result.links),
+      Ok(Err(e)) => eprintln!("semantic_link pass3 failed: {}", e),
+      Err(e) => eprintln!("semantic_link pass3 panicked: {}", e),
+    }
+  }
+
+  println!("  Pass 3 complete: {} semantic links", all_links.len());
 
   // Persist to database
   for link in &all_links {
