@@ -1869,21 +1869,10 @@ pub async fn analyze(
   .await
 }
 
-/// POST /api/v1/audits/:audit_id/pipeline/requirements
-/// Step 1: Extract requirements from documentation, grouped by section.
-pub async fn pipeline_requirements(
-  State(state): State<AppState>,
-  Path(audit_id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-  println!("POST /api/v1/audits/{}/pipeline/requirements", audit_id);
-  run_pipeline_step(&state, audit_id, "build_requirements", |ps, id| async move {
-    crate::collaborator::agent::pipeline::build_requirements(&ps, &id).await
-  })
-  .await
-}
-
 /// POST /api/v1/audits/:audit_id/pipeline/semantic_links
-/// Step 2: Connect documentation sections to code declarations.
+/// Step 1: Connect documentation sections to code declarations, producing
+/// functional semantics with provenance. Must run before requirements so
+/// that inline code in docs is annotated with semantic meaning.
 pub async fn pipeline_semantic_links(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
@@ -1891,6 +1880,21 @@ pub async fn pipeline_semantic_links(
   println!("POST /api/v1/audits/{}/pipeline/semantic_links", audit_id);
   run_pipeline_step(&state, audit_id, "build_semantic_links", |ps, id| async move {
     crate::collaborator::agent::pipeline::build_semantic_links(&ps, &id).await
+  })
+  .await
+}
+
+/// POST /api/v1/audits/:audit_id/pipeline/requirements
+/// Step 2: Extract requirements from documentation, grouped by section.
+/// Docs are rendered with functional semantics injected into inline code
+/// references, so the LLM has project-specific meaning for declaration names.
+pub async fn pipeline_requirements(
+  State(state): State<AppState>,
+  Path(audit_id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+  println!("POST /api/v1/audits/{}/pipeline/requirements", audit_id);
+  run_pipeline_step(&state, audit_id, "build_requirements", |ps, id| async move {
+    crate::collaborator::agent::pipeline::build_requirements(&ps, &id).await
   })
   .await
 }

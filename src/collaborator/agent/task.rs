@@ -93,6 +93,19 @@ vectors beyond what the documentation explicitly addresses. For example, \
 prefer \"withdrawals must be safe from reentrancy\" over \"balance must be \
 zeroed before the external call\", because the latter assumes a specific \
 implementation strategy.\n\n\
+**Do not use code declaration names** (function names, variable names, contract \
+names) in requirements. Describe capabilities in behavioral terms. For example, \
+instead of \"invalidateParticipations() must only be callable by the authorized \
+relayer\", write \"Only the authorized relayer is allowed to invalidate \
+participations.\" The requirement should describe *what the system must do*, \
+not *which function does it*. The original declaration names are preserved in \
+the linked documentation topics for traceability.\n\n\
+**Each requirement must describe exactly one claim.** If a documentation passage \
+describes two distinct things (e.g., access control AND batching support), split \
+them into separate requirements. For example, \"Only the authorized relayer can \
+invalidate participations\" and \"Invalidating multiple participations in a \
+single call must be supported\" are two requirements, not one joined with \
+\"and.\"\n\n\
 Group requirements under the documentation **section** they were extracted from, \
 using the section's D-prefixed topic ID. Each section that contains behavioral \
 content should produce one or more requirements.\n\n\
@@ -136,6 +149,10 @@ specific wording and combining documentation_topics.\n\
 - Do not drop any unique requirements.\n\
 - Do not modify documentation_topics arrays, just combine them when merging.\n\
 - If a requirement appears in multiple sections, keep it in the most specific section.\n\
+- Do not use code declaration names in requirements — describe capabilities \
+in behavioral terms.\n\
+- Each requirement must describe exactly one claim. If a merged requirement \
+covers two distinct things, split it back into separate requirements.\n\
 - Return ONLY a JSON array of section group objects, no other text.\n\n\
 Requirements to consolidate:\n";
 

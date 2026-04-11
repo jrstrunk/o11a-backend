@@ -27,13 +27,19 @@ pub struct PipelineState {
 // ---------------------------------------------------------------------------
 
 /// Run the full analysis pipeline:
-/// build_requirements → build_semantic_links → build_behaviors → synthesize_features
+/// build_semantic_links → build_requirements → build_behaviors → synthesize_features
+///
+/// Semantic linking runs first so that functional semantics are available
+/// when rendering documentation for requirement extraction. This means
+/// inline code references like `pID` are annotated with their project-specific
+/// meaning (e.g., "participation identifier"), giving the LLM proper context
+/// to produce behavioral requirements without using declaration names.
 pub async fn run_full_pipeline(
   state: &PipelineState,
   audit_id: &str,
 ) -> Result<(), String> {
-  build_requirements(state, audit_id).await?;
   build_semantic_links(state, audit_id).await?;
+  build_requirements(state, audit_id).await?;
   build_behaviors(state, audit_id).await?;
   synthesize_features(state, audit_id).await?;
   Ok(())
