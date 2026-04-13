@@ -6,7 +6,9 @@ use crate::core::topic;
 
 /// Reserved author IDs
 pub const AUTHOR_SYSTEM: i64 = 1;
-pub const AUTHOR_AGENT: i64 = 2;
+pub const AUTHOR_AGENT_SMALL: i64 = 2;
+pub const AUTHOR_AGENT_MEDIUM: i64 = 3;
+pub const AUTHOR_AGENT_LARGE: i64 = 4;
 
 /// Comment type for classification
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

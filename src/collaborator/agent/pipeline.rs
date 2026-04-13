@@ -10,7 +10,7 @@ use sqlx::SqlitePool;
 
 use crate::collaborator::agent::task;
 use crate::collaborator::db;
-use crate::collaborator::models::AUTHOR_AGENT;
+use crate::collaborator::models::AUTHOR_AGENT_LARGE;
 use crate::core::{self, topic, DataContext};
 
 use std::sync::{Arc, Mutex};
@@ -85,7 +85,7 @@ pub async fn build_requirements(
       // Create requirement without a feature (feature_id = NULL via 0 sentinel)
       // The feature association will be established during reconciliation (Phase 4)
       let req_row =
-        db::create_requirement(&state.db, 0, req_desc, AUTHOR_AGENT)
+        db::create_requirement(&state.db, 0, req_desc, AUTHOR_AGENT_LARGE)
           .await
           .map_err(|e| format!("create_requirement failed: {}", e))?;
 
@@ -191,7 +191,7 @@ pub async fn synthesize_features(
       audit_id,
       name,
       description,
-      AUTHOR_AGENT,
+      AUTHOR_AGENT_LARGE,
     )
     .await
     .map_err(|e| format!("create_feature failed: {}", e))?;
@@ -337,7 +337,7 @@ pub async fn build_behaviors(
       audit_id,
       member_topic.id(),
       description,
-      AUTHOR_AGENT,
+      AUTHOR_AGENT_LARGE,
     )
     .await
     .map_err(|e| format!("create_behavior failed: {}", e))?;
@@ -350,7 +350,7 @@ pub async fn build_behaviors(
         topic: beh_topic.clone(),
         description: description.clone(),
         member_topic: member_topic.clone(),
-        author_id: AUTHOR_AGENT,
+        author_id: AUTHOR_AGENT_LARGE,
         created_at: row.created_at,
       },
     );
@@ -768,7 +768,7 @@ pub async fn build_semantic_links(
       .push(core::FunctionalSemantic {
         text: link.semantic_text.clone(),
         documentation_topic: Some(link.documentation_topic.clone()),
-        author_id: AUTHOR_AGENT,
+        author_id: AUTHOR_AGENT_LARGE,
         created_at: String::new(),
       });
   }
