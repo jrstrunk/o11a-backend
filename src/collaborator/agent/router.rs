@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-const LARGE_MODEL: &str = "anthropic/claude-opus-4.6";
+// const LARGE_MODEL: &str = "anthropic/claude-opus-4.6";
+const LARGE_MODEL: &str = "z-ai/glm-5";
 const MEDIUM_MODEL: &str = "z-ai/glm-5";
 const SMALL_MODEL: &str = "google/gemma-4-31b-it";
 
@@ -74,6 +75,7 @@ pub async fn chat_completion(
   system_message: &str,
   prompt: &str,
   dry_run_label: Option<&str>,
+  json_mode: bool,
 ) -> Result<String, String> {
   if let Ok(base_path) = std::env::var("AGENT_DRY_RUN") {
     let path = match dry_run_label {
@@ -132,10 +134,13 @@ pub async fn chat_completion(
     },
   ];
 
-  let body = serde_json::json!({
+  let mut body = serde_json::json!({
     "model": model,
     "messages": messages,
   });
+  if json_mode {
+    body["response_format"] = serde_json::json!({ "type": "json_object" });
+  }
 
   let client = reqwest::Client::new();
   let response = client
@@ -163,4 +168,106 @@ pub async fn chat_completion(
     .next()
     .map(|c| c.message.content)
     .ok_or_else(|| "No choices in response".to_string())
+}
+
+/// Extract the last valid JSON array from an LLM response.
+///
+/// Scans backwards for `]`, finds the matching `[`, and attempts to parse.
+/// Falls back to stripping markdown fences. If all local parsing fails,
+/// sends the malformed response to the small model for repair.
+pub async fn extract_json<T: serde::de::DeserializeOwned>(
+  response: &str,
+  label: &str,
+  expected_format: &str,
+) -> Result<T, String> {
+  if let Some(parsed) = try_parse_json::<T>(response) {
+    return Ok(parsed);
+  }
+
+  // Local parsing failed — ask the small model to fix it.
+  eprintln!(
+    "Local JSON parse failed for {}, attempting LLM repair",
+    label
+  );
+  let repair_prompt = format!(
+    "The following LLM response should be a JSON value but is malformed or \
+    contains extra text. Extract and return ONLY the valid JSON value, \
+    preserving all data. Fix any structural JSON issues (trailing commas, \
+    missing brackets, duplicated arrays). Do not modify the data values.\n\n\
+    Expected format:\n{}\n\n\
+    Malformed response:\n{}",
+    expected_format, response
+  );
+  let repaired = chat_completion(
+    TaskSize::Small,
+    "You are a JSON repair utility. Return ONLY valid JSON, nothing else.",
+    &repair_prompt,
+    None,
+    true,
+  )
+  .await
+  .map_err(|e| {
+    eprintln!(
+      "LLM repair request failed for {}: {}\nOriginal response:\n{}",
+      label, e, response
+    );
+    format!("Failed to parse {} (repair also failed: {})", label, e)
+  })?;
+
+  try_parse_json::<T>(&repaired).ok_or_else(|| {
+    eprintln!(
+      "LLM repair did not produce valid JSON for {}.\nRepaired response:\n{}",
+      label, repaired
+    );
+    format!("Failed to parse {} (repair produced invalid JSON)", label)
+  })
+}
+
+/// Try to parse a JSON value from a response string using bracket matching
+/// and markdown fence stripping. Returns `None` if all attempts fail.
+fn try_parse_json<T: serde::de::DeserializeOwned>(response: &str) -> Option<T> {
+  // Try bracket-matching from the end of the string.
+  let bytes = response.as_bytes();
+  let mut end = bytes.len();
+  while end > 0 {
+    let close = match bytes[..end].iter().rposition(|&b| b == b']') {
+      Some(i) => i,
+      None => break,
+    };
+    let mut depth = 0i32;
+    let mut pos = close;
+    loop {
+      match bytes[pos] {
+        b']' => depth += 1,
+        b'[' => {
+          depth -= 1;
+          if depth == 0 {
+            break;
+          }
+        }
+        _ => {}
+      }
+      if pos == 0 {
+        break;
+      }
+      pos -= 1;
+    }
+    if depth == 0 {
+      let candidate = &response[pos..=close];
+      if let Ok(parsed) = serde_json::from_str::<T>(candidate) {
+        return Some(parsed);
+      }
+    }
+    end = close;
+  }
+
+  // Fallback: strip markdown fences and try the whole thing.
+  let stripped = response
+    .trim()
+    .strip_prefix("```json")
+    .or_else(|| response.trim().strip_prefix("```"))
+    .unwrap_or(response.trim());
+  let stripped = stripped.strip_suffix("```").unwrap_or(stripped).trim();
+
+  serde_json::from_str::<T>(stripped).ok()
 }
