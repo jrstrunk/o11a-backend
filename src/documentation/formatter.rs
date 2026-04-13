@@ -177,8 +177,7 @@ fn do_node_to_html(
       let display_value = referenced_name.as_deref().unwrap_or(value);
       let class = kind
         .as_ref()
-        .map(formatting::named_topic_kind_to_class)
-        .unwrap_or("identifier");
+        .map(formatting::named_topic_kind_to_class);
 
       match referenced_topic {
         // Code references always keep topic attributes
@@ -187,14 +186,18 @@ fn do_node_to_html(
           formatting::format_topic_token(
             &node_topic,
             &formatting::html_escape(display_value),
-            class,
+            class.unwrap_or("identifier"),
             ref_topic,
           )
         }
-        None => formatting::format_token(
-          &formatting::html_escape(display_value),
-          class,
-        ),
+        // No matching identifier found — render as plain text
+        None => match class {
+          Some(class) => formatting::format_token(
+            &formatting::html_escape(display_value),
+            class,
+          ),
+          None => formatting::html_escape(display_value),
+        },
       }
     }
 
