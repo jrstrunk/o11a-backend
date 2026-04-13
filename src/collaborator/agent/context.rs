@@ -2667,10 +2667,14 @@ pub fn mechanical_semantic_links(
   }
 }
 
-/// Recursively walk documentation nodes, tracking the current section.
+/// Recursively walk documentation nodes, tracking the top-level section.
 /// When a CodeIdentifier with a resolved reference is found, walk up
 /// the reference's scope to find the containing contract and record
 /// the section→contract and section→declaration associations.
+///
+/// Only the first (top-level) section sets `current_section`; nested
+/// child sections inherit the parent so that all mechanical links roll
+/// up to the top-level section that the pipeline actually processes.
 fn collect_mechanical_links_recursive(
   node: &crate::documentation::parser::DocumentationNode,
   current_section: Option<&topic::Topic>,
@@ -2682,11 +2686,14 @@ fn collect_mechanical_links_recursive(
   let node = node.resolve(&audit_data.nodes);
   match node {
     DocumentationNode::Section { node_id, children, .. } => {
+      // Only set current_section for the top-level section; nested
+      // sections keep the parent so links roll up to the root.
       let section_topic = topic::new_documentation_topic(*node_id);
+      let effective_section = current_section.unwrap_or(&section_topic);
       for child in children {
         collect_mechanical_links_recursive(
           child,
-          Some(&section_topic),
+          Some(effective_section),
           audit_data,
           section_to_contracts,
           section_to_declarations,
