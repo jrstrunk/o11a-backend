@@ -150,6 +150,18 @@ The reconciliation groups related requirements and behaviors into features, with
 
 Where requirements and invariants both describe things the code must do, they serve different concerns. Requirements capture what the documentation claims — the functionality described to users or the protocol. Invariants capture what the code must enforce to protect against threats — the defensive properties that prevent threats from materializing. A collateral lending feature has a documented requirement that users can deposit ETH, but the invariant that only the position owner can withdraw collateral exists to protect against a threat, not to fulfill a documented claim. Requirements are verified by matching them to behaviors during reconciliation; invariants are verified by checking them against convergences in the source code.
 
+### Out-of-Scope and Dependency Code
+
+The initial generation pipeline — semantic linking, requirement extraction, behavior extraction, and feature synthesis — runs only against **in-scope contracts**: the contracts listed in the audit's `scope.txt` file. Out-of-scope contracts and library dependencies (OpenZeppelin, Solmate, etc.) are excluded from the pipeline even though they are present in the analyzed codebase.
+
+This distinction is fundamental. In-scope code is the code under review — it cannot be assumed to be correct, which is why it needs requirements extracted from documentation, behaviors reconciled against those requirements, threats identified on its non-pure subjects, and invariants checked at its convergences. The full security model exists to surface mismatches between what the documentation claims and what the code does.
+
+Out-of-scope code and dependencies are assumed to be correct. They are battle-tested libraries or previously audited contracts that the in-scope code builds on. Running the full pipeline against them would produce requirements like "tokens must transfer correctly" against OpenZeppelin's `SafeERC20` — requirements that are not the concern of this audit and would dilute the auditor's focus.
+
+However, out-of-scope code still needs **functional semantics** and **behaviors** for the in-scope analysis to work. When in-scope code calls `SafeERC20.safeTransfer()`, the auditor needs to know what that function does. When a dependency's state variable is read by in-scope code, the auditor needs its semantic meaning. This context is necessary for understanding the in-scope code's behavior, even though the dependency itself is not being audited.
+
+Out-of-scope code therefore requires a separate, lighter mechanism: generating semantics and behaviors without requirements, features, threats, or reconciliation. This mechanism documents what the dependency does (semantics and behaviors) so that in-scope analysis has the context it needs, without generating the security model artifacts that only apply to code under review. This separate mechanism is not yet implemented.
+
 ### On-the-Fly Generation
 
 The security model is not static after initial generation. As auditors review code and encounter security-relevant patterns, they add new requirements, behaviors, conditions, threats, invariants, and functional semantics directly from the code context. This on-the-fly generation is the primary mechanism through which the audit achieves comprehensive coverage.

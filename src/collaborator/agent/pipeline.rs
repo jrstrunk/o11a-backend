@@ -419,6 +419,14 @@ pub async fn build_semantic_links(
     (mechanical, sections, contracts)
   };
 
+  println!(
+    "  Mechanical: {} sections, {} contracts, {} section-contract links, {} section-declaration links",
+    sections.len(),
+    contracts.len(),
+    mechanical.section_to_contracts.len(),
+    mechanical.section_to_declarations.len(),
+  );
+
   if sections.is_empty() || contracts.is_empty() {
     println!("  No sections or contracts found, skipping semantic linking");
     return Ok(());
@@ -441,12 +449,15 @@ pub async fn build_semantic_links(
     contracts.iter().map(|(ct, json)| (ct, json.as_str())).collect();
 
   // ---- Pass 1: section → contracts (mechanical + LLM) ----
+  // Seed with mechanical results so they survive even if LLM returns empty
   let mut section_contracts: std::collections::HashMap<
     topic::Topic,
     Vec<topic::Topic>,
-  > = std::collections::HashMap::new();
+  > = mechanical.section_to_contracts.clone();
 
   let mut pass1_handles = Vec::new();
+  let mut sections_with_text = 0;
+  let mut sections_empty = 0;
   for section_topic in &sections {
     let section_text = {
       let ctx = state
@@ -461,6 +472,7 @@ pub async fn build_semantic_links(
     };
 
     if section_text.is_empty() {
+      sections_empty += 1;
       continue;
     }
 
@@ -470,6 +482,7 @@ pub async fn build_semantic_links(
       .cloned()
       .unwrap_or_default();
 
+    sections_with_text += 1;
     let st = section_topic.clone();
     let clj = contract_list_json.clone();
     pass1_handles.push(tokio::spawn(async move {
@@ -477,10 +490,23 @@ pub async fn build_semantic_links(
     }));
   }
 
+  println!(
+    "  Pass 1: {} sections with text, {} empty, {} LLM calls queued",
+    sections_with_text, sections_empty, pass1_handles.len()
+  );
+
   for handle in pass1_handles {
     match handle.await {
       Ok(Ok(result)) => {
-        section_contracts.insert(result.section_topic, result.contract_topics);
+        // Merge LLM results with mechanical results
+        let contracts = section_contracts
+          .entry(result.section_topic)
+          .or_default();
+        for ct in result.contract_topics {
+          if !contracts.contains(&ct) {
+            contracts.push(ct);
+          }
+        }
       }
       Ok(Err(e)) => eprintln!("semantic_link pass1 failed: {}", e),
       Err(e) => eprintln!("semantic_link pass1 panicked: {}", e),
@@ -526,6 +552,18 @@ pub async fn build_semantic_links(
         for m in members {
           if !mech_members.contains(&m) {
             mech_members.push(m);
+          }
+        }
+      }
+
+      // Seed section_members with mechanical results
+      if !mech_members.is_empty() {
+        let existing = section_members
+          .entry(section_topic.clone())
+          .or_default();
+        for m in &mech_members {
+          if !existing.contains(m) {
+            existing.push(m.clone());
           }
         }
       }

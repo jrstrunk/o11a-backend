@@ -93,7 +93,9 @@ pub async fn chat_completion(
     std::fs::write(&path, &output)
       .map_err(|e| format!("Failed to write dry run to '{}': {}", path, e))?;
     println!("Dry run prompt written to: {}", path);
-    return Err("dry run — prompt written, no API call made".to_string());
+    // Return empty JSON array so the pipeline continues with empty results,
+    // allowing all passes to fire and write their prompt files.
+    return Ok("[]".to_string());
   }
 
   let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {

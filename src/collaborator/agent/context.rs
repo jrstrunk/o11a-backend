@@ -2215,13 +2215,24 @@ pub fn render_contract_members_for_linking(
     ASTNode::ContractDefinition {
       signature, nodes, ..
     } => {
-      let (name, kind) = match signature.as_ref() {
+      let resolved_sig = signature.resolve(&audit_data.nodes);
+      let (name, kind) = match resolved_sig {
         ASTNode::ContractSignature {
           name,
           contract_kind,
           ..
         } => (name.clone(), format!("{:?}", contract_kind).to_lowercase()),
-        _ => ("unknown".to_string(), "contract".to_string()),
+        _ => {
+          // Signature is an unresolved stub — try to get name from metadata
+          let ct = topic::new_node_topic(&contract_node.node_id());
+          let name = audit_data
+            .topic_metadata
+            .get(&ct)
+            .and_then(|m| m.name())
+            .unwrap_or("unknown")
+            .to_string();
+          (name, "contract".to_string())
+        }
       };
       (name, kind, nodes)
     }
@@ -2272,13 +2283,23 @@ pub fn render_contract_for_behavior_extraction(
     ASTNode::ContractDefinition {
       signature, nodes, ..
     } => {
-      let (name, kind) = match signature.as_ref() {
+      let resolved_sig = signature.resolve(&audit_data.nodes);
+      let (name, kind) = match resolved_sig {
         ASTNode::ContractSignature {
           name,
           contract_kind,
           ..
         } => (name.clone(), format!("{:?}", contract_kind).to_lowercase()),
-        _ => ("unknown".to_string(), "contract".to_string()),
+        _ => {
+          let ct = topic::new_node_topic(&contract_node.node_id());
+          let name = audit_data
+            .topic_metadata
+            .get(&ct)
+            .and_then(|m| m.name())
+            .unwrap_or("unknown")
+            .to_string();
+          (name, "contract".to_string())
+        }
       };
       (name, kind, nodes)
     }
@@ -2315,12 +2336,13 @@ pub fn render_contract_for_behavior_extraction(
   }
 
   // Filter to only functions and modifiers — state variables are excluded
-  // from behavior extraction
+  // from behavior extraction. Resolve stubs before checking type.
   let member_snippets: Vec<serde_json::Value> = members
     .iter()
     .filter(|m| {
+      let resolved = m.resolve(&audit_data.nodes);
       matches!(
-        m,
+        resolved,
         ASTNode::FunctionDefinition { .. } | ASTNode::ModifierDefinition { .. }
       )
     })
@@ -2347,15 +2369,24 @@ pub fn collect_contracts_for_behavior_extraction(
   source_text_cache: &std::collections::HashMap<String, String>,
 ) -> Vec<ContractForBehaviorExtraction> {
   let mut results = Vec::new();
-  for (_path, ast) in &audit_data.asts {
+  for (path, ast) in &audit_data.asts {
+    // Only include contracts from in-scope files
+    if !audit_data.in_scope_files.contains(path) {
+      continue;
+    }
     let sol_ast = match ast {
       core::AST::Solidity(sol_ast) => sol_ast,
       _ => continue,
     };
     for node in &sol_ast.nodes {
-      if let ASTNode::ContractDefinition { .. } = node {
+      let resolved = node.resolve(&audit_data.nodes);
+      if let ASTNode::ContractDefinition { .. } = resolved {
+        if !audit_data.in_scope_files.contains(path) {
+          continue;
+        }
+
         if let Some(rendered) = render_contract_for_behavior_extraction(
-          node,
+          resolved,
           audit_data,
           source_text_cache,
         ) {
@@ -2429,16 +2460,18 @@ pub fn render_member_source_for_semantics(
       _ => continue,
     };
     for contract_node in &sol_ast.nodes {
-      if let ASTNode::ContractDefinition { nodes, .. } = contract_node {
+      let resolved_contract = contract_node.resolve(&audit_data.nodes);
+      if let ASTNode::ContractDefinition { nodes, .. } = resolved_contract {
         for member_node in nodes {
-          let node_topic = topic::new_node_topic(&member_node.node_id());
+          let resolved_member = member_node.resolve(&audit_data.nodes);
+          let node_topic = topic::new_node_topic(&resolved_member.node_id());
           if node_topic == *member_topic {
             let render_ctx = ASTRenderContext {
               target_topic: member_topic.clone(),
               omit_function_and_modifier_bodies: false,
             };
             let rendered = render_solidity_ast_snippet(
-              member_node,
+              resolved_member,
               &render_ctx,
               audit_data,
               source_text_cache,
@@ -2499,21 +2532,24 @@ pub fn render_contract_declaration_signatures(
       _ => continue,
     };
     for contract_node in &sol_ast.nodes {
-      let node_topic = topic::new_node_topic(&contract_node.node_id());
+      let resolved = contract_node.resolve(&audit_data.nodes);
+      let node_topic = topic::new_node_topic(&resolved.node_id());
       if node_topic != *contract_topic {
         continue;
       }
-      if let ASTNode::ContractDefinition { nodes, .. } = contract_node {
+      if let ASTNode::ContractDefinition { nodes, .. } = resolved {
         let render_ctx = ASTRenderContext {
           target_topic: contract_topic.clone(),
           omit_function_and_modifier_bodies: true,
         };
         // Filter to non-function/modifier members (state vars, events, structs, etc.)
+        // Resolve each member before checking its type
         let snippets: Vec<serde_json::Value> = nodes
           .iter()
           .filter(|n| {
+            let resolved_n = n.resolve(&audit_data.nodes);
             !matches!(
-              n,
+              resolved_n,
               ASTNode::FunctionDefinition { .. }
                 | ASTNode::ModifierDefinition { .. }
             )
@@ -2642,6 +2678,8 @@ fn collect_mechanical_links_recursive(
   section_to_contracts: &mut std::collections::HashMap<topic::Topic, Vec<topic::Topic>>,
   section_to_declarations: &mut std::collections::HashMap<topic::Topic, Vec<topic::Topic>>,
 ) {
+  // Resolve Stubs through audit_data.nodes — the AST contains stubs after analysis
+  let node = node.resolve(&audit_data.nodes);
   match node {
     DocumentationNode::Section { node_id, children, .. } => {
       let section_topic = topic::new_documentation_topic(*node_id);
@@ -2686,13 +2724,20 @@ fn collect_mechanical_links_recursive(
           decls.push(ref_topic.clone());
         }
 
-        // Walk up the declaration's scope to find the containing contract
+        // Walk up the declaration's scope to find the containing contract.
+        // If the reference IS a contract, use it directly.
         if let Some(metadata) = audit_data.topic_metadata.get(ref_topic) {
-          let contract_topic = match metadata.scope() {
-            core::Scope::Component { component, .. } => Some(component.clone()),
-            core::Scope::Member { component, .. } => Some(component.clone()),
-            core::Scope::ContainingBlock { component, .. } => Some(component.clone()),
-            _ => None,
+          let contract_topic = match metadata {
+            TopicMetadata::NamedTopic {
+              kind: core::NamedTopicKind::Contract(_),
+              ..
+            } => Some(ref_topic.clone()),
+            _ => match metadata.scope() {
+              core::Scope::Component { component, .. } => Some(component.clone()),
+              core::Scope::Member { component, .. } => Some(component.clone()),
+              core::Scope::ContainingBlock { component, .. } => Some(component.clone()),
+              _ => None,
+            },
           };
           if let Some(ct) = contract_topic {
             let contracts = section_to_contracts
@@ -2730,8 +2775,9 @@ fn collect_mechanical_links_recursive(
   }
 }
 
-/// Render a lightweight list of all contracts with their names and topic IDs
-/// for LLM pass 1 of semantic linking.
+/// Render a list of in-scope contracts with their names and topic IDs
+/// for LLM pass 1 of semantic linking. Only contracts from files listed
+/// in scope.txt are included — dependencies are excluded.
 pub fn render_contract_list_for_semantic_linking(
   audit_data: &AuditData,
   source_text_cache: &std::collections::HashMap<String, String>,
@@ -2739,16 +2785,21 @@ pub fn render_contract_list_for_semantic_linking(
   use crate::solidity::parser::ASTNode;
 
   let mut contracts = Vec::new();
-  for (_path, ast) in &audit_data.asts {
+  for (path, ast) in &audit_data.asts {
+    // Only include contracts from in-scope files
+    if !audit_data.in_scope_files.contains(path) {
+      continue;
+    }
     let sol_ast = match ast {
       core::AST::Solidity(sol_ast) => sol_ast,
       _ => continue,
     };
     for node in &sol_ast.nodes {
-      if let ASTNode::ContractDefinition { .. } = node {
-        let contract_topic = topic::new_node_topic(&node.node_id());
+      let resolved = node.resolve(&audit_data.nodes);
+      if let ASTNode::ContractDefinition { .. } = resolved {
+        let contract_topic = topic::new_node_topic(&resolved.node_id());
         if let Some(json) = render_contract_members_for_linking(
-          node,
+          resolved,
           audit_data,
           source_text_cache,
         ) {
@@ -2772,12 +2823,27 @@ pub fn render_section_text(
   // Find the section's title from metadata
   let title = match audit_data.topic_metadata.get(&doc_topic) {
     Some(TopicMetadata::TitledTopic { title, .. }) => Some(title.as_str()),
-    _ => None,
+    _ => {
+      eprintln!(
+        "render_section_text: no TitledTopic metadata for {} (node_id={})",
+        section_topic.id(), node_id
+      );
+      None
+    }
   };
 
   // Render the section content from the documentation AST
+  let doc_node = find_doc_node_by_id(audit_data, node_id);
+  if doc_node.is_none() {
+    eprintln!(
+      "render_section_text: find_doc_node_by_id returned None for node_id={}",
+      node_id
+    );
+    return None;
+  }
+
   let rendered = render_documentation_ast_snippet(
-    find_doc_node_by_id(audit_data, node_id)?,
+    doc_node?,
     audit_data,
     None,
   );
@@ -2792,6 +2858,8 @@ pub fn render_section_text(
 }
 
 /// Find a documentation node by its node_id across all documentation ASTs.
+/// Resolves Stub nodes through `audit_data.nodes`, following the same pattern
+/// as `render_documentation_ast_snippet` and other AST traversals.
 fn find_doc_node_by_id<'a>(
   audit_data: &'a AuditData,
   target_id: i32,
@@ -2799,12 +2867,14 @@ fn find_doc_node_by_id<'a>(
   fn search_node<'a>(
     node: &'a crate::documentation::parser::DocumentationNode,
     target_id: i32,
+    nodes_map: &'a std::collections::BTreeMap<topic::Topic, core::Node>,
   ) -> Option<&'a crate::documentation::parser::DocumentationNode> {
-    if node.node_id() == target_id {
-      return Some(node);
+    let resolved = node.resolve(nodes_map);
+    if resolved.node_id() == target_id {
+      return Some(resolved);
     }
-    for child in node.children() {
-      if let Some(found) = search_node(child, target_id) {
+    for child in resolved.children() {
+      if let Some(found) = search_node(child, target_id, nodes_map) {
         return Some(found);
       }
     }
@@ -2817,7 +2887,7 @@ fn find_doc_node_by_id<'a>(
       _ => continue,
     };
     for node in &doc_ast.nodes {
-      if let Some(found) = search_node(node, target_id) {
+      if let Some(found) = search_node(node, target_id, &audit_data.nodes) {
         return Some(found);
       }
     }
