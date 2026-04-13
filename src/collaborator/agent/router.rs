@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 const LARGE_MODEL: &str = "anthropic/claude-opus-4.6";
-const SMALL_MODEL: &str = "z-ai/glm-5";
+const MEDIUM_MODEL: &str = "z-ai/glm-5";
+const SMALL_MODEL: &str = "google/gemma-4-31b-it";
 
 pub const SYSTEM_MESSAGE_CODE: &str = "\
 You are an expert smart contract security auditor. \
@@ -26,7 +27,18 @@ structured JSON, do not include any additional text or explanations in your resp
 
 pub enum TaskSize {
   Large,
+  Medium,
   Small,
+}
+
+impl TaskSize {
+  pub fn author_id(&self) -> i64 {
+    match self {
+      TaskSize::Large => 4,
+      TaskSize::Medium => 3,
+      TaskSize::Small => 2,
+    }
+  }
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +94,7 @@ pub async fn chat_completion(
     };
     let model = match task_size {
       TaskSize::Large => LARGE_MODEL,
+      TaskSize::Medium => MEDIUM_MODEL,
       TaskSize::Small => SMALL_MODEL,
     };
     let output = format!(
@@ -104,6 +117,7 @@ pub async fn chat_completion(
 
   let model = match task_size {
     TaskSize::Large => LARGE_MODEL,
+    TaskSize::Medium => MEDIUM_MODEL,
     TaskSize::Small => SMALL_MODEL,
   };
 

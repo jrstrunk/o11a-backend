@@ -38,7 +38,7 @@ use serde::Deserialize;
 
 use crate::collaborator::agent::context;
 use crate::collaborator::agent::router::{self, TaskSize};
-use crate::collaborator::models::AUTHOR_AGENT;
+use crate::collaborator::models::AUTHOR_AGENT_LARGE;
 use crate::core::{self, AST, AuditData, Feature, Requirement, topic};
 
 /// Raw requirement as returned by the LLM (no topic ID yet).
@@ -219,7 +219,7 @@ fn parse_requirements_response(
           description: raw_req.description,
           feature_topic: topic::new_topic(""),
           section_topic: Some(section_topic.clone()),
-          author_id: AUTHOR_AGENT,
+          author_id: AUTHOR_AGENT_LARGE,
           created_at: String::new(),
         },
       );
@@ -847,7 +847,7 @@ pub async fn synthesize_features(
         topic: feature_topic.clone(),
         name: raw.name,
         description: raw.description,
-        author_id: AUTHOR_AGENT,
+        author_id: AUTHOR_AGENT_LARGE,
         created_at: String::new(),
       },
     );
@@ -1051,7 +1051,7 @@ pub async fn normalize_documentation(
     let file_path = doc.file_path.clone();
     handles.push(tokio::spawn(async move {
       let result = router::chat_completion(
-        TaskSize::Large,
+        TaskSize::Small,
         router::SYSTEM_MESSAGE_DOCUMENTATION,
         &prompt,
         Some(&file_path),
