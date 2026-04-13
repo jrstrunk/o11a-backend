@@ -48,7 +48,6 @@ struct LLMRequirement {
   documentation_topics: Vec<String>,
 }
 
-
 /// Render all documentation ASTs as separate per-file JSON strings for iterative processing.
 pub fn render_documentation_files(audit_data: &AuditData) -> Vec<String> {
   let mut files = Vec::new();
@@ -62,7 +61,9 @@ pub fn render_documentation_files(audit_data: &AuditData) -> Vec<String> {
     let rendered: Vec<serde_json::Value> = doc_ast
       .nodes
       .iter()
-      .map(|node| context::render_documentation_ast_snippet(node, audit_data, None))
+      .map(|node| {
+        context::render_documentation_ast_snippet(node, audit_data, None)
+      })
       .collect();
 
     let file_json = serde_json::json!({
@@ -182,8 +183,8 @@ fn parse_requirements_response(
     .unwrap_or(response.trim());
   let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
 
-  let raw_sections: Vec<LLMSectionGroup> =
-    serde_json::from_str(json_str).map_err(|e| {
+  let raw_sections: Vec<LLMSectionGroup> = serde_json::from_str(json_str)
+    .map_err(|e| {
       eprintln!(
         "Failed to parse requirements JSON: {}\nResponse:\n{}",
         e, json_str
@@ -252,10 +253,8 @@ pub async fn extract_requirements_from_documentation(
   }
 
   if documentation_files.len() == 1 {
-    let prompt = format!(
-      "{}{}",
-      EXTRACT_REQUIREMENTS_PROMPT, &documentation_files[0]
-    );
+    let prompt =
+      format!("{}{}", EXTRACT_REQUIREMENTS_PROMPT, &documentation_files[0]);
     let response = router::chat_completion(
       TaskSize::Large,
       router::SYSTEM_MESSAGE_DOCUMENTATION,
@@ -327,14 +326,15 @@ pub async fn extract_requirements_from_documentation(
 const SEMANTIC_LINK_PASS1_PROMPT: &str = "Below is a documentation section from a smart contract \
 project and a list of contracts with their member signatures.\n\n\
 Some contracts have been pre-identified as relevant through inline code \
-references in the documentation (marked as \"confirmed\"). Your task is to \
-review these confirmations and identify any additional contracts that this \
-documentation section is relevant to.\n\n\
+references in the documentation (marked as \"confirmed\"). These are already \
+matched — do not repeat them in your response.\n\n\
+Your task is to identify any **additional** contracts that this documentation \
+section is relevant to beyond the confirmed ones.\n\n\
 A contract is relevant if the documentation section describes behavior, \
 requirements, or properties that apply to that contract's functionality.\n\n\
-Return a JSON array of N-prefixed contract topic ID strings for ALL relevant \
-contracts (both confirmed and newly identified). If no contracts are relevant, \
-return an empty array `[]`.\n\
+Return a JSON array of N-prefixed contract topic ID strings for ONLY the \
+newly identified contracts. If there are no additional contracts beyond the \
+confirmed ones, return an empty array `[]`.\n\
 Return ONLY the JSON array, no other text.\n\n";
 
 /// LLM pass 2: Given a documentation section and a contract's member signatures,
@@ -343,14 +343,15 @@ const SEMANTIC_LINK_PASS2_PROMPT: &str = "Below is a documentation section from 
 project and a contract's member signatures (functions, modifiers, state \
 variables, events, etc.).\n\n\
 Some members have been pre-identified as relevant through inline code \
-references in the documentation (marked as \"confirmed\"). Your task is to \
-review these confirmations and identify any additional members that this \
-documentation section is relevant to.\n\n\
+references in the documentation (marked as \"confirmed\"). These are already \
+matched — do not repeat them in your response.\n\n\
+Your task is to identify any **additional** members that this documentation \
+section is relevant to beyond the confirmed ones.\n\n\
 A member is relevant if the documentation section describes behavior, \
 requirements, or properties that apply to that member's functionality.\n\n\
-Return a JSON array of N-prefixed member topic ID strings for ALL relevant \
-members (both confirmed and newly identified). If no members are relevant, \
-return an empty array `[]`.\n\
+Return a JSON array of N-prefixed member topic ID strings for ONLY the \
+newly identified members. If there are no additional members beyond the \
+confirmed ones, return an empty array `[]`.\n\
 Return ONLY the JSON array, no other text.\n\n";
 
 /// LLM pass 3: Given a documentation section, a list of declarations needing
@@ -435,7 +436,7 @@ pub async fn semantic_link_pass1(
   let label = format!("semantic_pass1_{}", section_topic.id());
   let response = router::chat_completion(
     TaskSize::Small,
-    router::SYSTEM_MESSAGE_CODE,
+    router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some(&label),
   )
@@ -448,13 +449,14 @@ pub async fn semantic_link_pass1(
     .unwrap_or(response.trim());
   let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
 
-  let contract_ids: Vec<String> = serde_json::from_str(json_str).map_err(|e| {
-    eprintln!(
-      "Failed to parse semantic link pass1 JSON: {}\nResponse:\n{}",
-      e, json_str
-    );
-    format!("Failed to parse semantic link pass1: {}", e)
-  })?;
+  let contract_ids: Vec<String> =
+    serde_json::from_str(json_str).map_err(|e| {
+      eprintln!(
+        "Failed to parse semantic link pass1 JSON: {}\nResponse:\n{}",
+        e, json_str
+      );
+      format!("Failed to parse semantic link pass1: {}", e)
+    })?;
 
   Ok(SemanticLinkPass1Result {
     section_topic: section_topic.clone(),
@@ -487,7 +489,7 @@ pub async fn semantic_link_pass2(
   let label = format!("semantic_pass2_{}", section_topic.id());
   let response = router::chat_completion(
     TaskSize::Small,
-    router::SYSTEM_MESSAGE_CODE,
+    router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some(&label),
   )
@@ -500,13 +502,14 @@ pub async fn semantic_link_pass2(
     .unwrap_or(response.trim());
   let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
 
-  let member_ids: Vec<String> = serde_json::from_str(json_str).map_err(|e| {
-    eprintln!(
-      "Failed to parse semantic link pass2 JSON: {}\nResponse:\n{}",
-      e, json_str
-    );
-    format!("Failed to parse semantic link pass2: {}", e)
-  })?;
+  let member_ids: Vec<String> =
+    serde_json::from_str(json_str).map_err(|e| {
+      eprintln!(
+        "Failed to parse semantic link pass2 JSON: {}\nResponse:\n{}",
+        e, json_str
+      );
+      format!("Failed to parse semantic link pass2: {}", e)
+    })?;
 
   Ok(SemanticLinkPass2Result {
     section_topic: section_topic.clone(),
@@ -534,7 +537,7 @@ pub async fn semantic_link_pass3(
   let label = format!("semantic_pass3_{}", section_topic.id());
   let response = router::chat_completion(
     TaskSize::Large,
-    router::SYSTEM_MESSAGE_CODE,
+    router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some(&label),
   )
@@ -547,8 +550,8 @@ pub async fn semantic_link_pass3(
     .unwrap_or(response.trim());
   let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
 
-  let raw_links: Vec<LLMSemanticLink> =
-    serde_json::from_str(json_str).map_err(|e| {
+  let raw_links: Vec<LLMSemanticLink> = serde_json::from_str(json_str)
+    .map_err(|e| {
       eprintln!(
         "Failed to parse semantic link pass3 JSON: {}\nResponse:\n{}",
         e, json_str
@@ -572,6 +575,10 @@ pub async fn semantic_link_pass3(
 }
 
 /// Collect all documentation section topics that have content (TitledTopic entries).
+/// Collect top-level documentation sections (direct children of document roots).
+/// These are sections at the Container scope level — typically H1 sections.
+/// Using top-level sections as the unit reduces LLM calls while providing
+/// enough context per call for meaningful matching.
 pub fn collect_documentation_sections(
   audit_data: &AuditData,
 ) -> Vec<topic::Topic> {
@@ -579,11 +586,18 @@ pub fn collect_documentation_sections(
     .topic_metadata
     .iter()
     .filter_map(|(t, m)| {
-      if matches!(m, core::TopicMetadata::TitledTopic { kind: core::TitledTopicKind::DocumentationSection, .. }) {
-        Some(t.clone())
-      } else {
-        None
+      if let core::TopicMetadata::TitledTopic {
+        kind: core::TitledTopicKind::DocumentationSection,
+        scope,
+        ..
+      } = m
+      {
+        // Only top-level sections (Container scope = document root children)
+        if matches!(scope, core::Scope::Container { .. }) {
+          return Some(t.clone());
+        }
       }
+      None
     })
     .collect()
 }
@@ -641,9 +655,7 @@ pub struct SynthesizedFeatures {
 }
 
 /// Render all requirements grouped by section for the reconciliation prompt.
-fn render_requirements_for_reconciliation(
-  audit_data: &AuditData,
-) -> String {
+fn render_requirements_for_reconciliation(audit_data: &AuditData) -> String {
   let mut sections: Vec<serde_json::Value> = Vec::new();
 
   for (section_topic, req_topics) in &audit_data.section_requirements {
@@ -717,9 +729,7 @@ fn render_requirements_for_reconciliation(
 }
 
 /// Render all behaviors grouped by member for the reconciliation prompt.
-fn render_behaviors_for_reconciliation(
-  audit_data: &AuditData,
-) -> String {
+fn render_behaviors_for_reconciliation(audit_data: &AuditData) -> String {
   let mut members: Vec<serde_json::Value> = Vec::new();
 
   for (member_topic, beh_topics) in &audit_data.member_behaviors {
@@ -775,12 +785,9 @@ pub async fn synthesize_features(
   requirements_json: &str,
   behaviors_json: &str,
 ) -> Result<SynthesizedFeatures, String> {
-
   let prompt = format!(
     "{}Requirements:\n{}\n\nBehaviors:\n{}",
-    SYNTHESIZE_FEATURES_PROMPT,
-    requirements_json,
-    behaviors_json
+    SYNTHESIZE_FEATURES_PROMPT, requirements_json, behaviors_json
   );
 
   let response = router::chat_completion(
@@ -798,8 +805,8 @@ pub async fn synthesize_features(
     .unwrap_or(response.trim());
   let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
 
-  let raw_features: Vec<LLMSynthesizedFeature> =
-    serde_json::from_str(json_str).map_err(|e| {
+  let raw_features: Vec<LLMSynthesizedFeature> = serde_json::from_str(json_str)
+    .map_err(|e| {
       eprintln!(
         "Failed to parse synthesized features JSON: {}\nResponse:\n{}",
         e, json_str
@@ -845,12 +852,7 @@ pub async fn synthesize_features(
       },
     );
 
-    features.insert(
-      feature_topic,
-      Feature {
-        requirement_topics,
-      },
-    );
+    features.insert(feature_topic, Feature { requirement_topics });
   }
 
   Ok(SynthesizedFeatures {
@@ -911,10 +913,8 @@ pub async fn extract_behaviors_from_contract(
   contract_json: &str,
   contract_name: &str,
 ) -> Result<ParsedBehaviors, String> {
-  let prompt = format!(
-    "{}Contract:\n{}",
-    EXTRACT_BEHAVIORS_PROMPT, contract_json
-  );
+  let prompt =
+    format!("{}Contract:\n{}", EXTRACT_BEHAVIORS_PROMPT, contract_json);
 
   let label = format!("behaviors_{}", contract_name);
   let response = router::chat_completion(
@@ -932,8 +932,8 @@ pub async fn extract_behaviors_from_contract(
     .unwrap_or(response.trim());
   let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
 
-  let raw_groups: Vec<LLMMemberBehaviors> =
-    serde_json::from_str(json_str).map_err(|e| {
+  let raw_groups: Vec<LLMMemberBehaviors> = serde_json::from_str(json_str)
+    .map_err(|e| {
       eprintln!(
         "Failed to parse behaviors JSON: {}\nResponse:\n{}",
         e, json_str
@@ -983,6 +983,11 @@ Apply the following transformations:\n\
   that only serve a browsing purpose and carry no informational content.\n\
 - **Markdown structure**: Preserve headings, lists, code blocks, tables, \
   blockquotes, and links. These carry semantic value.\n\
+- **Section headers**: If the document lacks markdown section headers and \
+  reads as flat prose, add appropriate markdown headers to \
+  organize the content into logical sections based on topic changes. \
+  Do not change the content — only add structure to unstructured documents. \
+  Documents that already have headers should keep their existing structure.\n\
 - **Content**: Do NOT alter, summarize, rephrase, or remove any textual \
   content. Every sentence, paragraph, and data point must be preserved \
   verbatim. Only formatting and presentation should change.\n\n\
@@ -1072,4 +1077,3 @@ pub async fn normalize_documentation(
 
   Ok(NormalizedDocumentation { files })
 }
-
