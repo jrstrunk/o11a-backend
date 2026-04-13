@@ -19,7 +19,7 @@ pub fn node_to_html(
 pub fn node_to_html_with_semantics(
   node: &DocumentationNode,
   nodes_map: &BTreeMap<topic::Topic, core::Node>,
-  semantics: &BTreeMap<topic::Topic, core::FunctionalSemantic>,
+  semantics: &BTreeMap<topic::Topic, Vec<core::FunctionalSemantic>>,
 ) -> String {
   do_node_to_html(node, 0, nodes_map, Some(semantics))
 }
@@ -28,7 +28,7 @@ fn do_node_to_html(
   node: &DocumentationNode,
   indent_level: usize,
   nodes_map: &BTreeMap<topic::Topic, core::Node>,
-  semantics: Option<&BTreeMap<topic::Topic, core::FunctionalSemantic>>,
+  semantics: Option<&BTreeMap<topic::Topic, Vec<core::FunctionalSemantic>>>,
 ) -> String {
   match node.resolve(nodes_map) {
     DocumentationNode::Root { children, .. } => {
@@ -128,12 +128,19 @@ fn do_node_to_html(
             ..
           } = child.resolve(nodes_map)
           {
-            if let Some(sem) = sem_map.get(t) {
-              return format!(
-                "{} <span class=\"semantic\" style=\"opacity: 0.7; font-style: italic;\">({})</span>",
-                code_html,
-                formatting::html_escape(&sem.text)
-              );
+            if let Some(sems) = sem_map.get(t) {
+              let joined: String = sems
+                .iter()
+                .map(|s| formatting::html_escape(&s.text))
+                .collect::<Vec<_>>()
+                .join("; ");
+              if !joined.is_empty() {
+                return format!(
+                  "{} <span class=\"semantic\" style=\"opacity: 0.7; font-style: italic;\">({})</span>",
+                  code_html,
+                  joined
+                );
+              }
             }
           }
         }

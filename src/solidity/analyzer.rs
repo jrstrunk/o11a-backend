@@ -1482,6 +1482,29 @@ fn process_second_pass_nodes(
         (false, vec![])
       };
 
+      // Extract transitive_topic from implementation_declaration on AST nodes.
+      // Interface functions/modifiers/parameters with exactly one in-scope
+      // implementation are transitive to their implementation counterpart.
+      let transitive_topic = match node {
+        ASTNode::FunctionDefinition { signature, .. }
+        | ASTNode::ModifierDefinition { signature, .. } => match signature.as_ref() {
+          ASTNode::FunctionSignature {
+            implementation_declaration: Some(impl_id),
+            ..
+          }
+          | ASTNode::ModifierSignature {
+            implementation_declaration: Some(impl_id),
+            ..
+          } => Some(topic::new_node_topic(impl_id)),
+          _ => None,
+        },
+        ASTNode::VariableDeclaration {
+          implementation_declaration: Some(impl_id),
+          ..
+        } => Some(topic::new_node_topic(impl_id)),
+        _ => None,
+      };
+
       let topic_metadata_entry = TopicMetadata::NamedTopic {
         topic: topic.clone(),
         kind: in_scope_topic_declaration.declaration_kind().clone(),
@@ -1497,6 +1520,7 @@ fn process_second_pass_nodes(
         ancestors: ancestor_topics,
         descendants: descendant_topics,
         relatives: relative_topics,
+        transitive_topic: transitive_topic.clone(),
       };
 
       topic_metadata.insert(topic.clone(), topic_metadata_entry);
@@ -1507,7 +1531,11 @@ fn process_second_pass_nodes(
           function_calls,
           variable_mutations,
           ..
-        } => {
+        } if transitive_topic.is_none() => {
+          // Skip function properties for transitive declarations (e.g., interface
+          // functions with one implementation) — they have empty bodies and their
+          // implementation counterpart provides the real properties.
+
           // Convert first-pass reverts to RevertInfo (topic + kind)
           let reverts: Vec<core::RevertInfo> = first_pass_reverts
             .iter()
@@ -1669,6 +1697,18 @@ fn process_second_pass_nodes(
           _ => UnnamedTopicKind::Other,
         };
 
+        // A semantic block with exactly one child statement is transitive
+        // to that statement — they represent the same logical unit.
+        let transitive_topic = if let ASTNode::SemanticBlock { statements, .. } = node {
+          if statements.len() == 1 {
+            Some(topic::new_node_topic(&statements[0].node_id()))
+          } else {
+            None
+          }
+        } else {
+          None
+        };
+
         topic_metadata.insert(
           topic.clone(),
           TopicMetadata::UnnamedTopic {
@@ -1676,6 +1716,7 @@ fn process_second_pass_nodes(
             scope: scope.clone(),
             kind,
             expanded_context: vec![],
+            transitive_topic,
           },
         );
       }

@@ -374,8 +374,10 @@ pub struct AuditData {
   pub requirements: BTreeMap<topic::Topic, Requirement>,
   /// Functional purpose stored per subject topic: "why does this exist?"
   pub functional_purposes: BTreeMap<topic::Topic, FunctionalPurpose>,
-  /// Functional semantics with provenance: "what does this represent?" + doc source
-  pub functional_semantics: BTreeMap<topic::Topic, FunctionalSemantic>,
+  /// Functional semantics with provenance: "what does this represent?" + doc source.
+  /// Multiple semantics per topic are supported — different documentation sections
+  /// may contribute distinct semantic facets for the same declaration.
+  pub functional_semantics: BTreeMap<topic::Topic, Vec<FunctionalSemantic>>,
   /// Links between documentation sections and code declarations from semantic linking.
   pub semantic_links: Vec<SemanticLink>,
   /// Reverse index: D-prefixed section topic → R-prefixed requirement topics.
@@ -476,34 +478,21 @@ impl TopicNameIndex {
         if topics.len() == 1 {
           Some((name, topics.into_iter().next().unwrap()))
         } else {
-          // When multiple topics share a name, prefer non-interface members.
-          // This handles the common case where an interface and its
-          // implementation both declare the same function/variable.
-          let non_interface: Vec<_> = topics
+          // When multiple topics share a name, prefer non-transitive members.
+          // Transitive topics are proxies (e.g., interface members with one
+          // implementation) — resolve to the real declaration instead.
+          let non_transitive: Vec<_> = topics
             .iter()
             .filter(|t| {
-              let component = audit_data
-                .topic_metadata
-                .get(t)
-                .and_then(|m| match m.scope() {
-                  Scope::Component { component, .. }
-                  | Scope::Member { component, .. }
-                  | Scope::ContainingBlock { component, .. } => Some(component),
-                  _ => None,
-                });
-
               !matches!(
-                component.and_then(|c| audit_data.topic_metadata.get(c)),
-                Some(TopicMetadata::NamedTopic {
-                  kind: NamedTopicKind::Contract(ContractKind::Interface),
-                  ..
-                })
+                audit_data.topic_metadata.get(t),
+                Some(m) if m.transitive_topic().is_some()
               )
             })
             .collect();
 
-          if non_interface.len() == 1 {
-            Some((name, non_interface[0].clone()))
+          if non_transitive.len() == 1 {
+            Some((name, non_transitive[0].clone()))
           } else {
             None
           }
@@ -1486,6 +1475,12 @@ pub enum TopicMetadata {
     /// 3. Are involved in this variable's assignment (RHS of assignments)
     /// Only populated for variable declarations.
     relatives: Vec<topic::Topic>,
+    /// When set, this declaration is a transparent proxy for another declaration.
+    /// Features should resolve through this to the target topic instead of
+    /// operating on this declaration directly. The canonical case is an interface
+    /// member with exactly one in-scope implementation — the interface member is
+    /// transitive to the implementation member.
+    transitive_topic: Option<topic::Topic>,
   },
   UnnamedTopic {
     topic: topic::Topic,
@@ -1494,6 +1489,9 @@ pub enum TopicMetadata {
     /// Expanded context derived from features linked to this topic.
     /// Only populated for documentation topics.
     expanded_context: Vec<SourceContext>,
+    /// When set, this topic is a transparent proxy for another topic.
+    /// The canonical case is a semantic block containing exactly one statement.
+    transitive_topic: Option<topic::Topic>,
   },
   /// A control flow statement (if/for/while/do-while) with its condition topic.
   ControlFlow {
@@ -1655,6 +1653,22 @@ impl TopicMetadata {
     match self {
       TopicMetadata::NamedTopic { ancestors, .. } => ancestors,
       _ => &[],
+    }
+  }
+
+  /// When set, this topic is a transparent proxy for another topic. Features
+  /// should resolve through to the target instead of operating on this topic
+  /// directly. For example, an interface function with exactly one in-scope
+  /// implementation is transitive to the implementation function.
+  pub fn transitive_topic(&self) -> Option<&topic::Topic> {
+    match self {
+      TopicMetadata::NamedTopic {
+        transitive_topic, ..
+      } => transitive_topic.as_ref(),
+      TopicMetadata::UnnamedTopic {
+        transitive_topic, ..
+      } => transitive_topic.as_ref(),
+      _ => None,
     }
   }
 
@@ -2227,6 +2241,7 @@ pub fn new_audit_data(
       ancestors: Vec::new(),
       descendants: Vec::new(),
       relatives: Vec::new(),
+      transitive_topic: None,
     },
   );
 
@@ -2247,6 +2262,7 @@ pub fn new_audit_data(
       ancestors: Vec::new(),
       descendants: Vec::new(),
       relatives: Vec::new(),
+      transitive_topic: None,
     },
   );
 
@@ -2267,6 +2283,7 @@ pub fn new_audit_data(
       ancestors: Vec::new(),
       descendants: Vec::new(),
       relatives: Vec::new(),
+      transitive_topic: None,
     },
   );
 

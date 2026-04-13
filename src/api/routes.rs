@@ -178,7 +178,7 @@ pub fn create_router(state: AppState) -> Router {
     )
     .route(
       "/api/v1/audits/:audit_id/subjects/:topic_id/semantics",
-      get(handlers::get_functional_semantics).put(handlers::set_functional_semantics),
+      get(handlers::get_functional_semantics).put(handlers::add_functional_semantic),
     )
     // ============================================
     // Impact analysis routes

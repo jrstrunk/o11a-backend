@@ -750,17 +750,27 @@ pub async fn build_semantic_links(
 
   audit_data.semantic_links = all_links.clone();
 
-  // Populate functional_semantics with provenance
+  // Populate functional_semantics with provenance.
+  // If the declaration is transitive (e.g., an interface member with one
+  // implementation), redirect the semantic to the implementation topic.
   for link in &all_links {
-    audit_data.functional_semantics.insert(
-      link.declaration_topic.clone(),
-      core::FunctionalSemantic {
+    let effective_topic = audit_data
+      .topic_metadata
+      .get(&link.declaration_topic)
+      .and_then(|m| m.transitive_topic())
+      .cloned()
+      .unwrap_or_else(|| link.declaration_topic.clone());
+
+    audit_data
+      .functional_semantics
+      .entry(effective_topic)
+      .or_default()
+      .push(core::FunctionalSemantic {
         text: link.semantic_text.clone(),
         documentation_topic: Some(link.documentation_topic.clone()),
         author_id: AUTHOR_AGENT,
         created_at: String::new(),
-      },
-    );
+      });
   }
 
   println!(
