@@ -173,24 +173,15 @@ pub struct ParsedRequirements {
 }
 
 /// Parse the LLM response for section-grouped requirements.
-fn parse_requirements_response(
+async fn parse_requirements_response(
   response: &str,
 ) -> Result<ParsedRequirements, String> {
-  let json_str = response
-    .trim()
-    .strip_prefix("```json")
-    .or_else(|| response.trim().strip_prefix("```"))
-    .unwrap_or(response.trim());
-  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
-
-  let raw_sections: Vec<LLMSectionGroup> = serde_json::from_str(json_str)
-    .map_err(|e| {
-      eprintln!(
-        "Failed to parse requirements JSON: {}\nResponse:\n{}",
-        e, json_str
-      );
-      format!("Failed to parse requirements JSON: {}", e)
-    })?;
+  let raw_sections: Vec<LLMSectionGroup> =
+    router::extract_json(
+      response,
+      "requirements",
+      r#"[{"section_topic": "D5", "requirements": [{"description": "...", "documentation_topics": ["D6", "D7"]}]}]"#,
+    ).await?;
 
   let mut requirements = BTreeMap::new();
   let mut topic_metadata = BTreeMap::new();
@@ -260,9 +251,10 @@ pub async fn extract_requirements_from_documentation(
       router::SYSTEM_MESSAGE_DOCUMENTATION,
       &prompt,
       None,
+      true,
     )
     .await?;
-    return parse_requirements_response(&response);
+    return parse_requirements_response(&response).await;
   }
 
   let mut handles = Vec::new();
@@ -275,6 +267,7 @@ pub async fn extract_requirements_from_documentation(
         router::SYSTEM_MESSAGE_DOCUMENTATION,
         &prompt,
         Some(&label),
+        true,
       )
       .await
     }));
@@ -301,7 +294,7 @@ pub async fn extract_requirements_from_documentation(
   }
 
   if per_doc_results.len() == 1 {
-    return parse_requirements_response(&per_doc_results[0]);
+    return parse_requirements_response(&per_doc_results[0]).await;
   }
 
   let combined = per_doc_results.join("\n");
@@ -311,10 +304,11 @@ pub async fn extract_requirements_from_documentation(
     router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some("requirements_consolidate"),
+    true,
   )
   .await?;
 
-  parse_requirements_response(&response)
+  parse_requirements_response(&response).await
 }
 
 // ============================================================================
@@ -439,24 +433,16 @@ pub async fn semantic_link_pass1(
     router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some(&label),
+    true,
   )
   .await?;
 
-  let json_str = response
-    .trim()
-    .strip_prefix("```json")
-    .or_else(|| response.trim().strip_prefix("```"))
-    .unwrap_or(response.trim());
-  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
-
   let contract_ids: Vec<String> =
-    serde_json::from_str(json_str).map_err(|e| {
-      eprintln!(
-        "Failed to parse semantic link pass1 JSON: {}\nResponse:\n{}",
-        e, json_str
-      );
-      format!("Failed to parse semantic link pass1: {}", e)
-    })?;
+    router::extract_json(
+      &response,
+      "semantic link pass1",
+      r#"["N-1234", "N-5678"]"#,
+    ).await?;
 
   Ok(SemanticLinkPass1Result {
     section_topic: section_topic.clone(),
@@ -492,24 +478,16 @@ pub async fn semantic_link_pass2(
     router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some(&label),
+    true,
   )
   .await?;
 
-  let json_str = response
-    .trim()
-    .strip_prefix("```json")
-    .or_else(|| response.trim().strip_prefix("```"))
-    .unwrap_or(response.trim());
-  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
-
   let member_ids: Vec<String> =
-    serde_json::from_str(json_str).map_err(|e| {
-      eprintln!(
-        "Failed to parse semantic link pass2 JSON: {}\nResponse:\n{}",
-        e, json_str
-      );
-      format!("Failed to parse semantic link pass2: {}", e)
-    })?;
+    router::extract_json(
+      &response,
+      "semantic link pass2",
+      r#"["N-1234", "N-5678"]"#,
+    ).await?;
 
   Ok(SemanticLinkPass2Result {
     section_topic: section_topic.clone(),
@@ -540,24 +518,16 @@ pub async fn semantic_link_pass3(
     router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some(&label),
+    true,
   )
   .await?;
 
-  let json_str = response
-    .trim()
-    .strip_prefix("```json")
-    .or_else(|| response.trim().strip_prefix("```"))
-    .unwrap_or(response.trim());
-  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
-
-  let raw_links: Vec<LLMSemanticLink> = serde_json::from_str(json_str)
-    .map_err(|e| {
-      eprintln!(
-        "Failed to parse semantic link pass3 JSON: {}\nResponse:\n{}",
-        e, json_str
-      );
-      format!("Failed to parse semantic link pass3: {}", e)
-    })?;
+  let raw_links: Vec<LLMSemanticLink> =
+    router::extract_json(
+      &response,
+      "semantic link pass3",
+      r#"[{"declaration_topic": "N-1234", "semantic_text": "..."}]"#,
+    ).await?;
 
   let links = raw_links
     .into_iter()
@@ -795,24 +765,16 @@ pub async fn synthesize_features(
     router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some("synthesize_features"),
+    true,
   )
   .await?;
 
-  let json_str = response
-    .trim()
-    .strip_prefix("```json")
-    .or_else(|| response.trim().strip_prefix("```"))
-    .unwrap_or(response.trim());
-  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
-
-  let raw_features: Vec<LLMSynthesizedFeature> = serde_json::from_str(json_str)
-    .map_err(|e| {
-      eprintln!(
-        "Failed to parse synthesized features JSON: {}\nResponse:\n{}",
-        e, json_str
-      );
-      format!("Failed to parse synthesized features: {}", e)
-    })?;
+  let raw_features: Vec<LLMSynthesizedFeature> =
+    router::extract_json(
+      &response,
+      "synthesized features",
+      r#"[{"name": "...", "description": "...", "requirement_topics": ["R1"], "behavior_topics": ["B1"]}]"#,
+    ).await?;
 
   let mut features = BTreeMap::new();
   let mut topic_metadata = BTreeMap::new();
@@ -922,24 +884,16 @@ pub async fn extract_behaviors_from_contract(
     router::SYSTEM_MESSAGE_CODE,
     &prompt,
     Some(&label),
+    true,
   )
   .await?;
 
-  let json_str = response
-    .trim()
-    .strip_prefix("```json")
-    .or_else(|| response.trim().strip_prefix("```"))
-    .unwrap_or(response.trim());
-  let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
-
-  let raw_groups: Vec<LLMMemberBehaviors> = serde_json::from_str(json_str)
-    .map_err(|e| {
-      eprintln!(
-        "Failed to parse behaviors JSON: {}\nResponse:\n{}",
-        e, json_str
-      );
-      format!("Failed to parse behaviors JSON: {}", e)
-    })?;
+  let raw_groups: Vec<LLMMemberBehaviors> =
+    router::extract_json(
+      &response,
+      "behaviors",
+      r#"[{"member_topic": "N-1234", "behaviors": ["...", "..."]}]"#,
+    ).await?;
 
   let mut behaviors = Vec::new();
   for group in raw_groups {
@@ -1055,6 +1009,7 @@ pub async fn normalize_documentation(
         router::SYSTEM_MESSAGE_DOCUMENTATION,
         &prompt,
         Some(&file_path),
+        false,
       )
       .await;
       (file_path, result)
