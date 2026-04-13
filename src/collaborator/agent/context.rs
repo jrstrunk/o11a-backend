@@ -1358,10 +1358,18 @@ fn flatten_inline_recursive(
             ..
           } = child.resolve(&audit_data.nodes)
           {
-            if let Some(sem) = audit_data.functional_semantics.get(t) {
-              text.push_str(" (");
-              text.push_str(&sem.text);
-              text.push(')');
+            if let Some(sems) = audit_data.functional_semantics.get(t) {
+              if let Some(sem) = sems.first() {
+                text.push_str(" (");
+                text.push_str(&sem.text);
+                if sems.len() > 1 {
+                  for s in &sems[1..] {
+                    text.push_str("; ");
+                    text.push_str(&s.text);
+                  }
+                }
+                text.push(')');
+              }
               break; // one semantic annotation per inline code span
             }
           }
@@ -1383,10 +1391,13 @@ fn flatten_inline_recursive(
         if let Some(t) = referenced_topic {
           refs.push(json!({"name": value, "topic": t.id()}));
           // Inject functional semantic inline when outside of InlineCode
-          if let Some(sem) = audit_data.functional_semantics.get(t) {
-            text.push_str(" (");
-            text.push_str(&sem.text);
-            text.push(')');
+          if let Some(sems) = audit_data.functional_semantics.get(t) {
+            let joined: Vec<&str> = sems.iter().map(|s| s.text.as_str()).collect();
+            if !joined.is_empty() {
+              text.push_str(" (");
+              text.push_str(&joined.join("; "));
+              text.push(')');
+            }
           }
         }
       }
@@ -1614,8 +1625,11 @@ pub fn render_documentation_ast_snippet(
           ..
         } = child.resolve(&audit_data.nodes)
         {
-          if let Some(sem) = audit_data.functional_semantics.get(t) {
-            semantic_suffix = format!(" ({})", sem.text);
+          if let Some(sems) = audit_data.functional_semantics.get(t) {
+            let joined: Vec<&str> = sems.iter().map(|s| s.text.as_str()).collect();
+            if !joined.is_empty() {
+              semantic_suffix = format!(" ({})", joined.join("; "));
+            }
             break;
           }
         }
@@ -2316,7 +2330,7 @@ pub fn render_contract_for_behavior_extraction(
 
   // Build semantic annotations for declarations in this contract
   let mut semantics: Vec<serde_json::Value> = Vec::new();
-  for (decl_topic, sem) in &audit_data.functional_semantics {
+  for (decl_topic, sems) in &audit_data.functional_semantics {
     // Check if this declaration is scoped to this contract
     if let Some(metadata) = audit_data.topic_metadata.get(decl_topic) {
       let in_contract = match metadata.scope() {
@@ -2326,11 +2340,13 @@ pub fn render_contract_for_behavior_extraction(
         _ => false,
       };
       if in_contract {
-        semantics.push(json!({
-          "declaration_topic": decl_topic.id(),
-          "name": metadata.name().unwrap_or(""),
-          "semantic": sem.text,
-        }));
+        for sem in sems {
+          semantics.push(json!({
+            "declaration_topic": decl_topic.id(),
+            "name": metadata.name().unwrap_or(""),
+            "semantic": sem.text,
+          }));
+        }
       }
     }
   }

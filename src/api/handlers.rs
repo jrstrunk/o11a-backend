@@ -2697,7 +2697,7 @@ pub async fn set_functional_purpose(
 
 /// PUT /api/v1/audits/:audit_id/subjects/:topic_id/semantics
 /// Sets or updates the functional semantics of a subject.
-pub async fn set_functional_semantics(
+pub async fn add_functional_semantic(
   State(state): State<AppState>,
   Path((audit_id, topic_id)): Path<(String, String)>,
   Json(payload): Json<SetSubjectPropertyRequest>,
@@ -2712,23 +2712,27 @@ pub async fn set_functional_semantics(
   )
   .await
   .map_err(|e| {
-    eprintln!("set_functional_semantics failed: {}", e);
+    eprintln!("add_functional_semantic failed: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
   let t = topic::new_topic(&topic_id);
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in set_functional_semantics: {}", e);
+      eprintln!("Mutex poisoned in add_functional_semantic: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data = ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-    audit_data.functional_semantics.insert(t, core::FunctionalSemantic {
-      text: row.value.clone(),
-      documentation_topic: None, // provenance set during semantic linking
-      author_id: row.author_id,
-      created_at: row.created_at.clone(),
-    });
+    audit_data
+      .functional_semantics
+      .entry(t)
+      .or_default()
+      .push(core::FunctionalSemantic {
+        text: row.value.clone(),
+        documentation_topic: None,
+        author_id: row.author_id,
+        created_at: row.created_at.clone(),
+      });
   }
 
   Ok(Json(SubjectPropertyResponse {

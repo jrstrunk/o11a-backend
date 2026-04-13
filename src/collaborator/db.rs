@@ -1176,16 +1176,25 @@ pub async fn load_all_features(
       };
       audit_data.semantic_links.push(link);
 
-      // Also populate functional_semantics with provenance
-      audit_data.functional_semantics.insert(
-        topic::new_topic(&row.declaration_topic),
-        core::FunctionalSemantic {
+      // Populate functional_semantics with provenance, redirecting
+      // transitive topics (e.g., interface members) to their target.
+      let decl_topic = topic::new_topic(&row.declaration_topic);
+      let effective_topic = audit_data
+        .topic_metadata
+        .get(&decl_topic)
+        .and_then(|m| m.transitive_topic())
+        .cloned()
+        .unwrap_or(decl_topic);
+      audit_data
+        .functional_semantics
+        .entry(effective_topic)
+        .or_default()
+        .push(core::FunctionalSemantic {
           text: row.semantic_text.clone(),
           documentation_topic: Some(topic::new_topic(&row.documentation_topic)),
           author_id: 0,
           created_at: String::new(),
-        },
-      );
+        });
     }
   }
 
@@ -1209,12 +1218,16 @@ pub async fn load_all_features(
           });
         }
         "functional_semantics" => {
-          audit_data.functional_semantics.insert(t, core::FunctionalSemantic {
-            text: row.value.clone(),
-            documentation_topic: None, // provenance loaded separately from semantic_links
-            author_id: row.author_id,
-            created_at: row.created_at.clone(),
-          });
+          audit_data
+            .functional_semantics
+            .entry(t)
+            .or_default()
+            .push(core::FunctionalSemantic {
+              text: row.value.clone(),
+              documentation_topic: None, // provenance loaded separately from semantic_links
+              author_id: row.author_id,
+              created_at: row.created_at.clone(),
+            });
         }
         _ => {}
       }

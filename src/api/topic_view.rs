@@ -1464,37 +1464,39 @@ pub fn build_conversation(
   let mut entries: Vec<ConversationEntry> = Vec::new();
 
   // Functional semantics (what this topic represents in project context)
-  if let Some(sem) = audit_data.functional_semantics.get(&topic) {
-    let provenance_html = if let Some(ref doc_topic) = sem.documentation_topic {
-      let doc_name = audit_data
-        .topic_metadata
-        .get(doc_topic)
-        .and_then(|m| m.name())
-        .unwrap_or(doc_topic.id());
-      format!(
-        " <span class=\"provenance\">(from <a data-topic=\"{}\">{}</a>)</span>",
-        doc_topic.id(),
-        html_escape(doc_name)
-      )
-    } else {
-      String::new()
-    };
+  if let Some(sems) = audit_data.functional_semantics.get(&topic) {
+    for sem in sems {
+      let provenance_html = if let Some(ref doc_topic) = sem.documentation_topic {
+        let doc_name = audit_data
+          .topic_metadata
+          .get(doc_topic)
+          .and_then(|m| m.name())
+          .unwrap_or(doc_topic.id());
+        format!(
+          " <span class=\"provenance\">(from <a data-topic=\"{}\">{}</a>)</span>",
+          doc_topic.id(),
+          html_escape(doc_name)
+        )
+      } else {
+        String::new()
+      };
 
-    let header = render_authored_header("semantics", sem.author_id, &sem.created_at);
-    let html = format!(
-      "<div class=\"functional-semantics\" style=\"{}\">{}\
-       <p style=\"margin: 0\">{}{}</p></div>",
-      COMBINED_PANEL_STYLE,
-      header,
-      html_escape(&sem.text),
-      provenance_html
-    );
-    entries.push(ConversationEntry {
-      topic_id: topic_id.to_string(),
-      kind: ConversationEntryKind::FunctionalSemantics,
-      created_at: Some(sem.created_at.clone()),
-      html,
-    });
+      let header = render_authored_header("semantics", sem.author_id, &sem.created_at);
+      let html = format!(
+        "<div class=\"functional-semantics\" style=\"{}\">{}\
+         <p style=\"margin: 0\">{}{}</p></div>",
+        COMBINED_PANEL_STYLE,
+        header,
+        html_escape(&sem.text),
+        provenance_html
+      );
+      entries.push(ConversationEntry {
+        topic_id: topic_id.to_string(),
+        kind: ConversationEntryKind::FunctionalSemantics,
+        created_at: Some(sem.created_at.clone()),
+        html,
+      });
+    }
   }
 
   // Functional purpose (why this topic exists)
