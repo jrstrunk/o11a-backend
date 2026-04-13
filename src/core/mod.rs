@@ -476,7 +476,37 @@ impl TopicNameIndex {
         if topics.len() == 1 {
           Some((name, topics.into_iter().next().unwrap()))
         } else {
-          None
+          // When multiple topics share a name, prefer non-interface members.
+          // This handles the common case where an interface and its
+          // implementation both declare the same function/variable.
+          let non_interface: Vec<_> = topics
+            .iter()
+            .filter(|t| {
+              let component = audit_data
+                .topic_metadata
+                .get(t)
+                .and_then(|m| match m.scope() {
+                  Scope::Component { component, .. }
+                  | Scope::Member { component, .. }
+                  | Scope::ContainingBlock { component, .. } => Some(component),
+                  _ => None,
+                });
+
+              !matches!(
+                component.and_then(|c| audit_data.topic_metadata.get(c)),
+                Some(TopicMetadata::NamedTopic {
+                  kind: NamedTopicKind::Contract(ContractKind::Interface),
+                  ..
+                })
+              )
+            })
+            .collect();
+
+          if non_interface.len() == 1 {
+            Some((name, non_interface[0].clone()))
+          } else {
+            None
+          }
         }
       })
       .collect();
