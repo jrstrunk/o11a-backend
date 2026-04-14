@@ -1163,7 +1163,7 @@ fn convert_mdast_node(
       })
     }
 
-    MdNode::Blockquote(quote) => {
+    MdNode::BlockQuote(quote) => {
       let children = quote
         .children
         .iter()

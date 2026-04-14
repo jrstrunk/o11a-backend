@@ -2463,6 +2463,67 @@ pub fn render_member_declarations_for_semantics(
   serde_json::to_string(&declarations).unwrap_or_else(|_| "[]".to_string())
 }
 
+/// Render declarations for multiple members in one JSON array for batched pass 3.
+pub fn render_batched_member_declarations_for_semantics(
+  member_topics: &[topic::Topic],
+  audit_data: &AuditData,
+) -> String {
+  let mut all_declarations: Vec<serde_json::Value> = Vec::new();
+  for mt in member_topics {
+    let single = render_member_declarations_for_semantics(mt, audit_data);
+    if let Ok(decls) = serde_json::from_str::<Vec<serde_json::Value>>(&single) {
+      all_declarations.extend(decls);
+    }
+  }
+  serde_json::to_string(&all_declarations).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Render source code for multiple members as a combined string for batched pass 3.
+pub fn render_batched_member_sources_for_semantics(
+  member_topics: &[topic::Topic],
+  audit_data: &AuditData,
+  source_text_cache: &std::collections::HashMap<String, String>,
+) -> String {
+  let mut parts = Vec::new();
+  for mt in member_topics {
+    if let Some(source) = render_member_source_for_semantics(mt, audit_data, source_text_cache) {
+      parts.push(source);
+    }
+  }
+  parts.join("\n\n")
+}
+
+/// Render contract-level declarations for multiple contracts in one JSON array.
+pub fn render_batched_contract_declarations_for_semantics(
+  contract_topics: &[topic::Topic],
+  audit_data: &AuditData,
+) -> String {
+  let mut all_declarations: Vec<serde_json::Value> = Vec::new();
+  for ct in contract_topics {
+    let single = render_contract_declarations_for_semantics(ct, audit_data);
+    if let Ok(decls) = serde_json::from_str::<Vec<serde_json::Value>>(&single) {
+      all_declarations.extend(decls);
+    }
+  }
+  serde_json::to_string(&all_declarations).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Render contract-level declaration signatures for multiple contracts.
+pub fn render_batched_contract_declaration_signatures(
+  contract_topics: &[topic::Topic],
+  audit_data: &AuditData,
+  source_text_cache: &std::collections::HashMap<String, String>,
+) -> String {
+  let mut parts = Vec::new();
+  for ct in contract_topics {
+    let sigs = render_contract_declaration_signatures(ct, audit_data, source_text_cache);
+    if sigs != "[]" && !sigs.is_empty() {
+      parts.push(sigs);
+    }
+  }
+  parts.join("\n\n")
+}
+
 /// Render a member's full source code as a JSON snippet for pass 3 context.
 pub fn render_member_source_for_semantics(
   member_topic: &topic::Topic,

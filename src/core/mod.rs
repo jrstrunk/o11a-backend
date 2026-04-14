@@ -218,13 +218,13 @@ pub struct Feature {
 }
 
 /// A functional semantic with provenance — what a declaration represents in the
-/// context of the project, linked to the documentation topic it was derived from.
+/// context of the project, linked to the documentation topics it was derived from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionalSemantic {
   /// The semantic meaning text (e.g., "proportional reward multiplier")
   pub text: String,
-  /// The D-prefixed documentation topic this semantic was derived from, if any
-  pub documentation_topic: Option<topic::Topic>,
+  /// D-prefixed documentation topics this semantic was derived from
+  pub documentation_topics: Vec<topic::Topic>,
   pub author_id: i64,
   pub created_at: String,
 }
@@ -237,13 +237,13 @@ pub struct FunctionalPurpose {
   pub created_at: String,
 }
 
-/// A link between a documentation section and a code declaration, established
+/// A link between documentation sections and a code declaration, established
 /// during the semantic linking pipeline step. These links define what each
 /// declaration means in the context of the project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticLink {
-  /// The D-prefixed documentation section topic
-  pub documentation_topic: topic::Topic,
+  /// D-prefixed documentation topics that contributed to this semantic
+  pub documentation_topics: Vec<topic::Topic>,
   /// The N-prefixed code declaration topic
   pub declaration_topic: topic::Topic,
   /// The semantic meaning derived from this link

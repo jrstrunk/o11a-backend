@@ -2729,7 +2729,7 @@ pub async fn add_functional_semantic(
       .or_default()
       .push(core::FunctionalSemantic {
         text: row.value.clone(),
-        documentation_topic: None,
+        documentation_topics: vec![],
         author_id: row.author_id,
         created_at: row.created_at.clone(),
       });
