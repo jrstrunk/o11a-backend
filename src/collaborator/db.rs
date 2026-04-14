@@ -1170,7 +1170,7 @@ pub async fn load_all_features(
   for row in &semantic_link_rows {
     if let Some(audit_data) = data_context.get_audit_mut(&row.audit_id) {
       let link = core::SemanticLink {
-        documentation_topic: topic::new_topic(&row.documentation_topic),
+        documentation_topics: vec![topic::new_topic(&row.documentation_topic)],
         declaration_topic: topic::new_topic(&row.declaration_topic),
         semantic_text: row.semantic_text.clone(),
       };
@@ -1191,7 +1191,7 @@ pub async fn load_all_features(
         .or_default()
         .push(core::FunctionalSemantic {
           text: row.semantic_text.clone(),
-          documentation_topic: Some(topic::new_topic(&row.documentation_topic)),
+          documentation_topics: vec![topic::new_topic(&row.documentation_topic)],
           author_id: 0,
           created_at: String::new(),
         });
@@ -1224,7 +1224,7 @@ pub async fn load_all_features(
             .or_default()
             .push(core::FunctionalSemantic {
               text: row.value.clone(),
-              documentation_topic: None, // provenance loaded separately from semantic_links
+              documentation_topics: vec![],
               author_id: row.author_id,
               created_at: row.created_at.clone(),
             });

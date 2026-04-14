@@ -1466,19 +1466,26 @@ pub fn build_conversation(
   // Functional semantics (what this topic represents in project context)
   if let Some(sems) = audit_data.functional_semantics.get(&topic) {
     for sem in sems {
-      let provenance_html = if let Some(ref doc_topic) = sem.documentation_topic {
-        let doc_name = audit_data
-          .topic_metadata
-          .get(doc_topic)
-          .and_then(|m| m.name())
-          .unwrap_or(doc_topic.id());
-        format!(
-          " <span class=\"provenance\">(from <a data-topic=\"{}\">{}</a>)</span>",
-          doc_topic.id(),
-          html_escape(doc_name)
-        )
-      } else {
+      let provenance_html = if sem.documentation_topics.is_empty() {
         String::new()
+      } else {
+        let links: Vec<String> = sem
+          .documentation_topics
+          .iter()
+          .map(|doc_topic| {
+            let doc_name = audit_data
+              .topic_metadata
+              .get(doc_topic)
+              .and_then(|m| m.name())
+              .unwrap_or(doc_topic.id());
+            format!(
+              "<a data-topic=\"{}\">{}</a>",
+              doc_topic.id(),
+              html_escape(doc_name)
+            )
+          })
+          .collect();
+        format!(" <span class=\"provenance\">(from {})</span>", links.join(", "))
       };
 
       let header = render_authored_header("semantics", sem.author_id, &sem.created_at);
