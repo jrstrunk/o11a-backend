@@ -343,7 +343,7 @@ pub fn highlighted_name(metadata: &TopicMetadata) -> String {
     },
     TopicMetadata::CommentTopic { .. } => "<span>Comment</span>".to_string(),
     TopicMetadata::FeatureTopic { name, .. } => {
-      format!("<span class=\"feature\">{}</span>", html_escape(name))
+      format!("<span class=\"keyword\">feat</span>{}", html_escape(name))
     }
     TopicMetadata::RequirementTopic { description, .. } => {
       format!(
@@ -358,10 +358,7 @@ pub fn highlighted_name(metadata: &TopicMetadata) -> String {
       )
     }
     TopicMetadata::ThreatTopic { description, .. } => {
-      format!(
-        "<span class=\"threat\">{}</span>",
-        html_escape(description)
-      )
+      format!("<span class=\"threat\">{}</span>", html_escape(description))
     }
     TopicMetadata::InvariantTopic { description, .. } => {
       format!(
@@ -609,11 +606,11 @@ pub fn render_source_text(
   }) = audit_data.topic_metadata.get(topic)
   {
     let header = render_authored_header("feat", *author_id, created_at);
-    let content = format!(
-      "{}<p style=\"margin: 0\">{}</p>",
-      header, description
-    );
-    return Some(formatting::format_topic_block(topic, &content, "feature", topic));
+    let content =
+      format!("{}<p style=\"margin: 0\">{}</p>", header, description);
+    return Some(formatting::format_topic_block(
+      topic, &content, "feature", topic,
+    ));
   }
 
   // Requirement topics: render with comment-style header
@@ -625,11 +622,14 @@ pub fn render_source_text(
   }) = audit_data.topic_metadata.get(topic)
   {
     let header = render_authored_header("req", *author_id, created_at);
-    let content = format!(
-      "{}<p style=\"margin: 0\">{}</p>",
-      header, description
-    );
-    return Some(formatting::format_topic_block(topic, &content, "requirement", topic));
+    let content =
+      format!("{}<p style=\"margin: 0\">{}</p>", header, description);
+    return Some(formatting::format_topic_block(
+      topic,
+      &content,
+      "requirement",
+      topic,
+    ));
   }
 
   // Threat topics: render with comment-style header including severity
@@ -644,11 +644,11 @@ pub fn render_source_text(
     let sev_str = severity.map(|s| s.as_str()).unwrap_or("pending");
     let keyword = format!("threat [{}]", sev_str);
     let header = render_authored_header(&keyword, *author_id, created_at);
-    let content = format!(
-      "{}<p style=\"margin: 0\">{}</p>",
-      header, description
-    );
-    return Some(formatting::format_topic_block(topic, &content, "threat", topic));
+    let content =
+      format!("{}<p style=\"margin: 0\">{}</p>", header, description);
+    return Some(formatting::format_topic_block(
+      topic, &content, "threat", topic,
+    ));
   }
 
   // Invariant topics: render with comment-style header including severity
@@ -663,11 +663,14 @@ pub fn render_source_text(
     let sev_str = severity.map(|s| s.as_str()).unwrap_or("pending");
     let keyword = format!("inv [{}]", sev_str);
     let header = render_authored_header(&keyword, *author_id, created_at);
-    let content = format!(
-      "{}<p style=\"margin: 0\">{}</p>",
-      header, description
-    );
-    return Some(formatting::format_topic_block(topic, &content, "invariant", topic));
+    let content =
+      format!("{}<p style=\"margin: 0\">{}</p>", header, description);
+    return Some(formatting::format_topic_block(
+      topic,
+      &content,
+      "invariant",
+      topic,
+    ));
   }
 
   // Global builtins
@@ -685,13 +688,13 @@ pub fn render_source_text(
         &audit_data.topic_metadata,
       ))
     }
-    Some(Node::Documentation(doc_node)) => {
-      Some(crate::documentation::formatter::node_to_html_with_semantics(
+    Some(Node::Documentation(doc_node)) => Some(
+      crate::documentation::formatter::node_to_html_with_semantics(
         doc_node,
         &audit_data.nodes,
         &audit_data.functional_semantics,
-      ))
-    }
+      ),
+    ),
     Some(Node::Comment(nodes)) => {
       Some(crate::collaborator::formatter::render_comment_html(
         nodes,
@@ -1485,10 +1488,14 @@ pub fn build_conversation(
             )
           })
           .collect();
-        format!(" <span class=\"provenance\">(from {})</span>", links.join(", "))
+        format!(
+          " <span class=\"provenance\">(from {})</span>",
+          links.join(", ")
+        )
       };
 
-      let header = render_authored_header("semantics", sem.author_id, &sem.created_at);
+      let header =
+        render_authored_header("semantics", sem.author_id, &sem.created_at);
       let html = format!(
         "<div class=\"functional-semantics\" style=\"{}\">{}\
          <p style=\"margin: 0\">{}{}</p></div>",
@@ -1508,7 +1515,8 @@ pub fn build_conversation(
 
   // Functional purpose (why this topic exists)
   if let Some(purpose) = audit_data.functional_purposes.get(&topic) {
-    let header = render_authored_header("purpose", purpose.author_id, &purpose.created_at);
+    let header =
+      render_authored_header("purpose", purpose.author_id, &purpose.created_at);
     let html = format!(
       "<div class=\"functional-purpose\" style=\"{}\">{}\
        <p style=\"margin: 0\">{}</p></div>",
@@ -1538,19 +1546,9 @@ pub fn build_conversation(
     }
   }
 
-  // Topics that mention this topic (comments or doc sections)
-  if let Some(mentioning_topics) = audit_data.mentions_index.get(&topic) {
-    for mentioning_topic in mentioning_topics {
-      if let Some(entry) = build_conversation_entry(
-        mentioning_topic,
-        ConversationEntryKind::Mention,
-        audit_data,
-        source_text_cache,
-      ) {
-        entries.push(entry);
-      }
-    }
-  }
+  // Topic mentions (inline code references in docs) are rendered in the
+  // documentation panel instead of the conversation panel, where they can
+  // be deduplicated with other linked documentation sections.
 
   Some(ConversationResponse { entries })
 }
@@ -1845,20 +1843,32 @@ fn topic_kind_label(metadata: &TopicMetadata) -> &'static str {
 /// documentation topics' source contexts and rendering them as a grouped source panel.
 /// Deduplicates documentation topics across requirements.
 pub fn build_documentation_panel(
-  requirement_topics: &[topic::Topic],
+  feature_topics: &[topic::Topic],
+  mention_topics: &[topic::Topic],
   audit_data: &AuditData,
   source_text_cache: &std::collections::HashMap<String, String>,
 ) -> String {
   let mut all_contexts: Vec<SourceContext> = Vec::new();
   let mut seen_doc_topics: Vec<topic::Topic> = Vec::new();
 
-  for req_topic in requirement_topics {
-    if let Some(requirement) = audit_data.requirements.get(req_topic) {
-      for doc_topic in &requirement.documentation_topics {
-        if !seen_doc_topics.contains(doc_topic) {
-          seen_doc_topics.push(doc_topic.clone());
-        }
-      }
+  // Build SourceContext entries for each feature, with the feature description
+  // as a scope_reference so the feature name is the section title and the
+  // description is navigable via the feature's topic ID.
+  for ft in feature_topics {
+    if audit_data.topic_metadata.get(ft).is_some() {
+      all_contexts.push(SourceContext::new_with_scope_references(
+        ft.clone(),
+        None,
+        true,
+        vec![Reference::project_reference(ft.clone(), None)],
+      ));
+    }
+  }
+
+  // Collect doc topics from mentions and semantic links
+  for mention_topic in mention_topics {
+    if !seen_doc_topics.contains(mention_topic) {
+      seen_doc_topics.push(mention_topic.clone());
     }
   }
 

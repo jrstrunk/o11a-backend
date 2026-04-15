@@ -1011,6 +1011,21 @@ pub struct SourceContext {
 }
 
 impl SourceContext {
+  pub fn new_with_scope_references(
+    scope: topic::Topic,
+    sort_key: Option<usize>,
+    is_in_scope: bool,
+    scope_references: Vec<Reference>,
+  ) -> Self {
+    SourceContext {
+      scope,
+      sort_key,
+      is_in_scope,
+      scope_references,
+      nested_references: Vec::new(),
+    }
+  }
+
   pub fn scope(&self) -> &topic::Topic {
     &self.scope
   }

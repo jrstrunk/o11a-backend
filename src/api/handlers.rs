@@ -2211,32 +2211,21 @@ pub async fn get_documentation_panel(
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
-  // Resolve all input topic IDs to requirement topics
-  let mut requirement_topics: Vec<topic::Topic> = Vec::new();
+  // Resolve all input topic IDs to feature topics
+  let mut feature_topics_resolved: Vec<topic::Topic> = Vec::new();
   for id in &payload.feature_topics {
     let t = new_topic(id);
     match t.kind() {
       Some(TopicKind::Feature) => {
-        // Collect all requirements for this feature
-        if let Some(feature) = audit_data.features.get(&t) {
-          for rt in &feature.requirement_topics {
-            if !requirement_topics.contains(rt) {
-              requirement_topics.push(rt.clone());
-            }
-          }
-        }
-      }
-      Some(TopicKind::Requirement) => {
-        if !requirement_topics.contains(&t) {
-          requirement_topics.push(t);
+        if !feature_topics_resolved.contains(&t) {
+          feature_topics_resolved.push(t);
         }
       }
       _ => {
-        // Look up features via source_feature_links with scope walk, then requirements
-        let fts = features_for_topic(&t, audit_data);
-        for rt in requirements_for_features(&fts, audit_data) {
-          if !requirement_topics.contains(&rt) {
-            requirement_topics.push(rt);
+        // Look up features via source_feature_links with scope walk
+        for ft in features_for_topic(&t, audit_data) {
+          if !feature_topics_resolved.contains(&ft) {
+            feature_topics_resolved.push(ft);
           }
         }
       }
@@ -2249,8 +2238,55 @@ pub async fn get_documentation_panel(
     .cloned()
     .unwrap_or_default();
 
+  // Collect mention and semantic doc topics for all input topics.
+  // For code declarations, also collect from the containing member and
+  // its child declarations to capture all related documentation.
+  let mut mention_topics: Vec<topic::Topic> = Vec::new();
+  let mut related_topics: Vec<topic::Topic> = Vec::new();
+  for id in &payload.feature_topics {
+    let t = new_topic(id);
+    related_topics.push(t.clone());
+
+    // If this is a declaration scoped to a member, include the member too
+    if let Some(metadata) = audit_data.topic_metadata.get(&t) {
+      let member = match metadata.scope() {
+        core::Scope::Member { member, .. }
+        | core::Scope::ContainingBlock { member, .. } => Some(member.clone()),
+        _ => None,
+      };
+      if let Some(mt) = member {
+        if !related_topics.contains(&mt) {
+          related_topics.push(mt);
+        }
+      }
+    }
+  }
+
+  for t in &related_topics {
+    // Mentions
+    if let Some(mentioning) = audit_data.mentions_index.get(t) {
+      for mt in mentioning {
+        if !mention_topics.contains(mt) {
+          mention_topics.push(mt.clone());
+        }
+      }
+    }
+
+    // Semantic link doc topics
+    if let Some(sems) = audit_data.functional_semantics.get(t) {
+      for sem in sems {
+        for dt in &sem.documentation_topics {
+          if !mention_topics.contains(dt) {
+            mention_topics.push(dt.clone());
+          }
+        }
+      }
+    }
+  }
+
   let html = super::topic_view::build_documentation_panel(
-    &requirement_topics,
+    &feature_topics_resolved,
+    &mention_topics,
     audit_data,
     &source_text_cache,
   );
