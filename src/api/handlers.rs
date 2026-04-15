@@ -805,7 +805,6 @@ pub struct FeatureTopicResponse {
 pub struct RequirementTopicResponse {
   pub topic_id: String,
   pub description: String,
-  pub feature_topic: String,
   pub author_id: i64,
   pub created_at: String,
 }
@@ -994,14 +993,12 @@ fn topic_metadata_to_response(
 
     crate::core::TopicMetadata::RequirementTopic {
       description,
-      feature_topic,
       author_id,
       created_at,
       ..
     } => TopicMetadataResponse::Requirement(RequirementTopicResponse {
       topic_id: topic.id.clone(),
       description: description.clone(),
-      feature_topic: feature_topic.id.clone(),
       author_id: *author_id,
       created_at: created_at.clone(),
     }),
@@ -1731,16 +1728,15 @@ pub async fn get_feature_requirements(
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let feature = audit_data
-    .features
-    .get(&feature_topic)
-    .ok_or(StatusCode::NOT_FOUND)?;
+  if !audit_data.features.contains_key(&feature_topic) {
+    return Err(StatusCode::NOT_FOUND);
+  }
 
-  let ids: Vec<String> = feature
-    .requirement_topics
-    .iter()
-    .map(|t| t.id.clone())
-    .collect();
+  let ids: Vec<String> = audit_data
+    .feature_requirement_links
+    .get(&feature_topic)
+    .map(|rts| rts.iter().map(|t| t.id.clone()).collect())
+    .unwrap_or_default();
 
   Ok(Json(ids))
 }
@@ -1779,37 +1775,80 @@ pub async fn get_threat_invariants(
 }
 
 /// Trigger the agent to build features from documentation.
-/// Find feature topics for any source code topic by checking source_feature_links
-/// on the topic itself, then on its containing member. Does not walk up to the
-/// contract level — a topic inside a member gets the member's features only.
+/// Find feature topics for any topic by walking the appropriate chain:
+/// - Feature topic: returns itself
+/// - Requirement topic: reverse-lookups feature_requirement_links
+/// - Behavior topic: reverse-lookups feature_behavior_links
+/// - Code topic: walks to containing member → behaviors → feature_behavior_links
 fn features_for_topic(
   t: &topic::Topic,
   audit_data: &core::AuditData,
 ) -> Vec<topic::Topic> {
-  // Direct lookup
-  if let Some(fts) = audit_data.source_feature_links.get(t) {
-    if !fts.is_empty() {
-      return fts.clone();
+  let mut features = Vec::new();
+
+  match t.kind() {
+    Some(TopicKind::Feature) => {
+      if audit_data.features.contains_key(t) {
+        features.push(t.clone());
+      }
+      return features;
     }
+    Some(TopicKind::Requirement) => {
+      for (ft, req_topics) in &audit_data.feature_requirement_links {
+        if req_topics.contains(t) && !features.contains(ft) {
+          features.push(ft.clone());
+        }
+      }
+      return features;
+    }
+    Some(TopicKind::Behavior) => {
+      for (ft, beh_topics) in &audit_data.feature_behavior_links {
+        if beh_topics.contains(t) && !features.contains(ft) {
+          features.push(ft.clone());
+        }
+      }
+      return features;
+    }
+    _ => {}
   }
 
-  // Walk up to the containing member only (not the contract)
-  if let Some(metadata) = audit_data.topic_metadata.get(t) {
-    let member = match metadata.scope() {
-      core::Scope::Member { member, .. } => Some(member),
-      core::Scope::ContainingBlock { member, .. } => Some(member),
-      _ => None,
-    };
-    if let Some(member_topic) = member {
-      if let Some(fts) = audit_data.source_feature_links.get(member_topic) {
-        if !fts.is_empty() {
-          return fts.clone();
+  // Code topic: determine the member topic (self if already a member, or walk up)
+  let member_topic = if let Some(metadata) = audit_data.topic_metadata.get(t) {
+    match metadata {
+      core::TopicMetadata::NamedTopic {
+        kind: core::NamedTopicKind::Function(_) | core::NamedTopicKind::Modifier,
+        ..
+      } => Some(t.clone()),
+      _ => match metadata.scope() {
+        core::Scope::Member { member, .. }
+        | core::Scope::ContainingBlock { member, .. } => Some(member.clone()),
+        _ => None,
+      },
+    }
+  } else {
+    None
+  };
+
+  let member_topic = match member_topic {
+    Some(mt) => mt,
+    None => return features,
+  };
+
+  // Find features via behaviors for this member
+  for (ft, beh_topics) in &audit_data.feature_behavior_links {
+    for bt in beh_topics {
+      if let Some(core::TopicMetadata::BehaviorTopic {
+        member_topic: bmt, ..
+      }) = audit_data.topic_metadata.get(bt)
+      {
+        if *bmt == member_topic && !features.contains(ft) {
+          features.push(ft.clone());
         }
       }
     }
   }
 
-  Vec::new()
+  features
 }
 
 /// Collect requirement topics for a set of feature topics.
@@ -1819,8 +1858,8 @@ fn requirements_for_features(
 ) -> Vec<topic::Topic> {
   let mut requirement_topics = Vec::new();
   for ft in feature_topics {
-    if let Some(feature) = audit_data.features.get(ft) {
-      for rt in &feature.requirement_topics {
+    if let Some(req_topics) = audit_data.feature_requirement_links.get(ft) {
+      for rt in req_topics {
         if !requirement_topics.contains(rt) {
           requirement_topics.push(rt.clone());
         }
@@ -1966,9 +2005,7 @@ pub async fn create_feature(
   })?;
 
   let feature_topic = topic::new_feature_topic(row.id as i32);
-  let feature = Feature {
-    requirement_topics: Vec::new(),
-  };
+  let feature = Feature;
 
   let metadata = core::TopicMetadata::FeatureTopic {
     topic: feature_topic.clone(),
@@ -2134,7 +2171,7 @@ pub async fn remove_requirement_documentation_topic(
 /// Returns requirement IDs linked to a topic.
 /// - Requirement topics: returns itself
 /// - Feature topics: returns all the feature's requirement_topics
-/// - Source topics (N-prefixed): looks up features via source_feature_links, then requirements
+/// - Source topics (N-prefixed): looks up features via feature_behavior_links, then requirements
 /// - Documentation topics (D-prefixed): reverse-lookups requirements with this documentation_topic
 pub async fn get_topic_requirements(
   State(state): State<AppState>,
@@ -2159,8 +2196,8 @@ pub async fn get_topic_requirements(
       requirement_topics.push(t);
     }
     Some(TopicKind::Feature) => {
-      if let Some(feature) = audit_data.features.get(&t) {
-        for rt in &feature.requirement_topics {
+      if let Some(req_topics) = audit_data.feature_requirement_links.get(&t) {
+        for rt in req_topics {
           if !requirement_topics.contains(rt) {
             requirement_topics.push(rt.clone());
           }
@@ -2210,7 +2247,7 @@ pub struct DocumentationPanelRequest {
 /// Accepts feature (F), requirement (R), or any other topic IDs.
 /// - Feature topics: collect documentation from all their requirements
 /// - Requirement topics: use their documentation_topics directly
-/// - Other topics: look up features via source_feature_links, then requirements
+/// - Other topics: look up features via feature_behavior_links, then requirements
 pub async fn get_documentation_panel(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
@@ -2236,7 +2273,7 @@ pub async fn get_documentation_panel(
         }
       }
       _ => {
-        // Look up features via source_feature_links with scope walk
+        // Look up features via feature_behavior_links with scope walk
         for ft in features_for_topic(&t, audit_data) {
           if !feature_topics_resolved.contains(&ft) {
             feature_topics_resolved.push(ft);
@@ -2335,7 +2372,6 @@ pub async fn create_requirement(
 
   let row = db::create_requirement(
     &state.db,
-    feature_id,
     &payload.description,
     payload.author_id,
   )
@@ -2351,8 +2387,12 @@ pub async fn create_requirement(
       db::add_requirement_documentation_topic(&state.db, row.id, dt_id).await;
   }
 
+  // Persist feature-requirement link
   let feature_topic = topic::new_feature_topic(feature_id as i32);
   let req_topic = topic::new_requirement_topic(row.id as i32);
+  let _ = db::add_feature_requirement_link(
+    &state.db, &audit_id, feature_id, row.id,
+  ).await;
 
   let doc_topics: Vec<topic::Topic> = payload
     .documentation_topics
@@ -2367,7 +2407,6 @@ pub async fn create_requirement(
   let metadata = core::TopicMetadata::RequirementTopic {
     topic: req_topic.clone(),
     description: row.description,
-    feature_topic: feature_topic.clone(),
     section_topic: None,
     author_id: row.author_id,
     created_at: row.created_at,
@@ -2379,12 +2418,14 @@ pub async fn create_requirement(
   })?;
   let audit_data = ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
-  // Add requirement topic to parent feature
-  let feature = audit_data
-    .features
-    .get_mut(&feature_topic)
-    .ok_or(StatusCode::NOT_FOUND)?;
-  feature.requirement_topics.push(req_topic.clone());
+  // Link requirement to feature
+  let reqs = audit_data
+    .feature_requirement_links
+    .entry(feature_topic.clone())
+    .or_default();
+  if !reqs.contains(&req_topic) {
+    reqs.push(req_topic.clone());
+  }
 
   // Store requirement and metadata
   audit_data
@@ -2421,7 +2462,6 @@ pub async fn delete_requirement(
     })?;
 
   let req_topic = topic::new_requirement_topic(requirement_id as i32);
-  let feature_topic = topic::new_feature_topic(feature_id as i32);
 
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
@@ -2431,9 +2471,9 @@ pub async fn delete_requirement(
     let audit_data =
       ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
-    // Remove from parent feature's requirement list
-    if let Some(feature) = audit_data.features.get_mut(&feature_topic) {
-      feature.requirement_topics.retain(|t| t != &req_topic);
+    // Remove from all feature-requirement links (many-to-many)
+    for reqs in audit_data.feature_requirement_links.values_mut() {
+      reqs.retain(|t| t != &req_topic);
     }
 
     // Remove requirement itself and its metadata
@@ -2480,101 +2520,6 @@ pub struct AddSourceTopicRequest {
 }
 
 // ============================================
-// Source-to-feature link routes
-// ============================================
-
-#[derive(Debug, Deserialize)]
-pub struct AddSourceFeatureLinkRequest {
-  pub source_topic: String,
-  pub feature_id: String,
-}
-
-/// POST /api/v1/audits/:audit_id/source_feature_links
-/// Links a source code member to a feature.
-pub async fn add_source_feature_link(
-  State(state): State<AppState>,
-  Path(audit_id): Path<String>,
-  Json(payload): Json<AddSourceFeatureLinkRequest>,
-) -> Result<StatusCode, StatusCode> {
-  let feature_id = parse_path_id(&payload.feature_id, TopicKind::Feature)?;
-  println!(
-    "POST /api/v1/audits/{}/source_feature_links {} -> F{}",
-    audit_id, payload.source_topic, feature_id
-  );
-
-  db::add_source_feature_link(
-    &state.db,
-    &audit_id,
-    &payload.source_topic,
-    feature_id,
-  )
-  .await
-  .map_err(|e| {
-    eprintln!("add_source_feature_link failed: {}", e);
-    StatusCode::INTERNAL_SERVER_ERROR
-  })?;
-
-  let mut ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in add_source_feature_link: {}", e);
-    StatusCode::INTERNAL_SERVER_ERROR
-  })?;
-  let audit_data = ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-
-  let source_topic = topic::new_topic(&payload.source_topic);
-  let feature_topic = topic::new_feature_topic(feature_id as i32);
-  let features = audit_data
-    .source_feature_links
-    .entry(source_topic)
-    .or_default();
-  if !features.contains(&feature_topic) {
-    features.push(feature_topic);
-  }
-
-  Ok(StatusCode::CREATED)
-}
-
-/// DELETE /api/v1/audits/:audit_id/source_feature_links/:source_topic/:feature_id
-/// Unlinks a source code member from a feature.
-pub async fn remove_source_feature_link(
-  State(state): State<AppState>,
-  Path((audit_id, source_topic_id, feature_id)): Path<(String, String, String)>,
-) -> Result<StatusCode, StatusCode> {
-  let feature_id = parse_path_id(&feature_id, TopicKind::Feature)?;
-  println!(
-    "DELETE /api/v1/audits/{}/source_feature_links/{}/{}",
-    audit_id, source_topic_id, feature_id
-  );
-
-  db::remove_source_feature_link(
-    &state.db,
-    &audit_id,
-    &source_topic_id,
-    feature_id,
-  )
-  .await
-  .map_err(|e| {
-    eprintln!("remove_source_feature_link failed: {}", e);
-    StatusCode::INTERNAL_SERVER_ERROR
-  })?;
-
-  let mut ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in remove_source_feature_link: {}", e);
-    StatusCode::INTERNAL_SERVER_ERROR
-  })?;
-  let audit_data = ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-
-  let source_topic = topic::new_topic(&source_topic_id);
-  let feature_topic = topic::new_feature_topic(feature_id as i32);
-  if let Some(features) = audit_data.source_feature_links.get_mut(&source_topic) {
-    features.retain(|ft| ft != &feature_topic);
-    if features.is_empty() {
-      audit_data.source_feature_links.remove(&source_topic);
-    }
-  }
-
-  Ok(StatusCode::NO_CONTENT)
-}
-
 // ============================================
 // Reconciliation routes
 // ============================================
@@ -2621,10 +2566,9 @@ pub async fn get_reconciliation(
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
   let feature_topic = topic::new_feature_topic(feature_id as i32);
 
-  let feature = audit_data
-    .features
-    .get(&feature_topic)
-    .ok_or(StatusCode::NOT_FOUND)?;
+  if !audit_data.features.contains_key(&feature_topic) {
+    return Err(StatusCode::NOT_FOUND);
+  }
 
   let feature_name = match audit_data.topic_metadata.get(&feature_topic) {
     Some(core::TopicMetadata::FeatureTopic { name, .. }) => name.clone(),
@@ -2632,8 +2576,12 @@ pub async fn get_reconciliation(
   };
 
   // Collect requirements
-  let requirements: Vec<ReconciliationRequirement> = feature
-    .requirement_topics
+  let empty_req_vec = Vec::new();
+  let req_topics = audit_data
+    .feature_requirement_links
+    .get(&feature_topic)
+    .unwrap_or(&empty_req_vec);
+  let requirements: Vec<ReconciliationRequirement> = req_topics
     .iter()
     .filter_map(|rt| {
       if let Some(core::TopicMetadata::RequirementTopic {
@@ -2664,11 +2612,11 @@ pub async fn get_reconciliation(
         _ => return None,
       };
 
-      // Check if this behavior's member links to this feature
+      // Check if this behavior is linked to this feature
       let linked = audit_data
-        .source_feature_links
-        .get(&member_topic)
-        .map(|fts| fts.contains(&feature_topic))
+        .feature_behavior_links
+        .get(&feature_topic)
+        .map(|bts| bts.contains(&topic::new_topic(&bt.id)))
         .unwrap_or(false);
 
       if !linked {

@@ -210,12 +210,10 @@ impl ThreatSeverity {
 
 /// A project feature extracted from documentation.
 /// Groups requirements. Feature-threat linkage is established during
-/// impact analysis, not at creation time.
+/// impact analysis, not at creation time. Feature is immutable after creation;
+/// links to requirements and behaviors are stored in separate link maps.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Feature {
-  /// R-prefixed topic IDs of requirements belonging to this feature
-  pub requirement_topics: Vec<topic::Topic>,
-}
+pub struct Feature;
 
 /// A functional semantic with provenance — what a declaration represents in the
 /// context of the project, linked to the documentation topics it was derived from.
@@ -370,7 +368,7 @@ pub struct AuditData {
   pub topic_context: BTreeMap<topic::Topic, Vec<SourceContext>>,
   /// Features extracted from documentation, keyed by F-prefixed topic ID.
   pub features: BTreeMap<topic::Topic, Feature>,
-  /// Requirements keyed by R-prefixed topic ID. Each belongs to one feature.
+  /// Requirements keyed by R-prefixed topic ID. Links to features are in feature_requirement_links.
   pub requirements: BTreeMap<topic::Topic, Requirement>,
   /// Functional purpose stored per subject topic: "why does this exist?"
   pub functional_purposes: BTreeMap<topic::Topic, FunctionalPurpose>,
@@ -397,10 +395,10 @@ pub struct AuditData {
   pub threats: BTreeMap<topic::Topic, Threat>,
   /// Invariants keyed by I-prefixed topic ID. Each belongs to one threat.
   pub invariants: BTreeMap<topic::Topic, Invariant>,
-  /// Source-to-feature links: maps source code member topics (N-prefixed) to
-  /// the features they participate in (F-prefixed). Built by the pipeline's
-  /// source-to-feature linking step.
-  pub source_feature_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Feature-to-requirement links (many-to-many). Keyed by F-prefixed topic.
+  pub feature_requirement_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Feature-to-behavior links (many-to-many). Keyed by F-prefixed topic.
+  pub feature_behavior_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Reverse index: mentioned topic → comment topics that mention it.
   /// Updated on comment create.
   pub mentions_index: HashMap<topic::Topic, Vec<topic::Topic>>,
@@ -1543,11 +1541,10 @@ pub enum TopicMetadata {
     author_id: i64,
     created_at: String,
   },
-  /// A behavioral requirement belonging to a feature
+  /// A behavioral requirement. Links to features are in feature_requirement_links.
   RequirementTopic {
     topic: topic::Topic,
     description: String,
-    feature_topic: topic::Topic,
     /// The D-prefixed documentation section this requirement was extracted from
     section_topic: Option<topic::Topic>,
     author_id: i64,
@@ -1718,9 +1715,7 @@ impl TopicMetadata {
   pub fn target_topic(&self) -> Option<&topic::Topic> {
     match self {
       TopicMetadata::CommentTopic { target_topic, .. } => Some(target_topic),
-      TopicMetadata::RequirementTopic { feature_topic, .. } => {
-        Some(feature_topic)
-      }
+      TopicMetadata::RequirementTopic { .. } => None,
       TopicMetadata::ThreatTopic { subject_topic, .. } => {
         Some(subject_topic)
       }
@@ -2081,17 +2076,28 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }
   }
 
+  // Build reverse index: requirement → [features] from feature_requirement_links
+  let mut req_to_features: HashMap<topic::Topic, Vec<topic::Topic>> = HashMap::new();
+  for (ft, req_topics) in &audit_data.feature_requirement_links {
+    for rt in req_topics {
+      let features = req_to_features.entry(rt.clone()).or_default();
+      if !features.contains(ft) {
+        features.push(ft.clone());
+      }
+    }
+  }
+
   // Update expanded_context for documentation topics (TitledTopic/UnnamedTopic)
   // Show the parent feature(s) of the requirements that link to this doc topic
   let mut doc_to_features: HashMap<topic::Topic, Vec<topic::Topic>> = HashMap::new();
   for (doc_topic, req_topics) in &doc_to_requirements {
     for rt in req_topics {
-      if let Some(TopicMetadata::RequirementTopic { feature_topic, .. }) =
-        audit_data.topic_metadata.get(rt)
-      {
+      if let Some(fts) = req_to_features.get(rt) {
         let features = doc_to_features.entry(doc_topic.clone()).or_default();
-        if !features.contains(feature_topic) {
-          features.push(feature_topic.clone());
+        for ft in fts {
+          if !features.contains(ft) {
+            features.push(ft.clone());
+          }
         }
       }
     }
@@ -2126,46 +2132,38 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
       .collect();
   }
 
-  // Build context for FeatureTopics: feature + requirements + behaviors as scope refs,
-  // with threats/invariants as nested refs
+  // Build context for FeatureTopics: feature + requirements + behaviors as scope refs
   for (feature_topic, metadata) in &audit_data.topic_metadata {
     if !matches!(metadata, TopicMetadata::FeatureTopic { .. }) {
       continue;
     }
-    let feature = match audit_data.features.get(feature_topic) {
-      Some(f) => f,
-      None => continue,
-    };
+    if !audit_data.features.contains_key(feature_topic) {
+      continue;
+    }
     let mut scope_references = vec![Reference::ProjectReference {
       reference_topic: feature_topic.clone(),
       sort_key: Some(0),
     }];
-    for rt in &feature.requirement_topics {
-      let sort_key = rt.numeric_id().map(|id| id as usize);
-      scope_references.push(Reference::ProjectReference {
-        reference_topic: rt.clone(),
-        sort_key,
-      });
+
+    // Requirements linked to this feature
+    if let Some(req_topics) = audit_data.feature_requirement_links.get(feature_topic) {
+      for rt in req_topics {
+        let sort_key = rt.numeric_id().map(|id| id as usize);
+        scope_references.push(Reference::ProjectReference {
+          reference_topic: rt.clone(),
+          sort_key,
+        });
+      }
     }
 
-    // Find behaviors linked to this feature via source_feature_links:
-    // member_topic -> [feature_topics], then find BehaviorTopics for those members
-    let linked_members: Vec<topic::Topic> = audit_data
-      .source_feature_links
-      .iter()
-      .filter(|(_, fts)| fts.contains(feature_topic))
-      .map(|(mt, _)| mt.clone())
-      .collect();
-
-    for (beh_topic, beh_metadata) in &audit_data.topic_metadata {
-      if let TopicMetadata::BehaviorTopic { member_topic, .. } = beh_metadata {
-        if linked_members.contains(member_topic) {
-          let sort_key = beh_topic.numeric_id().map(|id| id as usize);
-          scope_references.push(Reference::ProjectReference {
-            reference_topic: beh_topic.clone(),
-            sort_key,
-          });
-        }
+    // Behaviors linked to this feature
+    if let Some(beh_topics) = audit_data.feature_behavior_links.get(feature_topic) {
+      for bt in beh_topics {
+        let sort_key = bt.numeric_id().map(|id| id as usize);
+        scope_references.push(Reference::ProjectReference {
+          reference_topic: bt.clone(),
+          sort_key,
+        });
       }
     }
 
@@ -2181,24 +2179,34 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
       .insert(feature_topic.clone(), context);
   }
 
-  // Build context for RequirementTopics: parent feature as a SourceContext entry
+  // Build context for RequirementTopics: parent feature(s) as scope refs
   for (req_topic, metadata) in &audit_data.topic_metadata {
-    if let TopicMetadata::RequirementTopic { feature_topic, .. } = metadata {
-      let sort_key = feature_topic.numeric_id().map(|id| id as usize);
-      let context = vec![SourceContext {
-        scope: req_topic.clone(),
-        sort_key,
-        is_in_scope: true,
-        scope_references: vec![Reference::ProjectReference {
-          reference_topic: feature_topic.clone(),
-          sort_key,
-        }],
-        nested_references: vec![],
-      }];
-      audit_data
-        .topic_context
-        .insert(req_topic.clone(), context);
+    if !matches!(metadata, TopicMetadata::RequirementTopic { .. }) {
+      continue;
     }
+    let feature_refs: Vec<Reference> = req_to_features
+      .get(req_topic)
+      .map(|fts| {
+        fts.iter()
+          .map(|ft| Reference::ProjectReference {
+            reference_topic: ft.clone(),
+            sort_key: ft.numeric_id().map(|id| id as usize),
+          })
+          .collect()
+      })
+      .unwrap_or_default();
+
+    let sort_key = feature_refs.first().and_then(|r| r.sort_key());
+    let context = vec![SourceContext {
+      scope: req_topic.clone(),
+      sort_key,
+      is_in_scope: true,
+      scope_references: feature_refs,
+      nested_references: vec![],
+    }];
+    audit_data
+      .topic_context
+      .insert(req_topic.clone(), context);
   }
 
   // Build context for ThreatTopics: subject + threat as scope refs,
@@ -2348,7 +2356,8 @@ pub fn new_audit_data(
     behaviors: BTreeMap::new(),
     threats: BTreeMap::new(),
     invariants: BTreeMap::new(),
-    source_feature_links: BTreeMap::new(),
+    feature_requirement_links: BTreeMap::new(),
+    feature_behavior_links: BTreeMap::new(),
     mentions_index: HashMap::new(),
   }
 }
