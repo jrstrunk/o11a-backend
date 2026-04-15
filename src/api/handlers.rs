@@ -14,6 +14,15 @@ use crate::core::{
   topic::{self, TopicKind, new_topic},
 };
 
+/// Parse a topic ID string from a URL path parameter into a numeric database ID.
+/// Accepts both prefixed (e.g. "F7") and bare numeric (e.g. "7") formats.
+fn parse_path_id(input: &str, expected_kind: TopicKind) -> Result<i64, StatusCode> {
+  topic::parse_topic_id(input, expected_kind).map_err(|e| {
+    eprintln!("Invalid topic ID in path: {}", e);
+    StatusCode::BAD_REQUEST
+  })
+}
+
 // Health check handler
 pub async fn health_check() -> StatusCode {
   println!("GET /health");
@@ -1706,8 +1715,9 @@ pub async fn get_features(
 /// GET /api/v1/audits/:audit_id/features/:feature_id/requirements
 pub async fn get_feature_requirements(
   State(state): State<AppState>,
-  Path((audit_id, feature_id)): Path<(String, i64)>,
+  Path((audit_id, feature_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
+  let feature_id = parse_path_id(&feature_id, TopicKind::Feature)?;
   println!(
     "GET /api/v1/audits/{}/features/{}/requirements",
     audit_id, feature_id
@@ -1738,8 +1748,9 @@ pub async fn get_feature_requirements(
 /// GET /api/v1/audits/:audit_id/threats/:threat_id/invariants
 pub async fn get_threat_invariants(
   State(state): State<AppState>,
-  Path((audit_id, threat_id)): Path<(String, i64)>,
+  Path((audit_id, threat_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
+  let threat_id = parse_path_id(&threat_id, TopicKind::AttackVector)?;
   println!(
     "GET /api/v1/audits/{}/threats/{}/invariants",
     audit_id, threat_id
@@ -1985,8 +1996,9 @@ pub async fn create_feature(
 /// Gets a single feature by its numeric ID.
 pub async fn get_feature(
   State(state): State<AppState>,
-  Path((audit_id, feature_id)): Path<(String, i32)>,
+  Path((audit_id, feature_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
+  let feature_id = parse_path_id(&feature_id, TopicKind::Feature)?;
   println!("GET /api/v1/audits/{}/features/{}", audit_id, feature_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
@@ -1995,7 +2007,7 @@ pub async fn get_feature(
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let feature_topic = topic::new_feature_topic(feature_id);
+  let feature_topic = topic::new_feature_topic(feature_id as i32);
   let metadata = audit_data
     .topic_metadata
     .get(&feature_topic)
@@ -2013,9 +2025,10 @@ pub struct AddFeatureTopicRequest {
 /// Adds a documentation topic to a requirement.
 pub async fn add_requirement_documentation_topic(
   State(state): State<AppState>,
-  Path((audit_id, requirement_id)): Path<(String, i64)>,
+  Path((audit_id, requirement_id)): Path<(String, String)>,
   Json(payload): Json<AddFeatureTopicRequest>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
+  let requirement_id = parse_path_id(&requirement_id, TopicKind::Requirement)?;
   println!(
     "POST /api/v1/audits/{}/requirements/{}/documentation_topics",
     audit_id, requirement_id
@@ -2065,8 +2078,9 @@ pub async fn add_requirement_documentation_topic(
 /// Removes a documentation topic from a requirement.
 pub async fn remove_requirement_documentation_topic(
   State(state): State<AppState>,
-  Path((audit_id, requirement_id, topic_id)): Path<(String, i64, String)>,
+  Path((audit_id, requirement_id, topic_id)): Path<(String, String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
+  let requirement_id = parse_path_id(&requirement_id, TopicKind::Requirement)?;
   println!(
     "DELETE /api/v1/audits/{}/requirements/{}/documentation_topics/{}",
     audit_id, requirement_id, topic_id
@@ -2310,9 +2324,10 @@ pub struct CreateRequirementRequest {
 /// Creates a new requirement on a feature.
 pub async fn create_requirement(
   State(state): State<AppState>,
-  Path((audit_id, feature_id)): Path<(String, i64)>,
+  Path((audit_id, feature_id)): Path<(String, String)>,
   Json(payload): Json<CreateRequirementRequest>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
+  let feature_id = parse_path_id(&feature_id, TopicKind::Feature)?;
   println!(
     "POST /api/v1/audits/{}/features/{}/requirements",
     audit_id, feature_id
@@ -2389,8 +2404,10 @@ pub async fn create_requirement(
 /// Deletes a requirement from a feature.
 pub async fn delete_requirement(
   State(state): State<AppState>,
-  Path((audit_id, feature_id, requirement_id)): Path<(String, i64, i64)>,
+  Path((audit_id, feature_id, requirement_id)): Path<(String, String, String)>,
 ) -> Result<StatusCode, StatusCode> {
+  let feature_id = parse_path_id(&feature_id, TopicKind::Feature)?;
+  let requirement_id = parse_path_id(&requirement_id, TopicKind::Requirement)?;
   println!(
     "DELETE /api/v1/audits/{}/features/{}/requirements/{}",
     audit_id, feature_id, requirement_id
@@ -2434,8 +2451,9 @@ pub async fn delete_requirement(
 /// Gets a single requirement.
 pub async fn get_requirement(
   State(state): State<AppState>,
-  Path((audit_id, requirement_id)): Path<(String, i32)>,
+  Path((audit_id, requirement_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
+  let requirement_id = parse_path_id(&requirement_id, TopicKind::Requirement)?;
   println!(
     "GET /api/v1/audits/{}/requirements/{}",
     audit_id, requirement_id
@@ -2447,7 +2465,7 @@ pub async fn get_requirement(
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let req_topic = topic::new_requirement_topic(requirement_id);
+  let req_topic = topic::new_requirement_topic(requirement_id as i32);
   let metadata = audit_data
     .topic_metadata
     .get(&req_topic)
@@ -2468,7 +2486,7 @@ pub struct AddSourceTopicRequest {
 #[derive(Debug, Deserialize)]
 pub struct AddSourceFeatureLinkRequest {
   pub source_topic: String,
-  pub feature_id: i64,
+  pub feature_id: String,
 }
 
 /// POST /api/v1/audits/:audit_id/source_feature_links
@@ -2478,16 +2496,17 @@ pub async fn add_source_feature_link(
   Path(audit_id): Path<String>,
   Json(payload): Json<AddSourceFeatureLinkRequest>,
 ) -> Result<StatusCode, StatusCode> {
+  let feature_id = parse_path_id(&payload.feature_id, TopicKind::Feature)?;
   println!(
     "POST /api/v1/audits/{}/source_feature_links {} -> F{}",
-    audit_id, payload.source_topic, payload.feature_id
+    audit_id, payload.source_topic, feature_id
   );
 
   db::add_source_feature_link(
     &state.db,
     &audit_id,
     &payload.source_topic,
-    payload.feature_id,
+    feature_id,
   )
   .await
   .map_err(|e| {
@@ -2502,7 +2521,7 @@ pub async fn add_source_feature_link(
   let audit_data = ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
   let source_topic = topic::new_topic(&payload.source_topic);
-  let feature_topic = topic::new_feature_topic(payload.feature_id as i32);
+  let feature_topic = topic::new_feature_topic(feature_id as i32);
   let features = audit_data
     .source_feature_links
     .entry(source_topic)
@@ -2518,8 +2537,9 @@ pub async fn add_source_feature_link(
 /// Unlinks a source code member from a feature.
 pub async fn remove_source_feature_link(
   State(state): State<AppState>,
-  Path((audit_id, source_topic_id, feature_id)): Path<(String, String, i64)>,
+  Path((audit_id, source_topic_id, feature_id)): Path<(String, String, String)>,
 ) -> Result<StatusCode, StatusCode> {
+  let feature_id = parse_path_id(&feature_id, TopicKind::Feature)?;
   println!(
     "DELETE /api/v1/audits/{}/source_feature_links/{}/{}",
     audit_id, source_topic_id, feature_id
@@ -2585,8 +2605,9 @@ pub struct ReconciliationBehavior {
 /// to compare documented claims against observed implementation.
 pub async fn get_reconciliation(
   State(state): State<AppState>,
-  Path((audit_id, feature_id)): Path<(String, i32)>,
+  Path((audit_id, feature_id)): Path<(String, String)>,
 ) -> Result<Json<ReconciliationResponse>, StatusCode> {
+  let feature_id = parse_path_id(&feature_id, TopicKind::Feature)?;
   println!(
     "GET /api/v1/audits/{}/reconciliation/{}",
     audit_id, feature_id
@@ -2598,7 +2619,7 @@ pub async fn get_reconciliation(
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let feature_topic = topic::new_feature_topic(feature_id);
+  let feature_topic = topic::new_feature_topic(feature_id as i32);
 
   let feature = audit_data
     .features
@@ -2825,8 +2846,8 @@ pub async fn get_functional_semantics(
 
 #[derive(Debug, Deserialize)]
 pub struct CreateThreatFeatureLinkRequest {
-  pub threat_id: i64,
-  pub feature_id: i64,
+  pub threat_id: String,
+  pub feature_id: String,
   pub relation: String,
   pub severity: String,
 }
@@ -2851,6 +2872,9 @@ pub async fn create_threat_feature_link(
     audit_id, payload.threat_id, payload.feature_id
   );
 
+  let threat_id = parse_path_id(&payload.threat_id, TopicKind::AttackVector)?;
+  let feature_id = parse_path_id(&payload.feature_id, TopicKind::Feature)?;
+
   let relation = core::ThreatFeatureRelation::from_str(&payload.relation)
     .ok_or(StatusCode::BAD_REQUEST)?;
   let severity = core::ThreatSeverity::from_str(&payload.severity)
@@ -2859,8 +2883,8 @@ pub async fn create_threat_feature_link(
   let _row = db::create_threat_feature_link(
     &state.db,
     &audit_id,
-    payload.threat_id,
-    payload.feature_id,
+    threat_id,
+    feature_id,
     relation.as_str(),
     severity.as_str(),
   )
@@ -2870,8 +2894,8 @@ pub async fn create_threat_feature_link(
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
-  let threat_topic = topic::new_attack_vector_topic(payload.threat_id as i32);
-  let feature_topic = topic::new_feature_topic(payload.feature_id as i32);
+  let threat_topic = topic::new_attack_vector_topic(threat_id as i32);
+  let feature_topic = topic::new_feature_topic(feature_id as i32);
 
   // Update in-memory state
   {
@@ -2920,8 +2944,10 @@ pub async fn create_threat_feature_link(
 /// DELETE /api/v1/audits/:audit_id/impact_analysis/:threat_id/:feature_id
 pub async fn delete_threat_feature_link(
   State(state): State<AppState>,
-  Path((audit_id, threat_id, feature_id)): Path<(String, i64, i64)>,
+  Path((audit_id, threat_id, feature_id)): Path<(String, String, String)>,
 ) -> Result<StatusCode, StatusCode> {
+  let threat_id = parse_path_id(&threat_id, TopicKind::AttackVector)?;
+  let feature_id = parse_path_id(&feature_id, TopicKind::Feature)?;
   println!(
     "DELETE /api/v1/audits/{}/impact_analysis/{}/{}",
     audit_id, threat_id, feature_id
@@ -3243,8 +3269,9 @@ pub async fn create_behavior(
 /// DELETE /api/v1/audits/:audit_id/behaviors/:behavior_id
 pub async fn delete_behavior(
   State(state): State<AppState>,
-  Path((audit_id, behavior_id)): Path<(String, i64)>,
+  Path((audit_id, behavior_id)): Path<(String, String)>,
 ) -> Result<StatusCode, StatusCode> {
+  let behavior_id = parse_path_id(&behavior_id, TopicKind::Behavior)?;
   println!(
     "DELETE /api/v1/audits/{}/behaviors/{}",
     audit_id, behavior_id
@@ -3278,8 +3305,9 @@ pub async fn delete_behavior(
 /// GET /api/v1/audits/:audit_id/behaviors/:behavior_id
 pub async fn get_behavior(
   State(state): State<AppState>,
-  Path((audit_id, behavior_id)): Path<(String, i32)>,
+  Path((audit_id, behavior_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
+  let behavior_id = parse_path_id(&behavior_id, TopicKind::Behavior)?;
   println!(
     "GET /api/v1/audits/{}/behaviors/{}",
     audit_id, behavior_id
@@ -3291,7 +3319,7 @@ pub async fn get_behavior(
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let beh_topic = topic::new_behavior_topic(behavior_id);
+  let beh_topic = topic::new_behavior_topic(behavior_id as i32);
   let metadata = audit_data
     .topic_metadata
     .get(&beh_topic)
@@ -3401,8 +3429,9 @@ pub async fn create_threat(
 /// DELETE /api/v1/audits/:audit_id/threats/:threat_id
 pub async fn delete_threat(
   State(state): State<AppState>,
-  Path((audit_id, threat_id)): Path<(String, i64)>,
+  Path((audit_id, threat_id)): Path<(String, String)>,
 ) -> Result<StatusCode, StatusCode> {
+  let threat_id = parse_path_id(&threat_id, TopicKind::AttackVector)?;
   println!(
     "DELETE /api/v1/audits/{}/threats/{}",
     audit_id, threat_id
@@ -3445,8 +3474,9 @@ pub async fn delete_threat(
 /// GET /api/v1/audits/:audit_id/threats/:threat_id
 pub async fn get_threat(
   State(state): State<AppState>,
-  Path((audit_id, threat_id)): Path<(String, i32)>,
+  Path((audit_id, threat_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
+  let threat_id = parse_path_id(&threat_id, TopicKind::AttackVector)?;
   println!("GET /api/v1/audits/{}/threats/{}", audit_id, threat_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
@@ -3455,7 +3485,7 @@ pub async fn get_threat(
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let threat_topic = topic::new_attack_vector_topic(threat_id);
+  let threat_topic = topic::new_attack_vector_topic(threat_id as i32);
   let metadata = audit_data
     .topic_metadata
     .get(&threat_topic)
@@ -3477,9 +3507,10 @@ pub struct CreateInvariantRequest {
 /// POST /api/v1/audits/:audit_id/threats/:threat_id/invariants
 pub async fn create_invariant(
   State(state): State<AppState>,
-  Path((audit_id, threat_id)): Path<(String, i64)>,
+  Path((audit_id, threat_id)): Path<(String, String)>,
   Json(payload): Json<CreateInvariantRequest>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
+  let threat_id = parse_path_id(&threat_id, TopicKind::AttackVector)?;
   println!(
     "POST /api/v1/audits/{}/threats/{}/invariants",
     audit_id, threat_id
@@ -3554,8 +3585,10 @@ pub async fn create_invariant(
 /// DELETE /api/v1/audits/:audit_id/threats/:threat_id/invariants/:invariant_id
 pub async fn delete_invariant(
   State(state): State<AppState>,
-  Path((audit_id, threat_id, invariant_id)): Path<(String, i64, i64)>,
+  Path((audit_id, threat_id, invariant_id)): Path<(String, String, String)>,
 ) -> Result<StatusCode, StatusCode> {
+  let threat_id = parse_path_id(&threat_id, TopicKind::AttackVector)?;
+  let invariant_id = parse_path_id(&invariant_id, TopicKind::Invariant)?;
   println!(
     "DELETE /api/v1/audits/{}/threats/{}/invariants/{}",
     audit_id, threat_id, invariant_id
@@ -3596,8 +3629,9 @@ pub async fn delete_invariant(
 /// GET /api/v1/audits/:audit_id/invariants/:invariant_id
 pub async fn get_invariant(
   State(state): State<AppState>,
-  Path((audit_id, invariant_id)): Path<(String, i32)>,
+  Path((audit_id, invariant_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
+  let invariant_id = parse_path_id(&invariant_id, TopicKind::Invariant)?;
   println!(
     "GET /api/v1/audits/{}/invariants/{}",
     audit_id, invariant_id
@@ -3609,7 +3643,7 @@ pub async fn get_invariant(
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let inv_topic = topic::new_invariant_topic(invariant_id);
+  let inv_topic = topic::new_invariant_topic(invariant_id as i32);
   let metadata = audit_data
     .topic_metadata
     .get(&inv_topic)
@@ -3621,9 +3655,10 @@ pub async fn get_invariant(
 /// POST /api/v1/audits/:audit_id/invariants/:invariant_id/source_topics
 pub async fn add_invariant_source_topic(
   State(state): State<AppState>,
-  Path((audit_id, invariant_id)): Path<(String, i64)>,
+  Path((audit_id, invariant_id)): Path<(String, String)>,
   Json(payload): Json<AddSourceTopicRequest>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
+  let invariant_id = parse_path_id(&invariant_id, TopicKind::Invariant)?;
   println!(
     "POST /api/v1/audits/{}/invariants/{}/source_topics",
     audit_id, invariant_id
@@ -3663,8 +3698,9 @@ pub async fn add_invariant_source_topic(
 /// DELETE /api/v1/audits/:audit_id/invariants/:invariant_id/source_topics/:topic_id
 pub async fn remove_invariant_source_topic(
   State(state): State<AppState>,
-  Path((audit_id, invariant_id, topic_id)): Path<(String, i64, String)>,
+  Path((audit_id, invariant_id, topic_id)): Path<(String, String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
+  let invariant_id = parse_path_id(&invariant_id, TopicKind::Invariant)?;
   println!(
     "DELETE /api/v1/audits/{}/invariants/{}/source_topics/{}",
     audit_id, invariant_id, topic_id

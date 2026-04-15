@@ -343,7 +343,7 @@ pub fn highlighted_name(metadata: &TopicMetadata) -> String {
     },
     TopicMetadata::CommentTopic { .. } => "<span>Comment</span>".to_string(),
     TopicMetadata::FeatureTopic { name, .. } => {
-      format!("<span class=\"keyword\">feat</span>{}", html_escape(name))
+      format!("<span class=\"keyword\">feat</span> {}", html_escape(name))
     }
     TopicMetadata::RequirementTopic { description, .. } => {
       format!(
