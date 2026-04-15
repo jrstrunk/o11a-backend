@@ -61,6 +61,31 @@ impl Topic {
   }
 }
 
+/// Parse a topic ID string (e.g. "F7", "R12", "B3") and extract the numeric
+/// database ID, validating the expected kind. Also accepts bare numeric IDs
+/// for backward compatibility (e.g. "7" is treated the same as "F7" when
+/// the expected kind is Feature).
+pub fn parse_topic_id(
+  input: &str,
+  expected_kind: TopicKind,
+) -> Result<i64, String> {
+  let topic = Topic {
+    id: input.to_string(),
+  };
+  match topic.kind() {
+    Some(kind) if kind == expected_kind => topic
+      .numeric_id()
+      .ok_or_else(|| format!("Invalid numeric ID in topic: {}", input)),
+    Some(kind) => Err(format!(
+      "Expected {:?} topic but got {:?}: {}",
+      expected_kind, kind, input
+    )),
+    None => input
+      .parse::<i64>()
+      .map_err(|_| format!("Invalid topic ID: {}", input)),
+  }
+}
+
 pub fn new_topic(id: &str) -> Topic {
   Topic { id: id.to_string() }
 }

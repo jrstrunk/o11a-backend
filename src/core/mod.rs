@@ -2126,8 +2126,8 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
       .collect();
   }
 
-  // Build context for FeatureTopics: feature + requirements + threats as scope refs,
-  // invariants as nested refs indented under their parent threats
+  // Build context for FeatureTopics: feature + requirements + behaviors as scope refs,
+  // with threats/invariants as nested refs
   for (feature_topic, metadata) in &audit_data.topic_metadata {
     if !matches!(metadata, TopicMetadata::FeatureTopic { .. }) {
       continue;
@@ -2147,6 +2147,28 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         sort_key,
       });
     }
+
+    // Find behaviors linked to this feature via source_feature_links:
+    // member_topic -> [feature_topics], then find BehaviorTopics for those members
+    let linked_members: Vec<topic::Topic> = audit_data
+      .source_feature_links
+      .iter()
+      .filter(|(_, fts)| fts.contains(feature_topic))
+      .map(|(mt, _)| mt.clone())
+      .collect();
+
+    for (beh_topic, beh_metadata) in &audit_data.topic_metadata {
+      if let TopicMetadata::BehaviorTopic { member_topic, .. } = beh_metadata {
+        if linked_members.contains(member_topic) {
+          let sort_key = beh_topic.numeric_id().map(|id| id as usize);
+          scope_references.push(Reference::ProjectReference {
+            reference_topic: beh_topic.clone(),
+            sort_key,
+          });
+        }
+      }
+    }
+
     let context = vec![SourceContext {
       scope: feature_topic.clone(),
       sort_key: Some(0),
