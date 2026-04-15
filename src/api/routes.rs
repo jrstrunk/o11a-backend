@@ -152,16 +152,6 @@ pub fn create_router(state: AppState) -> Router {
       get(handlers::get_requirement),
     )
     // ============================================
-    // Source-to-feature link routes
-    // ============================================
-    .route(
-      "/api/v1/audits/:audit_id/source_feature_links",
-      post(handlers::add_source_feature_link),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/source_feature_links/:source_topic/:feature_id",
-      delete(handlers::remove_source_feature_link),
-    )
     // ============================================
     // Reconciliation routes
     // ============================================

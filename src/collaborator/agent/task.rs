@@ -218,7 +218,6 @@ async fn parse_requirements_response(
         core::TopicMetadata::RequirementTopic {
           topic: req_topic.clone(),
           description: raw_req.description,
-          feature_topic: topic::new_topic(""),
           section_topic: Some(section_topic.clone()),
           author_id: AUTHOR_AGENT_LARGE,
           created_at: String::new(),
@@ -769,27 +768,31 @@ const SYNTHESIZE_FEATURES_PROMPT: &str = "Below are two lists from a smart contr
 by documentation section. Each requirement has an R-prefixed topic ID.\n\
 2. **Behaviors** — what the source code actually does, grouped by code member. \
 Each behavior has a B-prefixed topic ID.\n\n\
-Your task is to **synthesize features** by grouping related requirements and \
-behaviors together. A feature represents a coherent capability or area of the \
-system where documented claims and implemented behaviors overlap.\n\n\
+Your task is to **synthesize features** that represent the system's \
+capabilities. Each feature connects the documented intent (requirements) \
+with the implemented reality (behaviors) for a coherent area of \
+functionality.\n\n\
 For each feature, provide:\n\
-- `name`: a short, descriptive feature name\n\
+- `name`: a short, descriptive feature name (behavioral, not technical)\n\
 - `description`: a summary synthesized from both the documented intent and \
 the implemented reality\n\
-- `requirement_topics`: array of R-prefixed topic IDs grouped into this feature\n\
-- `behavior_topics`: array of B-prefixed topic IDs grouped into this feature\n\n\
+- `requirement_topics`: array of R-prefixed topic IDs that apply to this feature\n\
+- `behavior_topics`: array of B-prefixed topic IDs that apply to this feature\n\n\
 Rules:\n\
-- Group requirements and behaviors that describe the same capability together.\n\
-- A requirement or behavior may belong to at most one feature.\n\
-- Requirements with no matching behaviors should still form a feature — this \
-represents **unimplemented specification** (the docs claim something the code \
-doesn't do). Set behavior_topics to an empty array.\n\
-- Behaviors with no matching requirements should still form a feature — this \
-represents **undocumented implementation** (the code does something the docs \
-don't describe). Set requirement_topics to an empty array.\n\
-- Do not force weak matches. It's better to surface an orphan than to create \
-a misleading grouping.\n\
-- Feature names should be behavioral (what the system does), not technical.\n\
+- Link each requirement and behavior to every feature it genuinely \
+constrains or participates in. Cross-cutting concerns like access control, \
+pausing, fee calculations, and validation often apply to multiple features — \
+include them in each relevant feature.\n\
+- A feature should represent a coherent capability. If a requirement applies \
+to the feature's functionality, include it — even if it also appears in \
+other features.\n\
+- Every requirement and behavior must appear in at least one feature. \
+If a requirement has no matching behaviors, it still belongs to a feature \
+(unimplemented specification). If a behavior has no matching requirements, \
+it still belongs to a feature (undocumented implementation).\n\
+- Do not force weak matches. It is better to leave a requirement or behavior \
+in a single feature than to artificially spread it across features where \
+the connection is tenuous.\n\
 - If no features can be synthesized, return an empty array `[]`.\n\
 - Return ONLY a JSON array of feature objects, no other text.\n\n";
 
@@ -806,10 +809,10 @@ struct LLMSynthesizedFeature {
 pub struct SynthesizedFeatures {
   pub features: BTreeMap<topic::Topic, Feature>,
   pub topic_metadata: BTreeMap<topic::Topic, core::TopicMetadata>,
-  /// Which requirements belong to which feature (R-topic → F-topic)
-  pub requirement_to_feature: BTreeMap<topic::Topic, topic::Topic>,
-  /// Which behaviors belong to which feature (B-topic → F-topic)
-  pub behavior_to_feature: BTreeMap<topic::Topic, topic::Topic>,
+  /// Feature → requirement links (F-topic → [R-topics])
+  pub feature_requirement_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Feature → behavior links (F-topic → [B-topics])
+  pub feature_behavior_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
 }
 
 /// Render all requirements grouped by section for the reconciliation prompt.
@@ -967,8 +970,8 @@ pub async fn synthesize_features(
 
   let mut features = BTreeMap::new();
   let mut topic_metadata = BTreeMap::new();
-  let mut requirement_to_feature = BTreeMap::new();
-  let mut behavior_to_feature = BTreeMap::new();
+  let mut feature_requirement_links = BTreeMap::new();
+  let mut feature_behavior_links = BTreeMap::new();
 
   for (i, raw) in raw_features.into_iter().enumerate() {
     let feature_topic = topic::new_feature_topic((i + 1) as i32);
@@ -985,12 +988,9 @@ pub async fn synthesize_features(
       .map(|id| topic::new_topic(&id))
       .collect();
 
-    for rt in &requirement_topics {
-      requirement_to_feature.insert(rt.clone(), feature_topic.clone());
-    }
-    for bt in &behavior_topics {
-      behavior_to_feature.insert(bt.clone(), feature_topic.clone());
-    }
+    feature_requirement_links
+      .insert(feature_topic.clone(), requirement_topics.clone());
+    feature_behavior_links.insert(feature_topic.clone(), behavior_topics);
 
     topic_metadata.insert(
       feature_topic.clone(),
@@ -1003,14 +1003,14 @@ pub async fn synthesize_features(
       },
     );
 
-    features.insert(feature_topic, Feature { requirement_topics });
+    features.insert(feature_topic, Feature);
   }
 
   Ok(SynthesizedFeatures {
     features,
     topic_metadata,
-    requirement_to_feature,
-    behavior_to_feature,
+    feature_requirement_links,
+    feature_behavior_links,
   })
 }
 

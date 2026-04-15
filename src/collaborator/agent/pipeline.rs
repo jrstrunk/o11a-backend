@@ -100,10 +100,8 @@ pub async fn build_requirements(
         _ => continue,
       };
 
-      // Create requirement without a feature (feature_id = NULL via 0 sentinel)
-      // The feature association will be established during reconciliation (Phase 4)
       let req_row =
-        db::create_requirement(&state.db, 0, req_desc, AUTHOR_AGENT_LARGE)
+        db::create_requirement(&state.db, req_desc, AUTHOR_AGENT_LARGE)
           .await
           .map_err(|e| format!("create_requirement failed: {}", e))?;
 
@@ -147,7 +145,8 @@ pub async fn build_requirements(
   let req_count = parsed.requirements.len();
   audit_data.requirements = parsed.requirements;
   audit_data.topic_metadata.extend(parsed.topic_metadata);
-  audit_data.source_feature_links.clear();
+  audit_data.feature_requirement_links.clear();
+  audit_data.feature_behavior_links.clear();
   core::rebuild_feature_context(audit_data);
 
   println!("  Persisted {} requirements to database", req_count);
@@ -189,11 +188,15 @@ pub async fn synthesize_features(
       .topic_metadata
       .retain(|_, m| !matches!(m, core::TopicMetadata::FeatureTopic { .. }));
     audit_data.features.clear();
-    audit_data.source_feature_links.clear();
+      audit_data.feature_requirement_links.clear();
+    audit_data.feature_behavior_links.clear();
   }
 
+  // Delete old links
+  let _ = db::delete_all_feature_links_for_audit(&state.db, audit_id).await;
+
   // Persist features to database
-  for (feat_topic, feature) in &synthesized.features {
+  for feat_topic in synthesized.features.keys() {
     let (name, description) = match synthesized.topic_metadata.get(feat_topic) {
       Some(core::TopicMetadata::FeatureTopic {
         name, description, ..
@@ -211,53 +214,30 @@ pub async fn synthesize_features(
     .await
     .map_err(|e| format!("create_feature failed: {}", e))?;
 
-    // Update requirement feature_id assignments
-    for rt in &feature.requirement_topics {
-      if let Some(req_id) = rt.numeric_id() {
-        let _ =
-          sqlx::query("UPDATE requirements SET feature_id = ? WHERE id = ?")
-            .bind(row.id)
-            .bind(req_id)
-            .execute(&state.db)
-            .await;
+    // Persist feature-requirement links
+    if let Some(req_topics) = synthesized.feature_requirement_links.get(feat_topic) {
+      for rt in req_topics {
+        if let Some(req_id) = rt.numeric_id() {
+          let _ = db::add_feature_requirement_link(
+            &state.db, audit_id, row.id, req_id,
+          ).await;
+        }
       }
     }
 
-    // Derive source_feature_links from behaviors' member_topics
-    // Collect member topics while holding the lock, then persist after releasing
-    let member_topics_for_feature: Vec<String> = {
-      let ctx = state.data_context.lock().map_err(|e| {
-        format!("Mutex poisoned in synthesize_features (links): {}", e)
-      })?;
-      let audit_data = ctx
-        .get_audit(audit_id)
-        .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
-
-      synthesized
-        .behavior_to_feature
-        .iter()
-        .filter(|(_, ft)| *ft == feat_topic)
-        .filter_map(|(bt, _)| {
-          if let Some(core::TopicMetadata::BehaviorTopic {
-            member_topic, ..
-          }) = audit_data.topic_metadata.get(bt)
-          {
-            Some(member_topic.id().to_string())
-          } else {
-            None
-          }
-        })
-        .collect()
-    };
-
-    for mt_id in &member_topics_for_feature {
-      let _ =
-        db::add_source_feature_link(&state.db, audit_id, mt_id, row.id).await;
+    // Persist feature-behavior links
+    if let Some(beh_topics) = synthesized.feature_behavior_links.get(feat_topic) {
+      for bt in beh_topics {
+        if let Some(beh_id) = bt.numeric_id() {
+          let _ = db::add_feature_behavior_link(
+            &state.db, audit_id, row.id, beh_id,
+          ).await;
+        }
+      }
     }
   }
 
-  // Rebuild in-memory state with the real DB IDs
-  // Reload features from DB to get the real IDs
+  // Rebuild in-memory state
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
       format!("Mutex poisoned in synthesize_features (store): {}", e)
@@ -266,20 +246,12 @@ pub async fn synthesize_features(
       .get_audit_mut(audit_id)
       .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
 
-    // Store the synthesized features (with temporary topic IDs for now)
     let feature_count = synthesized.features.len();
     audit_data.topic_metadata.extend(synthesized.topic_metadata);
     audit_data.features = synthesized.features;
+    audit_data.feature_requirement_links = synthesized.feature_requirement_links;
+    audit_data.feature_behavior_links = synthesized.feature_behavior_links;
 
-    // Update RequirementTopic.feature_topic for assigned requirements
-    for (rt, ft) in &synthesized.requirement_to_feature {
-      if let Some(core::TopicMetadata::RequirementTopic {
-        feature_topic, ..
-      }) = audit_data.topic_metadata.get_mut(rt)
-      {
-        *feature_topic = ft.clone();
-      }
-    }
 
     core::rebuild_feature_context(audit_data);
     println!("  Persisted {} features to database", feature_count);

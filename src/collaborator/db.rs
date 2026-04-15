@@ -92,13 +92,6 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .execute(pool)
   .await?;
 
-  // Migration: add author_id to features if missing
-  let _ = sqlx::query(
-    "ALTER TABLE features ADD COLUMN author_id INTEGER NOT NULL DEFAULT 0",
-  )
-  .execute(pool)
-  .await;
-
   // Feature-topic associations
   sqlx::query(
     r#"
@@ -120,13 +113,13 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .execute(pool)
   .await?;
 
-  // Requirements table
+  // Requirements table (links to features are in feature_requirement_links)
   sqlx::query(
     r#"
         CREATE TABLE IF NOT EXISTS requirements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            feature_id INTEGER NOT NULL,
             description TEXT NOT NULL,
+            section_topic TEXT,
             author_id INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
@@ -134,26 +127,6 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   )
   .execute(pool)
   .await?;
-
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_requirements_feature ON requirements(feature_id)",
-  )
-  .execute(pool)
-  .await?;
-
-  // Migration: add author_id to requirements if missing
-  let _ = sqlx::query(
-    "ALTER TABLE requirements ADD COLUMN author_id INTEGER NOT NULL DEFAULT 0",
-  )
-  .execute(pool)
-  .await;
-
-  // Migration: add section_topic to requirements if missing
-  let _ = sqlx::query(
-    "ALTER TABLE requirements ADD COLUMN section_topic TEXT",
-  )
-  .execute(pool)
-  .await;
 
   // Requirement source topic associations
   sqlx::query(
@@ -205,7 +178,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             description TEXT NOT NULL,
             author_id INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            severity TEXT
+            severity TEXT NOT NULL DEFAULT 'medium'
         )
         "#,
   )
@@ -287,13 +260,6 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   )
   .execute(pool)
   .await?;
-
-  // Migration: add member_topic to behaviors if missing
-  let _ = sqlx::query(
-    "ALTER TABLE behaviors ADD COLUMN member_topic TEXT NOT NULL DEFAULT ''",
-  )
-  .execute(pool)
-  .await;
 
   // Subject properties table (functional purpose and semantics)
   sqlx::query(
@@ -445,15 +411,14 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .execute(pool)
   .await?;
 
-  // Source-to-feature links table
   sqlx::query(
     r#"
-        CREATE TABLE IF NOT EXISTS source_feature_links (
+        CREATE TABLE IF NOT EXISTS feature_requirement_links (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             audit_id TEXT NOT NULL,
-            source_topic TEXT NOT NULL,
             feature_id INTEGER NOT NULL,
-            UNIQUE(audit_id, source_topic, feature_id)
+            requirement_id INTEGER NOT NULL,
+            UNIQUE(feature_id, requirement_id)
         )
         "#,
   )
@@ -461,30 +426,30 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .await?;
 
   sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_source_feature_links_audit ON source_feature_links(audit_id)",
+    "CREATE INDEX IF NOT EXISTS idx_frl_audit ON feature_requirement_links(audit_id)",
   )
   .execute(pool)
   .await?;
 
   sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_source_feature_links_source ON source_feature_links(source_topic)",
+    r#"
+        CREATE TABLE IF NOT EXISTS feature_behavior_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audit_id TEXT NOT NULL,
+            feature_id INTEGER NOT NULL,
+            behavior_id INTEGER NOT NULL,
+            UNIQUE(feature_id, behavior_id)
+        )
+        "#,
   )
   .execute(pool)
   .await?;
 
-  // Migration: add severity to threats if missing
-  let _ = sqlx::query(
-    "ALTER TABLE threats ADD COLUMN severity TEXT NOT NULL DEFAULT 'medium'",
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_fbl_audit ON feature_behavior_links(audit_id)",
   )
   .execute(pool)
-  .await;
-
-  // Migration: add severity to invariants if missing
-  let _ = sqlx::query(
-    "ALTER TABLE invariants ADD COLUMN severity TEXT NOT NULL DEFAULT 'medium'",
-  )
-  .execute(pool)
-  .await;
+  .await?;
 
   Ok(())
 }
@@ -890,13 +855,11 @@ pub async fn delete_all_features_for_audit(
   pool: &SqlitePool,
   audit_id: &str,
 ) -> Result<(), sqlx::Error> {
-  // Delete requirement documentation topic associations
+  // Delete requirement documentation topic associations via link table
   sqlx::query(
     r#"
         DELETE FROM requirement_documentation_topics WHERE requirement_id IN (
-            SELECT r.id FROM requirements r
-            JOIN features f ON r.feature_id = f.id
-            WHERE f.audit_id = ?
+            SELECT requirement_id FROM feature_requirement_links WHERE audit_id = ?
         )
         "#,
   )
@@ -904,23 +867,20 @@ pub async fn delete_all_features_for_audit(
   .execute(pool)
   .await?;
 
-  // Delete source-to-feature links
-  sqlx::query("DELETE FROM source_feature_links WHERE audit_id = ?")
-    .bind(audit_id)
-    .execute(pool)
-    .await?;
-
-  // Delete requirements
+  // Delete requirements via link table
   sqlx::query(
     r#"
-        DELETE FROM requirements WHERE feature_id IN (
-            SELECT id FROM features WHERE audit_id = ?
+        DELETE FROM requirements WHERE id IN (
+            SELECT requirement_id FROM feature_requirement_links WHERE audit_id = ?
         )
         "#,
   )
   .bind(audit_id)
   .execute(pool)
   .await?;
+
+  // Delete feature-requirement and feature-behavior links
+  delete_all_feature_links_for_audit(pool, audit_id).await?;
 
   // Delete feature topic associations
   sqlx::query(
@@ -982,13 +942,6 @@ pub async fn load_all_features(
     .fetch_all(pool)
     .await?;
 
-  // Group requirements by feature_id
-  let mut reqs_by_feature: std::collections::HashMap<i64, Vec<&RequirementRow>> =
-    std::collections::HashMap::new();
-  for r in &requirements {
-    reqs_by_feature.entry(r.feature_id).or_default().push(r);
-  }
-
   // Group requirement documentation topics by requirement_id
   let mut doc_by_req: std::collections::HashMap<i64, Vec<&RequirementDocumentationTopicRow>> =
     std::collections::HashMap::new();
@@ -1012,45 +965,23 @@ pub async fn load_all_features(
 
   let count = features.len();
 
+  // Build a mapping from requirement_id -> audit_id via feature_requirement_links
+  // so we can load requirements into the correct audit
+  let mut req_audit_map: std::collections::HashMap<i64, String> =
+    std::collections::HashMap::new();
+  let frl_rows_for_mapping = sqlx::query_as::<_, FeatureRequirementLinkRow>(
+    "SELECT * FROM feature_requirement_links",
+  )
+  .fetch_all(pool)
+  .await?;
+  for frl in &frl_rows_for_mapping {
+    req_audit_map.insert(frl.requirement_id, frl.audit_id.clone());
+  }
+
+  // Load features
   for row in &features {
     if let Some(audit_data) = data_context.get_audit_mut(&row.audit_id) {
       let feature_topic = topic::new_feature_topic(row.id as i32);
-
-      // Load requirements for this feature
-      let mut requirement_topics = Vec::new();
-      if let Some(reqs) = reqs_by_feature.get(&row.id) {
-        for req in reqs {
-          let req_topic = topic::new_requirement_topic(req.id as i32);
-          requirement_topics.push(req_topic.clone());
-
-          let mut documentation_topics = Vec::new();
-          if let Some(docs) = doc_by_req.get(&req.id) {
-            for d in docs {
-              documentation_topics.push(topic::new_topic(&d.topic_id));
-            }
-          }
-
-          audit_data.topic_metadata.insert(
-            req_topic.clone(),
-            core::TopicMetadata::RequirementTopic {
-              topic: req_topic.clone(),
-              description: req.description.clone(),
-              feature_topic: feature_topic.clone(),
-              section_topic: req.section_topic.as_ref().map(|s| topic::new_topic(s)),
-              author_id: req.author_id,
-              created_at: req.created_at.clone(),
-            },
-          );
-
-          audit_data.requirements.insert(
-            req_topic,
-            Requirement {
-              documentation_topics,
-            },
-          );
-        }
-      }
-
       audit_data.topic_metadata.insert(
         feature_topic.clone(),
         core::TopicMetadata::FeatureTopic {
@@ -1061,11 +992,41 @@ pub async fn load_all_features(
           created_at: row.created_at.clone(),
         },
       );
+      audit_data.features.insert(feature_topic, Feature);
+    }
+  }
 
-      audit_data.features.insert(
-        feature_topic,
-        Feature {
-          requirement_topics,
+  // Load requirements (independent of features — links come from feature_requirement_links)
+  for req in &requirements {
+    let audit_id = match req_audit_map.get(&req.id) {
+      Some(id) => id.as_str(),
+      None => continue,
+    };
+    if let Some(audit_data) = data_context.get_audit_mut(audit_id) {
+      let req_topic = topic::new_requirement_topic(req.id as i32);
+
+      let mut documentation_topics = Vec::new();
+      if let Some(docs) = doc_by_req.get(&req.id) {
+        for d in docs {
+          documentation_topics.push(topic::new_topic(&d.topic_id));
+        }
+      }
+
+      audit_data.topic_metadata.insert(
+        req_topic.clone(),
+        core::TopicMetadata::RequirementTopic {
+          topic: req_topic.clone(),
+          description: req.description.clone(),
+          section_topic: req.section_topic.as_ref().map(|s| topic::new_topic(s)),
+          author_id: req.author_id,
+          created_at: req.created_at.clone(),
+        },
+      );
+
+      audit_data.requirements.insert(
+        req_topic,
+        Requirement {
+          documentation_topics,
         },
       );
     }
@@ -1139,24 +1100,44 @@ pub async fn load_all_features(
     }
   }
 
-  // Load source-to-feature links
-  let source_feature_rows =
-    sqlx::query_as::<_, SourceFeatureLinkRow>(
-      "SELECT * FROM source_feature_links",
-    )
-    .fetch_all(pool)
-    .await?;
+  // Load feature-requirement links
+  let frl_rows = sqlx::query_as::<_, FeatureRequirementLinkRow>(
+    "SELECT * FROM feature_requirement_links",
+  )
+  .fetch_all(pool)
+  .await?;
 
-  for row in &source_feature_rows {
+  for row in &frl_rows {
     if let Some(audit_data) = data_context.get_audit_mut(&row.audit_id) {
-      let source_topic = topic::new_topic(&row.source_topic);
       let feature_topic = topic::new_feature_topic(row.feature_id as i32);
-      let features = audit_data
-        .source_feature_links
-        .entry(source_topic)
+      let req_topic = topic::new_requirement_topic(row.requirement_id as i32);
+      let reqs = audit_data
+        .feature_requirement_links
+        .entry(feature_topic)
         .or_default();
-      if !features.contains(&feature_topic) {
-        features.push(feature_topic);
+      if !reqs.contains(&req_topic) {
+        reqs.push(req_topic);
+      }
+    }
+  }
+
+  // Load feature-behavior links
+  let fbl_rows = sqlx::query_as::<_, FeatureBehaviorLinkRow>(
+    "SELECT * FROM feature_behavior_links",
+  )
+  .fetch_all(pool)
+  .await?;
+
+  for row in &fbl_rows {
+    if let Some(audit_data) = data_context.get_audit_mut(&row.audit_id) {
+      let feature_topic = topic::new_feature_topic(row.feature_id as i32);
+      let beh_topic = topic::new_behavior_topic(row.behavior_id as i32);
+      let behs = audit_data
+        .feature_behavior_links
+        .entry(feature_topic)
+        .or_default();
+      if !behs.contains(&beh_topic) {
+        behs.push(beh_topic);
       }
     }
   }
@@ -1393,64 +1374,101 @@ pub async fn delete_all_semantic_links(
   Ok(())
 }
 
-// ============================================================================
-// Source-to-feature link operations
-// ============================================================================
-
-/// Database row for a source-to-feature link
 #[derive(Debug, sqlx::FromRow)]
-pub struct SourceFeatureLinkRow {
-  pub id: i64,
-  pub audit_id: String,
-  pub source_topic: String,
-  pub feature_id: i64,
+struct FeatureRequirementLinkRow {
+  #[allow(dead_code)]
+  id: i64,
+  audit_id: String,
+  feature_id: i64,
+  requirement_id: i64,
 }
 
-/// Adds a source-to-feature link
-pub async fn add_source_feature_link(
+#[derive(Debug, sqlx::FromRow)]
+struct FeatureBehaviorLinkRow {
+  #[allow(dead_code)]
+  id: i64,
+  audit_id: String,
+  feature_id: i64,
+  behavior_id: i64,
+}
+
+// ============================================================================
+// Feature-requirement and feature-behavior link operations
+// ============================================================================
+
+pub async fn add_feature_requirement_link(
   pool: &SqlitePool,
   audit_id: &str,
-  source_topic: &str,
   feature_id: i64,
+  requirement_id: i64,
 ) -> Result<(), sqlx::Error> {
   sqlx::query(
-    r#"
-        INSERT OR IGNORE INTO source_feature_links (audit_id, source_topic, feature_id)
-        VALUES (?, ?, ?)
-        "#,
+    "INSERT OR IGNORE INTO feature_requirement_links (audit_id, feature_id, requirement_id) VALUES (?, ?, ?)",
   )
   .bind(audit_id)
-  .bind(source_topic)
   .bind(feature_id)
+  .bind(requirement_id)
   .execute(pool)
   .await?;
   Ok(())
 }
 
-/// Removes a source-to-feature link
-pub async fn remove_source_feature_link(
+pub async fn remove_feature_requirement_link(
   pool: &SqlitePool,
-  audit_id: &str,
-  source_topic: &str,
   feature_id: i64,
+  requirement_id: i64,
 ) -> Result<(), sqlx::Error> {
   sqlx::query(
-    "DELETE FROM source_feature_links WHERE audit_id = ? AND source_topic = ? AND feature_id = ?",
+    "DELETE FROM feature_requirement_links WHERE feature_id = ? AND requirement_id = ?",
   )
-  .bind(audit_id)
-  .bind(source_topic)
   .bind(feature_id)
+  .bind(requirement_id)
   .execute(pool)
   .await?;
   Ok(())
 }
 
-/// Deletes all source-to-feature links for an audit
-pub async fn delete_all_source_feature_links(
+pub async fn add_feature_behavior_link(
+  pool: &SqlitePool,
+  audit_id: &str,
+  feature_id: i64,
+  behavior_id: i64,
+) -> Result<(), sqlx::Error> {
+  sqlx::query(
+    "INSERT OR IGNORE INTO feature_behavior_links (audit_id, feature_id, behavior_id) VALUES (?, ?, ?)",
+  )
+  .bind(audit_id)
+  .bind(feature_id)
+  .bind(behavior_id)
+  .execute(pool)
+  .await?;
+  Ok(())
+}
+
+pub async fn remove_feature_behavior_link(
+  pool: &SqlitePool,
+  feature_id: i64,
+  behavior_id: i64,
+) -> Result<(), sqlx::Error> {
+  sqlx::query(
+    "DELETE FROM feature_behavior_links WHERE feature_id = ? AND behavior_id = ?",
+  )
+  .bind(feature_id)
+  .bind(behavior_id)
+  .execute(pool)
+  .await?;
+  Ok(())
+}
+
+pub async fn delete_all_feature_links_for_audit(
   pool: &SqlitePool,
   audit_id: &str,
 ) -> Result<(), sqlx::Error> {
-  sqlx::query("DELETE FROM source_feature_links WHERE audit_id = ?")
+  sqlx::query("DELETE FROM feature_requirement_links WHERE audit_id = ?")
+    .bind(audit_id)
+    .execute(pool)
+    .await?;
+  sqlx::query("DELETE FROM feature_behavior_links WHERE audit_id = ?")
     .bind(audit_id)
     .execute(pool)
     .await?;
@@ -1793,7 +1811,6 @@ pub async fn delete_behavior(
 #[derive(Debug, sqlx::FromRow)]
 pub struct RequirementRow {
   pub id: i64,
-  pub feature_id: i64, // 0 means unattached (no feature yet)
   pub section_topic: Option<String>,
   pub description: String,
   pub author_id: i64,
@@ -1803,17 +1820,15 @@ pub struct RequirementRow {
 /// Creates a new requirement and returns the row
 pub async fn create_requirement(
   pool: &SqlitePool,
-  feature_id: i64,
   description: &str,
   author_id: i64,
 ) -> Result<RequirementRow, sqlx::Error> {
   let result = sqlx::query(
     r#"
-        INSERT INTO requirements (feature_id, description, author_id)
-        VALUES (?, ?, ?)
+        INSERT INTO requirements (description, author_id)
+        VALUES (?, ?)
         "#,
   )
-  .bind(feature_id)
   .bind(description)
   .bind(author_id)
   .execute(pool)
@@ -1826,11 +1841,15 @@ pub async fn create_requirement(
     .await
 }
 
-/// Deletes a requirement and its associated topic links
+/// Deletes a requirement and all its associated links
 pub async fn delete_requirement(
   pool: &SqlitePool,
   requirement_id: i64,
 ) -> Result<(), sqlx::Error> {
+  sqlx::query("DELETE FROM feature_requirement_links WHERE requirement_id = ?")
+    .bind(requirement_id)
+    .execute(pool)
+    .await?;
   sqlx::query("DELETE FROM requirement_documentation_topics WHERE requirement_id = ?")
     .bind(requirement_id)
     .execute(pool)
