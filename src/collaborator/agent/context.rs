@@ -2293,29 +2293,36 @@ pub fn render_contract_for_behavior_extraction(
   audit_data: &AuditData,
   source_text_cache: &std::collections::HashMap<String, String>,
 ) -> Option<ContractForBehaviorExtraction> {
-  let (name, _kind, members) = match contract_node {
+  let (name, members) = match contract_node {
     ASTNode::ContractDefinition {
       signature, nodes, ..
     } => {
       let resolved_sig = signature.resolve(&audit_data.nodes);
-      let (name, kind) = match resolved_sig {
+      let name = match resolved_sig {
         ASTNode::ContractSignature {
           name,
           contract_kind,
           ..
-        } => (name.clone(), format!("{:?}", contract_kind).to_lowercase()),
+        } => {
+          // Skip interfaces — behaviors should only be extracted from
+          // implementations. Interface members are transitive to their
+          // implementations, same as semantic linking.
+          if matches!(contract_kind, core::ContractKind::Interface) {
+            return None;
+          }
+          name.clone()
+        }
         _ => {
           let ct = topic::new_node_topic(&contract_node.node_id());
-          let name = audit_data
+          audit_data
             .topic_metadata
             .get(&ct)
             .and_then(|m| m.name())
             .unwrap_or("unknown")
-            .to_string();
-          (name, "contract".to_string())
+            .to_string()
         }
       };
-      (name, kind, nodes)
+      (name, nodes)
     }
     _ => return None,
   };

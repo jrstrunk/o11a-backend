@@ -1112,6 +1112,18 @@ pub struct NestedSourceContext {
 }
 
 impl NestedSourceContext {
+  pub fn new(
+    subscope: topic::Topic,
+    sort_key: Option<usize>,
+    children: Vec<SourceChild>,
+  ) -> Self {
+    NestedSourceContext {
+      subscope,
+      sort_key,
+      children,
+    }
+  }
+
   pub fn subscope(&self) -> &topic::Topic {
     &self.subscope
   }
@@ -2164,57 +2176,119 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
       }
     }
 
-    // Behaviors linked to this feature
-    if let Some(beh_topics) = audit_data.feature_behavior_links.get(feature_topic) {
-      for bt in beh_topics {
-        let sort_key = bt.numeric_id().map(|id| id as usize);
-        scope_references.push(Reference::ProjectReference {
-          reference_topic: bt.clone(),
-          sort_key,
-        });
-      }
-    }
-
-    let context = vec![SourceContext {
+    // Feature + requirements as the first context entry
+    let mut context = vec![SourceContext {
       scope: feature_topic.clone(),
       sort_key: Some(0),
       is_in_scope: true,
       scope_references,
       nested_references: vec![],
     }];
+
+    // Behaviors linked to this feature, grouped by contract → member → behaviors
+    let mut member_behaviors: std::collections::BTreeMap<
+      topic::Topic,
+      Vec<topic::Topic>,
+    > = std::collections::BTreeMap::new();
+    if let Some(beh_topics) = audit_data.feature_behavior_links.get(feature_topic) {
+      for bt in beh_topics {
+        if let Some(TopicMetadata::BehaviorTopic { member_topic, .. }) =
+          audit_data.topic_metadata.get(bt)
+        {
+          member_behaviors
+            .entry(member_topic.clone())
+            .or_default()
+            .push(bt.clone());
+        }
+      }
+    }
+
+    // Group members by their containing contract
+    let mut contract_members: std::collections::BTreeMap<
+      topic::Topic,
+      Vec<(topic::Topic, Vec<topic::Topic>)>,
+    > = std::collections::BTreeMap::new();
+    for (mt, beh_topics) in member_behaviors {
+      let contract = audit_data
+        .topic_metadata
+        .get(&mt)
+        .and_then(|m| match m.scope() {
+          Scope::Component { component, .. } => Some(component.clone()),
+          _ => None,
+        })
+        .unwrap_or_else(|| mt.clone());
+      contract_members
+        .entry(contract)
+        .or_default()
+        .push((mt, beh_topics));
+    }
+
+    // Create a SourceContext per contract with members as nested scopes
+    for (contract_topic, members) in contract_members {
+      let contract_sort_key = contract_topic.numeric_id().map(|id| id as usize);
+      let nested_references: Vec<NestedSourceContext> = members
+        .into_iter()
+        .map(|(mt, beh_topics)| {
+          let children = beh_topics
+            .into_iter()
+            .map(|bt| {
+              let sort_key = bt.numeric_id().map(|id| id as usize);
+              SourceChild::Reference(Reference::ProjectReference {
+                reference_topic: bt,
+                sort_key,
+              })
+            })
+            .collect();
+          let sort_key = mt.numeric_id().map(|id| id as usize);
+          NestedSourceContext::new(mt, sort_key, children)
+        })
+        .collect();
+
+      context.push(SourceContext {
+        scope: contract_topic,
+        sort_key: contract_sort_key,
+        is_in_scope: true,
+        scope_references: vec![],
+        nested_references,
+      });
+    }
     audit_data
       .topic_context
       .insert(feature_topic.clone(), context);
   }
 
-  // Build context for RequirementTopics: parent feature(s) as scope refs
-  for (req_topic, metadata) in &audit_data.topic_metadata {
-    if !matches!(metadata, TopicMetadata::RequirementTopic { .. }) {
+  // Build reverse index: behavior → [features] from feature_behavior_links
+  let mut beh_to_features: HashMap<topic::Topic, Vec<topic::Topic>> = HashMap::new();
+  for (ft, beh_topics) in &audit_data.feature_behavior_links {
+    for bt in beh_topics {
+      let features = beh_to_features.entry(bt.clone()).or_default();
+      if !features.contains(ft) {
+        features.push(ft.clone());
+      }
+    }
+  }
+
+  // RequirementTopics have no topic_context (nothing in the body panel).
+  // Their linked documentation sections are shown in the documentation panel.
+
+  // Build context for BehaviorTopics (rendered like requirements)
+  for (beh_topic, metadata) in &audit_data.topic_metadata {
+    if !matches!(metadata, TopicMetadata::BehaviorTopic { .. }) {
       continue;
     }
-    let feature_refs: Vec<Reference> = req_to_features
-      .get(req_topic)
-      .map(|fts| {
-        fts.iter()
-          .map(|ft| Reference::ProjectReference {
-            reference_topic: ft.clone(),
-            sort_key: ft.numeric_id().map(|id| id as usize),
-          })
-          .collect()
-      })
-      .unwrap_or_default();
-
-    let sort_key = feature_refs.first().and_then(|r| r.sort_key());
     let context = vec![SourceContext {
-      scope: req_topic.clone(),
-      sort_key,
+      scope: beh_topic.clone(),
+      sort_key: beh_topic.numeric_id().map(|id| id as usize),
       is_in_scope: true,
-      scope_references: feature_refs,
+      scope_references: vec![Reference::ProjectReference {
+        reference_topic: beh_topic.clone(),
+        sort_key: beh_topic.numeric_id().map(|id| id as usize),
+      }],
       nested_references: vec![],
     }];
     audit_data
       .topic_context
-      .insert(req_topic.clone(), context);
+      .insert(beh_topic.clone(), context);
   }
 
   // Build context for ThreatTopics: subject + threat as scope refs,

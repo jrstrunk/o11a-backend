@@ -2263,18 +2263,21 @@ pub async fn get_documentation_panel(
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
-  // Resolve all input topic IDs to feature topics
+  // Resolve all input topic IDs to feature topics.
+  // Track whether any input was a direct feature topic — if so, show
+  // requirement docs; otherwise show features as headers.
   let mut feature_topics_resolved: Vec<topic::Topic> = Vec::new();
+  let mut has_direct_feature_input = false;
   for id in &payload.feature_topics {
     let t = new_topic(id);
     match t.kind() {
       Some(TopicKind::Feature) => {
+        has_direct_feature_input = true;
         if !feature_topics_resolved.contains(&t) {
           feature_topics_resolved.push(t);
         }
       }
       _ => {
-        // Look up features via feature_behavior_links with scope walk
         for ft in features_for_topic(&t, audit_data) {
           if !feature_topics_resolved.contains(&ft) {
             feature_topics_resolved.push(ft);
@@ -2283,6 +2286,7 @@ pub async fn get_documentation_panel(
       }
     }
   }
+  let show_features_as_headers = !has_direct_feature_input;
 
   let source_text_cache = ctx
     .source_text_cache
@@ -2290,14 +2294,23 @@ pub async fn get_documentation_panel(
     .cloned()
     .unwrap_or_default();
 
-  // Collect mention and semantic doc topics for all input topics.
-  // For code declarations, also collect from the containing member and
-  // its child declarations to capture all related documentation.
+  // Collect doc topics from mentions, semantic links, and requirement documentation.
   let mut mention_topics: Vec<topic::Topic> = Vec::new();
   let mut related_topics: Vec<topic::Topic> = Vec::new();
   for id in &payload.feature_topics {
     let t = new_topic(id);
     related_topics.push(t.clone());
+
+    // For requirement topics, include their linked documentation sections
+    if t.kind() == Some(TopicKind::Requirement) {
+      if let Some(req) = audit_data.requirements.get(&t) {
+        for dt in &req.documentation_topics {
+          if !mention_topics.contains(dt) {
+            mention_topics.push(dt.clone());
+          }
+        }
+      }
+    }
 
     // If this is a declaration scoped to a member, include the member too
     if let Some(metadata) = audit_data.topic_metadata.get(&t) {
@@ -2339,6 +2352,7 @@ pub async fn get_documentation_panel(
   let html = super::topic_view::build_documentation_panel(
     &feature_topics_resolved,
     &mention_topics,
+    show_features_as_headers,
     audit_data,
     &source_text_cache,
   );
