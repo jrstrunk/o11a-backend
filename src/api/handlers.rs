@@ -2013,6 +2013,7 @@ pub async fn create_feature(
     description: row.description,
     author_id: row.author_id,
     created_at: row.created_at,
+    expanded_context: Vec::new(),
   };
 
   let mut ctx = state.data_context.lock().map_err(|e| {
@@ -3197,6 +3198,7 @@ pub async fn create_behavior(
     member_topic,
     author_id: row.author_id,
     created_at: row.created_at,
+    expanded_context: Vec::new(),
   };
 
   let mut ctx = state.data_context.lock().map_err(|e| {

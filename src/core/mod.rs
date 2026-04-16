@@ -1540,6 +1540,7 @@ pub enum TopicMetadata {
     description: String,
     author_id: i64,
     created_at: String,
+    expanded_context: Vec<SourceContext>,
   },
   /// A behavioral requirement. Links to features are in feature_requirement_links.
   RequirementTopic {
@@ -1558,6 +1559,7 @@ pub enum TopicMetadata {
     member_topic: topic::Topic,
     author_id: i64,
     created_at: String,
+    expanded_context: Vec<SourceContext>,
   },
   /// A threat on a non-pure source code subject
   ThreatTopic {
@@ -1648,6 +1650,12 @@ impl TopicMetadata {
         expanded_context, ..
       }
       | TopicMetadata::TitledTopic {
+        expanded_context, ..
+      }
+      | TopicMetadata::FeatureTopic {
+        expanded_context, ..
+      }
+      | TopicMetadata::BehaviorTopic {
         expanded_context, ..
       } => expanded_context,
       _ => &[],
@@ -2257,6 +2265,74 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
       audit_data
         .topic_context
         .insert(inv_topic.clone(), context);
+    }
+  }
+
+  // Populate expanded_context for BehaviorTopics: show the source member
+  let behavior_contexts: Vec<(topic::Topic, Vec<SourceContext>)> = audit_data
+    .topic_metadata
+    .iter()
+    .filter_map(|(bt, m)| {
+      if let TopicMetadata::BehaviorTopic { member_topic, .. } = m {
+        let ctx = audit_data
+          .topic_context
+          .get(member_topic)
+          .cloned()
+          .unwrap_or_default();
+        if !ctx.is_empty() {
+          Some((bt.clone(), ctx))
+        } else {
+          None
+        }
+      } else {
+        None
+      }
+    })
+    .collect();
+
+  for (bt, ctx) in behavior_contexts {
+    if let Some(TopicMetadata::BehaviorTopic {
+      expanded_context, ..
+    }) = audit_data.topic_metadata.get_mut(&bt)
+    {
+      *expanded_context = ctx;
+    }
+  }
+
+  // Populate expanded_context for FeatureTopics: show deduplicated source
+  // members from all linked behaviors
+  let feature_contexts: Vec<(topic::Topic, Vec<SourceContext>)> = audit_data
+    .feature_behavior_links
+    .iter()
+    .map(|(ft, beh_topics)| {
+      let mut member_topics: Vec<topic::Topic> = Vec::new();
+      for bt in beh_topics {
+        if let Some(TopicMetadata::BehaviorTopic { member_topic, .. }) =
+          audit_data.topic_metadata.get(bt)
+        {
+          if !member_topics.contains(member_topic) {
+            member_topics.push(member_topic.clone());
+          }
+        }
+      }
+
+      let mut all_contexts: Vec<SourceContext> = Vec::new();
+      for mt in &member_topics {
+        if let Some(ctx) = audit_data.topic_context.get(mt) {
+          all_contexts.extend(ctx.iter().cloned());
+        }
+      }
+
+      (ft.clone(), merge_context_groups(all_contexts))
+    })
+    .collect();
+
+  for (ft, ctx) in feature_contexts {
+    if let Some(TopicMetadata::FeatureTopic {
+      expanded_context, ..
+    }) = audit_data.topic_metadata.get_mut(&ft)
+    {
+      *expanded_context = ctx;
     }
   }
 }
