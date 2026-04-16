@@ -1861,20 +1861,33 @@ fn topic_kind_label(metadata: &TopicMetadata) -> &'static str {
 /// Build an HTML panel from a list of requirement topics by collecting all their
 /// documentation topics' source contexts and rendering them as a grouped source panel.
 /// Deduplicates documentation topics across requirements.
+/// `show_features_as_headers`: when true, feature topics are rendered as
+/// navigable section headers at the top of the panel (used for code topics,
+/// requirements, and behaviors). When false, feature topics pull in their
+/// linked requirement documentation sections instead (used for feature views).
 pub fn build_documentation_panel(
   feature_topics: &[topic::Topic],
   mention_topics: &[topic::Topic],
+  show_features_as_headers: bool,
   audit_data: &AuditData,
   source_text_cache: &std::collections::HashMap<String, String>,
 ) -> String {
   let mut all_contexts: Vec<SourceContext> = Vec::new();
   let mut seen_doc_topics: Vec<topic::Topic> = Vec::new();
 
-  // For non-feature topics, show features at the top of the panel.
-  // For feature topics, pull in documentation from their requirements instead.
   for ft in feature_topics {
-    if ft.kind() == Some(crate::core::topic::TopicKind::Feature) {
-      // Collect doc topics from this feature's requirements
+    if show_features_as_headers {
+      // Render the feature as a navigable section header
+      if audit_data.topic_metadata.get(ft).is_some() {
+        all_contexts.push(SourceContext::new_with_scope_references(
+          ft.clone(),
+          None,
+          true,
+          vec![Reference::project_reference(ft.clone(), None)],
+        ));
+      }
+    } else {
+      // Pull in documentation sections from the feature's requirements
       if let Some(req_topics) = audit_data.feature_requirement_links.get(ft) {
         for rt in req_topics {
           if let Some(req) = audit_data.requirements.get(rt) {
@@ -1885,16 +1898,6 @@ pub fn build_documentation_panel(
             }
           }
         }
-      }
-    } else {
-      // Non-feature: render the feature as a section header
-      if audit_data.topic_metadata.get(ft).is_some() {
-        all_contexts.push(SourceContext::new_with_scope_references(
-          ft.clone(),
-          None,
-          true,
-          vec![Reference::project_reference(ft.clone(), None)],
-        ));
       }
     }
   }
