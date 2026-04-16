@@ -2299,19 +2299,7 @@ pub fn render_contract_for_behavior_extraction(
     } => {
       let resolved_sig = signature.resolve(&audit_data.nodes);
       let name = match resolved_sig {
-        ASTNode::ContractSignature {
-          name,
-          contract_kind,
-          ..
-        } => {
-          // Skip interfaces — behaviors should only be extracted from
-          // implementations. Interface members are transitive to their
-          // implementations, same as semantic linking.
-          if matches!(contract_kind, core::ContractKind::Interface) {
-            return None;
-          }
-          name.clone()
-        }
+        ASTNode::ContractSignature { name, .. } => name.clone(),
         _ => {
           let ct = topic::new_node_topic(&contract_node.node_id());
           audit_data
@@ -2358,16 +2346,25 @@ pub fn render_contract_for_behavior_extraction(
     }
   }
 
-  // Filter to only functions and modifiers — state variables are excluded
-  // from behavior extraction. Resolve stubs before checking type.
+  // Filter to functions and modifiers, excluding transitive members (e.g.,
+  // interface functions with an in-scope implementation). Behaviors for
+  // those will be extracted from the implementation contract instead.
   let member_snippets: Vec<serde_json::Value> = members
     .iter()
     .filter(|m| {
       let resolved = m.resolve(&audit_data.nodes);
-      matches!(
+      if !matches!(
         resolved,
         ASTNode::FunctionDefinition { .. } | ASTNode::ModifierDefinition { .. }
-      )
+      ) {
+        return false;
+      }
+      let member_topic = topic::new_node_topic(&resolved.node_id());
+      audit_data
+        .topic_metadata
+        .get(&member_topic)
+        .and_then(|m| m.transitive_topic())
+        .is_none()
     })
     .map(|m| render_solidity_ast_snippet(m, &render_ctx, audit_data, source_text_cache))
     .collect();
