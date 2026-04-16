@@ -40,6 +40,8 @@ pub struct ConversationEntry {
 pub enum ConversationEntryKind {
   FunctionalSemantics,
   FunctionalPurpose,
+  Behavior,
+  Requirement,
   Comment,
   Mention,
 }
@@ -1549,6 +1551,64 @@ pub fn build_conversation(
       created_at: Some(purpose.created_at.clone()),
       html,
     });
+  }
+
+  // Behaviors for this source code member (immediate, no scope traversal)
+  if let Some(beh_topics) = audit_data.member_behaviors.get(&topic) {
+    for bt in beh_topics {
+      if let Some(TopicMetadata::BehaviorTopic {
+        description,
+        author_id,
+        created_at,
+        ..
+      }) = audit_data.topic_metadata.get(bt)
+      {
+        let header = render_authored_header("behavior", *author_id, created_at);
+        let html = format!(
+          "<div class=\"behavior\" style=\"{}\">{}\
+           <p style=\"margin: 0\"><a data-topic=\"{}\">{}</a></p></div>",
+          COMBINED_PANEL_STYLE,
+          header,
+          html_escape(bt.id()),
+          html_escape(description),
+        );
+        entries.push(ConversationEntry {
+          topic_id: bt.id().to_string(),
+          kind: ConversationEntryKind::Behavior,
+          created_at: Some(created_at.clone()),
+          html,
+        });
+      }
+    }
+  }
+
+  // Requirements for this documentation section (immediate, no scope traversal)
+  if let Some(req_topics) = audit_data.section_requirements.get(&topic) {
+    for rt in req_topics {
+      if let Some(TopicMetadata::RequirementTopic {
+        description,
+        author_id,
+        created_at,
+        ..
+      }) = audit_data.topic_metadata.get(rt)
+      {
+        let header = render_authored_header("req", *author_id, created_at);
+        let html = format!(
+          "<div class=\"requirement\" style=\"{}\">{}\
+           <p style=\"margin: 0\"><a data-topic=\"{}\">{}</a></p></div>",
+          COMBINED_PANEL_STYLE,
+          header,
+          html_escape(rt.id()),
+          html_escape(description),
+        );
+        entries.push(ConversationEntry {
+          topic_id: rt.id().to_string(),
+          kind: ConversationEntryKind::Requirement,
+          created_at: Some(created_at.clone()),
+          html,
+        });
+      }
+    }
   }
 
   // Direct comments on this topic

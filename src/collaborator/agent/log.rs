@@ -55,7 +55,7 @@ fn truncate(s: &str, max: usize) -> &str {
   }
 }
 
-fn iso_timestamp() -> String {
+pub fn iso_timestamp() -> String {
   let duration = SystemTime::now()
     .duration_since(SystemTime::UNIX_EPOCH)
     .unwrap_or_default();
