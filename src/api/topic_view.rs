@@ -632,6 +632,25 @@ pub fn render_source_text(
     ));
   }
 
+  // Behavior topics: render with comment-style header
+  if let Some(TopicMetadata::BehaviorTopic {
+    description,
+    author_id,
+    created_at,
+    ..
+  }) = audit_data.topic_metadata.get(topic)
+  {
+    let header = render_authored_header("behavior", *author_id, created_at);
+    let content =
+      format!("{}<p style=\"margin: 0\">{}</p>", header, description);
+    return Some(formatting::format_topic_block(
+      topic,
+      &content,
+      "behavior",
+      topic,
+    ));
+  }
+
   // Threat topics: render with comment-style header including severity
   if let Some(TopicMetadata::ThreatTopic {
     description,
