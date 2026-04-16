@@ -1870,17 +1870,32 @@ pub fn build_documentation_panel(
   let mut all_contexts: Vec<SourceContext> = Vec::new();
   let mut seen_doc_topics: Vec<topic::Topic> = Vec::new();
 
-  // Build SourceContext entries for each feature, with the feature description
-  // as a scope_reference so the feature name is the section title and the
-  // description is navigable via the feature's topic ID.
+  // For non-feature topics, show features at the top of the panel.
+  // For feature topics, pull in documentation from their requirements instead.
   for ft in feature_topics {
-    if audit_data.topic_metadata.get(ft).is_some() {
-      all_contexts.push(SourceContext::new_with_scope_references(
-        ft.clone(),
-        None,
-        true,
-        vec![Reference::project_reference(ft.clone(), None)],
-      ));
+    if ft.kind() == Some(crate::core::topic::TopicKind::Feature) {
+      // Collect doc topics from this feature's requirements
+      if let Some(req_topics) = audit_data.feature_requirement_links.get(ft) {
+        for rt in req_topics {
+          if let Some(req) = audit_data.requirements.get(rt) {
+            for dt in &req.documentation_topics {
+              if !seen_doc_topics.contains(dt) {
+                seen_doc_topics.push(dt.clone());
+              }
+            }
+          }
+        }
+      }
+    } else {
+      // Non-feature: render the feature as a section header
+      if audit_data.topic_metadata.get(ft).is_some() {
+        all_contexts.push(SourceContext::new_with_scope_references(
+          ft.clone(),
+          None,
+          true,
+          vec![Reference::project_reference(ft.clone(), None)],
+        ));
+      }
     }
   }
 
