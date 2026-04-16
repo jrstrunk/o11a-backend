@@ -239,16 +239,31 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .execute(pool)
   .await?;
 
-  // Semantic links table (doc section → code declaration)
+  // Semantic links table (code declaration → semantic text)
   sqlx::query(
     r#"
         CREATE TABLE IF NOT EXISTS semantic_links (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             audit_id TEXT NOT NULL,
-            documentation_topic TEXT NOT NULL,
             declaration_topic TEXT NOT NULL,
             semantic_text TEXT NOT NULL,
-            UNIQUE(audit_id, documentation_topic, declaration_topic)
+            author_id INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(audit_id, declaration_topic, semantic_text)
+        )
+        "#,
+  )
+  .execute(pool)
+  .await?;
+
+  // Junction table: which doc sections contributed to each semantic link
+  sqlx::query(
+    r#"
+        CREATE TABLE IF NOT EXISTS semantic_link_docs (
+            semantic_link_id INTEGER NOT NULL,
+            documentation_topic TEXT NOT NULL,
+            UNIQUE(semantic_link_id, documentation_topic),
+            FOREIGN KEY (semantic_link_id) REFERENCES semantic_links(id) ON DELETE CASCADE
         )
         "#,
   )
@@ -1149,17 +1164,35 @@ pub async fn load_all_features(
       .fetch_all(pool)
       .await?;
 
+  // Load semantic link doc topics
+  let semantic_doc_rows =
+    sqlx::query_as::<_, SemanticLinkDocRow>("SELECT * FROM semantic_link_docs")
+      .fetch_all(pool)
+      .await?;
+
+  // Group doc topics by semantic_link_id
+  let mut docs_by_link: std::collections::HashMap<i64, Vec<String>> =
+    std::collections::HashMap::new();
+  for row in &semantic_doc_rows {
+    docs_by_link
+      .entry(row.semantic_link_id)
+      .or_default()
+      .push(row.documentation_topic.clone());
+  }
+
   for row in &semantic_link_rows {
     if let Some(audit_data) = data_context.get_audit_mut(&row.audit_id) {
-      let link = core::SemanticLink {
-        documentation_topics: vec![topic::new_topic(&row.documentation_topic)],
+      let documentation_topics: Vec<topic::Topic> = docs_by_link
+        .get(&row.id)
+        .map(|dts| dts.iter().map(|dt| topic::new_topic(dt)).collect())
+        .unwrap_or_default();
+
+      audit_data.semantic_links.push(core::SemanticLink {
+        documentation_topics: documentation_topics.clone(),
         declaration_topic: topic::new_topic(&row.declaration_topic),
         semantic_text: row.semantic_text.clone(),
-      };
-      audit_data.semantic_links.push(link);
+      });
 
-      // Populate functional_semantics with provenance, redirecting
-      // transitive topics (e.g., interface members) to their target.
       let decl_topic = topic::new_topic(&row.declaration_topic);
       let effective_topic = audit_data
         .topic_metadata
@@ -1173,9 +1206,9 @@ pub async fn load_all_features(
         .or_default()
         .push(core::FunctionalSemantic {
           text: row.semantic_text.clone(),
-          documentation_topics: vec![topic::new_topic(&row.documentation_topic)],
-          author_id: 0,
-          created_at: String::new(),
+          documentation_topics,
+          author_id: row.author_id,
+          created_at: row.created_at.clone(),
         });
     }
   }
@@ -1334,33 +1367,64 @@ pub async fn load_all_features(
 pub struct SemanticLinkRow {
   pub id: i64,
   pub audit_id: String,
-  pub documentation_topic: String,
   pub declaration_topic: String,
   pub semantic_text: String,
+  pub author_id: i64,
+  pub created_at: String,
 }
 
-/// Adds a semantic link (doc section → code declaration)
+#[derive(Debug, sqlx::FromRow)]
+struct SemanticLinkDocRow {
+  semantic_link_id: i64,
+  documentation_topic: String,
+}
+
+/// Adds a semantic link with its documentation topics.
 pub async fn add_semantic_link(
   pool: &SqlitePool,
   audit_id: &str,
-  documentation_topic: &str,
   declaration_topic: &str,
   semantic_text: &str,
+  author_id: i64,
+  documentation_topics: &[&str],
 ) -> Result<(), sqlx::Error> {
-  sqlx::query(
+  let result = sqlx::query(
     r#"
-        INSERT INTO semantic_links (audit_id, documentation_topic, declaration_topic, semantic_text)
+        INSERT INTO semantic_links (audit_id, declaration_topic, semantic_text, author_id)
         VALUES (?, ?, ?, ?)
-        ON CONFLICT(audit_id, documentation_topic, declaration_topic) DO UPDATE SET semantic_text = ?
+        ON CONFLICT(audit_id, declaration_topic, semantic_text) DO NOTHING
         "#,
   )
   .bind(audit_id)
-  .bind(documentation_topic)
   .bind(declaration_topic)
   .bind(semantic_text)
-  .bind(semantic_text)
+  .bind(author_id)
   .execute(pool)
   .await?;
+
+  // Get the ID (either from insert or existing row)
+  let link_id = if result.rows_affected() > 0 {
+    result.last_insert_rowid()
+  } else {
+    sqlx::query_scalar::<_, i64>(
+      "SELECT id FROM semantic_links WHERE audit_id = ? AND declaration_topic = ? AND semantic_text = ?",
+    )
+    .bind(audit_id)
+    .bind(declaration_topic)
+    .bind(semantic_text)
+    .fetch_one(pool)
+    .await?
+  };
+
+  for dt in documentation_topics {
+    sqlx::query(
+      "INSERT OR IGNORE INTO semantic_link_docs (semantic_link_id, documentation_topic) VALUES (?, ?)",
+    )
+    .bind(link_id)
+    .bind(dt)
+    .execute(pool)
+    .await?;
+  }
   Ok(())
 }
 
@@ -1369,6 +1433,13 @@ pub async fn delete_all_semantic_links(
   pool: &SqlitePool,
   audit_id: &str,
 ) -> Result<(), sqlx::Error> {
+  // Delete junction table rows first (FK cascade may not be enabled)
+  sqlx::query(
+    "DELETE FROM semantic_link_docs WHERE semantic_link_id IN (SELECT id FROM semantic_links WHERE audit_id = ?)",
+  )
+  .bind(audit_id)
+  .execute(pool)
+  .await?;
   sqlx::query("DELETE FROM semantic_links WHERE audit_id = ?")
     .bind(audit_id)
     .execute(pool)

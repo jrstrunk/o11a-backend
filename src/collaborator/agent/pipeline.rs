@@ -77,7 +77,7 @@ pub async fn build_requirements(
     "  Extracting requirements from {} documentation files",
     documentation_files.len()
   );
-  let parsed =
+  let mut parsed =
     task::extract_requirements_from_documentation(&documentation_files).await?;
   println!(
     "  Extracted {} requirements across {} sections",
@@ -104,6 +104,13 @@ pub async fn build_requirements(
         db::create_requirement(&state.db, req_desc, AUTHOR_AGENT_LARGE)
           .await
           .map_err(|e| format!("create_requirement failed: {}", e))?;
+
+      // Update in-memory metadata with DB timestamp
+      if let Some(core::TopicMetadata::RequirementTopic { created_at, .. }) =
+        parsed.topic_metadata.get_mut(req_topic)
+      {
+        *created_at = req_row.created_at.clone();
+      }
 
       // Persist documentation topic links
       if let Some(req) = parsed.requirements.get(req_topic) {
@@ -170,7 +177,7 @@ pub async fn synthesize_features(
   };
 
   println!("  Reconciling requirements and behaviors into features...");
-  let synthesized =
+  let mut synthesized =
     task::synthesize_features(&requirements_json, &behaviors_json).await?;
   println!("  Synthesized {} features", synthesized.features.len());
 
@@ -213,6 +220,13 @@ pub async fn synthesize_features(
     )
     .await
     .map_err(|e| format!("create_feature failed: {}", e))?;
+
+    // Update in-memory metadata with DB timestamp
+    if let Some(core::TopicMetadata::FeatureTopic { created_at, .. }) =
+      synthesized.topic_metadata.get_mut(feat_topic)
+    {
+      *created_at = row.created_at.clone();
+    }
 
     // Persist feature-requirement links
     if let Some(req_topics) = synthesized.feature_requirement_links.get(feat_topic) {
@@ -854,18 +868,22 @@ pub async fn build_semantic_links(
 
   println!("  After condensation: {} semantic links", all_links.len());
 
-  // Persist to database (one row per doc topic for the DB schema)
+  // Persist to database
   for link in &all_links {
-    for dt in &link.documentation_topics {
-      let _ = db::add_semantic_link(
-        &state.db,
-        audit_id,
-        dt.id(),
-        link.declaration_topic.id(),
-        &link.semantic_text,
-      )
-      .await;
-    }
+    let doc_topic_ids: Vec<&str> = link
+      .documentation_topics
+      .iter()
+      .map(|dt| dt.id())
+      .collect();
+    let _ = db::add_semantic_link(
+      &state.db,
+      audit_id,
+      link.declaration_topic.id(),
+      &link.semantic_text,
+      AUTHOR_AGENT_LARGE.into(),
+      &doc_topic_ids,
+    )
+    .await;
   }
 
   // Update in-memory state
@@ -881,6 +899,7 @@ pub async fn build_semantic_links(
   // Populate functional_semantics with provenance.
   // If the declaration is transitive (e.g., an interface member with one
   // implementation), redirect the semantic to the implementation topic.
+  let now = crate::collaborator::agent::log::iso_timestamp();
   for link in &all_links {
     let effective_topic = audit_data
       .topic_metadata
@@ -897,7 +916,7 @@ pub async fn build_semantic_links(
         text: link.semantic_text.clone(),
         documentation_topics: link.documentation_topics.clone(),
         author_id: AUTHOR_AGENT_LARGE,
-        created_at: String::new(),
+        created_at: now.clone(),
       });
   }
 
