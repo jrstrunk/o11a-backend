@@ -151,6 +151,7 @@ pub(crate) fn get_named_topic_kind(
     | core::TopicMetadata::FeatureTopic { .. }
     | core::TopicMetadata::RequirementTopic { .. }
     | core::TopicMetadata::BehaviorTopic { .. }
+    | core::TopicMetadata::FunctionalSemanticTopic { .. }
     | core::TopicMetadata::ThreatTopic { .. }
     | core::TopicMetadata::InvariantTopic { .. }
     | core::TopicMetadata::DocumentationTopic { .. } => None,

@@ -1,6 +1,6 @@
 use crate::collaborator::models::*;
 use crate::collaborator::{formatter, parser};
-use crate::core::{self, topic, DataContext, Feature, Requirement};
+use crate::core::{self, topic, DataContext, Requirement};
 use sqlx::SqlitePool;
 
 // ============================================================================
@@ -889,14 +889,13 @@ pub async fn load_all_features(
       audit_data.topic_metadata.insert(
         feature_topic.clone(),
         core::TopicMetadata::FeatureTopic {
-          topic: feature_topic.clone(),
+          topic: feature_topic,
           name: row.name.clone(),
           description: row.description.clone(),
           author_id: row.author_id,
           created_at: row.created_at.clone(),
         },
       );
-      audit_data.features.insert(feature_topic, Feature);
     }
   }
 
@@ -921,7 +920,9 @@ pub async fn load_all_features(
         core::TopicMetadata::RequirementTopic {
           topic: req_topic.clone(),
           description: req.description.clone(),
-          section_topic: topic::new_topic(req.section_topic.as_deref().unwrap_or("")),
+          section_topic: topic::new_topic(
+            req.section_topic.as_deref().unwrap_or(""),
+          ),
           author_id: req.author_id,
           created_at: req.created_at.clone(),
         },
@@ -1075,26 +1076,23 @@ pub async fn load_all_features(
         .map(|dts| dts.iter().map(|dt| topic::new_topic(dt)).collect())
         .unwrap_or_default();
 
-      audit_data.semantic_links.push(core::SemanticLink {
-        documentation_topics: documentation_topics.clone(),
-        declaration_topic: topic::new_topic(&row.declaration_topic),
-        semantic_text: row.semantic_text.clone(),
-      });
-
       // declaration_topic is already the base topic (transitive topics
       // are resolved before persisting), so no redirect needed.
       let decl_topic = topic::new_topic(&row.declaration_topic);
-      audit_data
-        .functional_semantics
-        .entry(decl_topic)
-        .or_default()
-        .push(core::FunctionalSemantic {
-          topic: topic::new_functional_property_topic(row.id as i32),
-          text: row.semantic_text.clone(),
+      let sem_topic =
+        topic::new_functional_property_topic(row.id as i32);
+
+      audit_data.topic_metadata.insert(
+        sem_topic.clone(),
+        core::TopicMetadata::FunctionalSemanticTopic {
+          topic: sem_topic,
+          description: row.semantic_text.clone(),
+          declaration_topic: decl_topic,
           documentation_topics,
           author_id: row.author_id,
           created_at: row.created_at.clone(),
-        });
+        },
+      );
     }
   }
 
@@ -1192,15 +1190,13 @@ pub async fn load_all_features(
       audit_data.topic_metadata.insert(
         beh_topic.clone(),
         core::TopicMetadata::BehaviorTopic {
-          topic: beh_topic.clone(),
+          topic: beh_topic,
           description: row.description.clone(),
           member_topic: member_topic.clone(),
           author_id: row.author_id,
           created_at: row.created_at.clone(),
         },
       );
-
-      audit_data.behaviors.insert(beh_topic, core::Behavior {});
     }
   }
 
@@ -1365,10 +1361,6 @@ pub async fn delete_all_feature_links_for_audit(
     .await?;
   Ok(())
 }
-
-// ============================================================================
-// Subject property operations (functional purpose and semantics)
-// ============================================================================
 
 // ============================================================================
 // Impact analysis (threat-feature link) operations

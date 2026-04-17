@@ -210,30 +210,9 @@ impl ThreatSeverity {
   }
 }
 
-/// A project feature extracted from documentation.
-/// Groups requirements. Feature-threat linkage is established during
-/// impact analysis, not at creation time. Feature is immutable after creation;
-/// links to requirements and behaviors are stored in separate link maps.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Feature;
-
-/// A functional semantic with provenance — what a declaration represents in the
-/// context of the project, linked to the documentation topics it was derived from.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FunctionalSemantic {
-  /// P-prefixed topic ID for this semantic property
-  pub topic: topic::Topic,
-  /// The semantic meaning text (e.g., "proportional reward multiplier")
-  pub text: String,
-  /// D-prefixed documentation topics this semantic was derived from
-  pub documentation_topics: Vec<topic::Topic>,
-  pub author_id: i64,
-  pub created_at: String,
-}
-
-/// A link between documentation sections and a code declaration, established
-/// during the semantic linking pipeline step. These links define what each
-/// declaration means in the context of the project.
+/// An intermediate value carrying a semantic from `semantic_link_pass3`
+/// through the condensation step into a `FunctionalSemanticTopic`. Field
+/// names align with `FunctionalSemanticTopic` for direct mapping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticLink {
   /// D-prefixed documentation topics that contributed to this semantic
@@ -241,7 +220,7 @@ pub struct SemanticLink {
   /// The N-prefixed code declaration topic
   pub declaration_topic: topic::Topic,
   /// The semantic meaning derived from this link
-  pub semantic_text: String,
+  pub description: String,
 }
 
 /// A behavioral requirement belonging to a feature.
@@ -312,13 +291,6 @@ pub struct ConditionEvaluation {
   pub answer: String,
 }
 
-/// A behavior observed during code review. Behaviors capture what the code
-/// actually does and are reconciliation artifacts — compared against
-/// requirements to surface gaps between documentation and implementation.
-/// Each behavior belongs to exactly one code member (one-to-many).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Behavior {}
-
 /// A threat describing how an attacker could compromise a feature.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Threat {
@@ -367,30 +339,22 @@ pub struct AuditData {
   /// Only populated for topics that have a meaningful expanded view
   /// (NamedTopics, documentation TitledTopics/UnnamedTopics, FeatureTopics, BehaviorTopics).
   pub expanded_topic_context: BTreeMap<topic::Topic, Vec<SourceContext>>,
-  /// Features extracted from documentation, keyed by F-prefixed topic ID.
-  pub features: BTreeMap<topic::Topic, Feature>,
   /// Requirements keyed by R-prefixed topic ID. Links to features are in feature_requirement_links.
   pub requirements: BTreeMap<topic::Topic, Requirement>,
-  /// Functional purpose stored per subject topic: "why does this exist?"
-  /// Functional semantics with provenance: "what does this represent?" + doc source.
-  /// Multiple semantics per topic are supported — different documentation sections
-  /// may contribute distinct semantic facets for the same declaration.
-  pub functional_semantics: BTreeMap<topic::Topic, Vec<FunctionalSemantic>>,
-  /// Links between documentation sections and code declarations from semantic linking.
-  pub semantic_links: Vec<SemanticLink>,
   /// Reverse index: D-prefixed section topic → R-prefixed requirement topics.
   /// Derived from RequirementTopic.section_topic, rebuilt with rebuild_feature_context.
   pub section_requirements: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Reverse index: N-prefixed member topic → B-prefixed behavior topics.
   /// Derived from BehaviorTopic.member_topic, rebuilt with rebuild_feature_context.
   pub member_behaviors: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Reverse index: N-prefixed declaration topic → P-prefixed semantic topics.
+  /// Derived from FunctionalSemanticTopic.declaration_topic, rebuilt with rebuild_feature_context.
+  pub declaration_semantics: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Impact analysis links between threats and features.
   pub threat_feature_links: Vec<ThreatFeatureLink>,
   /// Conditions keyed by their database ID. Each belongs to a non-pure subject
   /// and contains standardized question/answer evaluations.
   pub conditions: Vec<Condition>,
-  /// Behaviors keyed by B-prefixed topic ID. Each belongs to one code member.
-  pub behaviors: BTreeMap<topic::Topic, Behavior>,
   /// Threats keyed by A-prefixed topic ID. Each belongs to one feature.
   pub threats: BTreeMap<topic::Topic, Threat>,
   /// Invariants keyed by I-prefixed topic ID. Each belongs to one threat.
@@ -1555,7 +1519,8 @@ pub enum TopicMetadata {
     author_id: i64,
     created_at: String,
   },
-  /// A behavioral requirement. Links to features are in feature_requirement_links.
+  /// A behavioral requirement extracted from documentation. Links to features
+  /// are in feature_requirement_links.
   RequirementTopic {
     topic: topic::Topic,
     description: String,
@@ -1564,12 +1529,25 @@ pub enum TopicMetadata {
     author_id: i64,
     created_at: String,
   },
-  /// A behavior observed during code review, belonging to one code member
+  /// A behavior observed during code review, belonging to one code member.
   BehaviorTopic {
     topic: topic::Topic,
     description: String,
     /// The N-prefixed code member (function/modifier/contract) this behavior belongs to
     member_topic: topic::Topic,
+    author_id: i64,
+    created_at: String,
+  },
+  /// A functional semantic — what a code declaration represents in the context
+  /// of the project. Derived from one or more documentation sections.
+  FunctionalSemanticTopic {
+    topic: topic::Topic,
+    /// The semantic meaning text (e.g., "proportional reward multiplier").
+    description: String,
+    /// The N-prefixed code declaration this semantic describes.
+    declaration_topic: topic::Topic,
+    /// D-prefixed documentation topics this semantic was derived from.
+    documentation_topics: Vec<topic::Topic>,
     author_id: i64,
     created_at: String,
   },
@@ -1614,6 +1592,7 @@ impl TopicMetadata {
       TopicMetadata::FeatureTopic { .. }
       | TopicMetadata::RequirementTopic { .. }
       | TopicMetadata::BehaviorTopic { .. }
+      | TopicMetadata::FunctionalSemanticTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. } => &Scope::Global,
     }
@@ -1629,6 +1608,7 @@ impl TopicMetadata {
       | TopicMetadata::CommentTopic { .. }
       | TopicMetadata::RequirementTopic { .. }
       | TopicMetadata::BehaviorTopic { .. }
+      | TopicMetadata::FunctionalSemanticTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. }
       | TopicMetadata::DocumentationTopic { .. } => None,
@@ -1645,6 +1625,7 @@ impl TopicMetadata {
       | TopicMetadata::FeatureTopic { topic, .. }
       | TopicMetadata::RequirementTopic { topic, .. }
       | TopicMetadata::BehaviorTopic { topic, .. }
+      | TopicMetadata::FunctionalSemanticTopic { topic, .. }
       | TopicMetadata::ThreatTopic { topic, .. }
       | TopicMetadata::InvariantTopic { topic, .. }
       | TopicMetadata::DocumentationTopic { topic, .. } => topic,
@@ -1712,7 +1693,6 @@ impl TopicMetadata {
   pub fn target_topic(&self) -> Option<&topic::Topic> {
     match self {
       TopicMetadata::CommentTopic { target_topic, .. } => Some(target_topic),
-      TopicMetadata::RequirementTopic { .. } => None,
       TopicMetadata::ThreatTopic { subject_topic, .. } => Some(subject_topic),
       TopicMetadata::InvariantTopic { threat_topic, .. } => Some(threat_topic),
       _ => None,
@@ -1724,8 +1704,27 @@ impl TopicMetadata {
       TopicMetadata::CommentTopic { author_id, .. }
       | TopicMetadata::FeatureTopic { author_id, .. }
       | TopicMetadata::RequirementTopic { author_id, .. }
+      | TopicMetadata::BehaviorTopic { author_id, .. }
+      | TopicMetadata::FunctionalSemanticTopic { author_id, .. }
       | TopicMetadata::ThreatTopic { author_id, .. }
       | TopicMetadata::InvariantTopic { author_id, .. } => Some(*author_id),
+      _ => None,
+    }
+  }
+
+  /// Returns the description text for variants that have one. Maps to
+  /// `description` for generated/threat/invariant variants and to the
+  /// feature's `description` for `FeatureTopic`.
+  pub fn description(&self) -> Option<&str> {
+    match self {
+      TopicMetadata::FeatureTopic { description, .. }
+      | TopicMetadata::RequirementTopic { description, .. }
+      | TopicMetadata::BehaviorTopic { description, .. }
+      | TopicMetadata::FunctionalSemanticTopic { description, .. }
+      | TopicMetadata::ThreatTopic { description, .. }
+      | TopicMetadata::InvariantTopic { description, .. } => {
+        Some(description.as_str())
+      }
       _ => None,
     }
   }
@@ -1744,6 +1743,8 @@ impl TopicMetadata {
       TopicMetadata::CommentTopic { created_at, .. }
       | TopicMetadata::FeatureTopic { created_at, .. }
       | TopicMetadata::RequirementTopic { created_at, .. }
+      | TopicMetadata::BehaviorTopic { created_at, .. }
+      | TopicMetadata::FunctionalSemanticTopic { created_at, .. }
       | TopicMetadata::ThreatTopic { created_at, .. }
       | TopicMetadata::InvariantTopic { created_at, .. } => {
         Some(created_at.as_str())
@@ -2027,6 +2028,53 @@ fn build_invariant_nested_refs(
   nested
 }
 
+/// Collect the semantic text strings for a single declaration by resolving
+/// through `declaration_semantics` (decl → P-topics) and reading each
+/// P-topic's `description` from `topic_metadata`.
+pub fn semantic_texts_for_declaration(
+  audit_data: &AuditData,
+  decl_topic: &topic::Topic,
+) -> Vec<String> {
+  let Some(sem_topics) = audit_data.declaration_semantics.get(decl_topic) else {
+    return Vec::new();
+  };
+  sem_topics
+    .iter()
+    .filter_map(|sem_topic| {
+      if let Some(TopicMetadata::FunctionalSemanticTopic { description, .. }) =
+        audit_data.topic_metadata.get(sem_topic)
+      {
+        Some(description.clone())
+      } else {
+        None
+      }
+    })
+    .collect()
+}
+
+/// Build a lookup map from declaration topic to the semantic text strings
+/// describing it. Resolves through `declaration_semantics` (decl → P-topics)
+/// and reads each P-topic's `description` from `topic_metadata`.
+pub fn semantic_texts_by_declaration(
+  audit_data: &AuditData,
+) -> BTreeMap<topic::Topic, Vec<String>> {
+  let mut out: BTreeMap<topic::Topic, Vec<String>> = BTreeMap::new();
+  for (decl_topic, sem_topics) in &audit_data.declaration_semantics {
+    let mut texts = Vec::with_capacity(sem_topics.len());
+    for sem_topic in sem_topics {
+      if let Some(TopicMetadata::FunctionalSemanticTopic { description, .. }) =
+        audit_data.topic_metadata.get(sem_topic)
+      {
+        texts.push(description.clone());
+      }
+    }
+    if !texts.is_empty() {
+      out.insert(decl_topic.clone(), texts);
+    }
+  }
+  out
+}
+
 /// Rebuilds feature-related context:
 /// - `expanded_context` on documentation TitledTopics/UnnamedTopics (linked features)
 /// - `topic_context` for FeatureTopics (linked requirements)
@@ -2056,6 +2104,22 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         .entry(member_topic.clone())
         .or_default()
         .push(beh_topic.clone());
+    }
+  }
+
+  // Rebuild declaration_semantics: declaration N-topic → P-topics
+  audit_data.declaration_semantics.clear();
+  for (sem_topic, metadata) in &audit_data.topic_metadata {
+    if let TopicMetadata::FunctionalSemanticTopic {
+      declaration_topic: decl_topic,
+      ..
+    } = metadata
+    {
+      audit_data
+        .declaration_semantics
+        .entry(decl_topic.clone())
+        .or_default()
+        .push(sem_topic.clone());
     }
   }
 
@@ -2136,9 +2200,6 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
   // Build context for FeatureTopics: feature + requirements + behaviors as scope refs
   for (feature_topic, metadata) in &audit_data.topic_metadata {
     if !matches!(metadata, TopicMetadata::FeatureTopic { .. }) {
-      continue;
-    }
-    if !audit_data.features.contains_key(feature_topic) {
       continue;
     }
     let mut scope_references = vec![Reference::ProjectReference {
@@ -2470,15 +2531,12 @@ pub fn new_audit_data(
     comment_index: HashMap::new(),
     topic_context: BTreeMap::new(),
     expanded_topic_context: BTreeMap::new(),
-    features: BTreeMap::new(),
     requirements: BTreeMap::new(),
-    functional_semantics: BTreeMap::new(),
-    semantic_links: Vec::new(),
     section_requirements: BTreeMap::new(),
     member_behaviors: BTreeMap::new(),
+    declaration_semantics: BTreeMap::new(),
     threat_feature_links: Vec::new(),
     conditions: Vec::new(),
-    behaviors: BTreeMap::new(),
     threats: BTreeMap::new(),
     invariants: BTreeMap::new(),
     feature_requirement_links: BTreeMap::new(),

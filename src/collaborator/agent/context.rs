@@ -79,16 +79,11 @@ fn resolve_topic_name(topic: &topic::Topic, audit_data: &AuditData) -> String {
       comment_type.clone()
     }
     Some(TopicMetadata::FeatureTopic { name, .. }) => name.clone(),
-    Some(TopicMetadata::RequirementTopic { description, .. }) => {
-      description.clone()
-    }
-    Some(TopicMetadata::BehaviorTopic { description, .. }) => {
-      description.clone()
-    }
-    Some(TopicMetadata::ThreatTopic { description, .. }) => {
-      description.clone()
-    }
-    Some(TopicMetadata::InvariantTopic { description, .. }) => {
+    Some(TopicMetadata::RequirementTopic { description, .. })
+    | Some(TopicMetadata::BehaviorTopic { description, .. })
+    | Some(TopicMetadata::FunctionalSemanticTopic { description, .. })
+    | Some(TopicMetadata::ThreatTopic { description, .. })
+    | Some(TopicMetadata::InvariantTopic { description, .. }) => {
       description.clone()
     }
     Some(TopicMetadata::DocumentationTopic { .. }) => {
@@ -200,10 +195,11 @@ fn plaintext_name_from_metadata(metadata: &TopicMetadata) -> String {
     }
     TopicMetadata::CommentTopic { comment_type, .. } => comment_type.clone(),
     TopicMetadata::FeatureTopic { name, .. } => name.clone(),
-    TopicMetadata::RequirementTopic { description, .. } => description.clone(),
-    TopicMetadata::BehaviorTopic { description, .. } => description.clone(),
-    TopicMetadata::ThreatTopic { description, .. } => description.clone(),
-    TopicMetadata::InvariantTopic { description, .. } => description.clone(),
+    TopicMetadata::RequirementTopic { description, .. }
+    | TopicMetadata::BehaviorTopic { description, .. }
+    | TopicMetadata::FunctionalSemanticTopic { description, .. }
+    | TopicMetadata::ThreatTopic { description, .. }
+    | TopicMetadata::InvariantTopic { description, .. } => description.clone(),
     TopicMetadata::DocumentationTopic { .. } => {
       metadata.topic().id().to_string()
     }
@@ -1358,18 +1354,11 @@ fn flatten_inline_recursive(
             ..
           } = child.resolve(&audit_data.nodes)
           {
-            if let Some(sems) = audit_data.functional_semantics.get(t) {
-              if let Some(sem) = sems.first() {
-                text.push_str(" (");
-                text.push_str(&sem.text);
-                if sems.len() > 1 {
-                  for s in &sems[1..] {
-                    text.push_str("; ");
-                    text.push_str(&s.text);
-                  }
-                }
-                text.push(')');
-              }
+            let texts = core::semantic_texts_for_declaration(audit_data, t);
+            if !texts.is_empty() {
+              text.push_str(" (");
+              text.push_str(&texts.join("; "));
+              text.push(')');
               break; // one semantic annotation per inline code span
             }
           }
@@ -1391,13 +1380,11 @@ fn flatten_inline_recursive(
         if let Some(t) = referenced_topic {
           refs.push(json!({"name": value, "topic": t.id()}));
           // Inject functional semantic inline when outside of InlineCode
-          if let Some(sems) = audit_data.functional_semantics.get(t) {
-            let joined: Vec<&str> = sems.iter().map(|s| s.text.as_str()).collect();
-            if !joined.is_empty() {
-              text.push_str(" (");
-              text.push_str(&joined.join("; "));
-              text.push(')');
-            }
+          let texts = core::semantic_texts_for_declaration(audit_data, t);
+          if !texts.is_empty() {
+            text.push_str(" (");
+            text.push_str(&texts.join("; "));
+            text.push(')');
           }
         }
       }
@@ -1625,11 +1612,9 @@ pub fn render_documentation_ast_snippet(
           ..
         } = child.resolve(&audit_data.nodes)
         {
-          if let Some(sems) = audit_data.functional_semantics.get(t) {
-            let joined: Vec<&str> = sems.iter().map(|s| s.text.as_str()).collect();
-            if !joined.is_empty() {
-              semantic_suffix = format!(" ({})", joined.join("; "));
-            }
+          let texts = core::semantic_texts_for_declaration(audit_data, t);
+          if !texts.is_empty() {
+            semantic_suffix = format!(" ({})", texts.join("; "));
             break;
           }
         }
@@ -2146,60 +2131,32 @@ pub fn build_agent_topic_context(
       })
     }
 
-    TopicMetadata::FeatureTopic { .. } => Some(AgentTopicContext {
-      topic: topic_id_string,
-      name,
-      kind: "Feature".to_string(),
-      sub_kind: None,
-      condition: None,
-      context,
-      expanded_context: None,
-      mentions,
-    }),
-
-    TopicMetadata::RequirementTopic { .. } => Some(AgentTopicContext {
-      topic: topic_id_string,
-      name,
-      kind: "Requirement".to_string(),
-      sub_kind: None,
-      condition: None,
-      context,
-      expanded_context: None,
-      mentions,
-    }),
-
-    TopicMetadata::BehaviorTopic { .. } => Some(AgentTopicContext {
-      topic: topic_id_string,
-      name,
-      kind: "Behavior".to_string(),
-      sub_kind: None,
-      condition: None,
-      context,
-      expanded_context: None,
-      mentions,
-    }),
-
-    TopicMetadata::ThreatTopic { .. } => Some(AgentTopicContext {
-      topic: topic_id_string,
-      name,
-      kind: "Threat".to_string(),
-      sub_kind: None,
-      condition: None,
-      context,
-      expanded_context: None,
-      mentions,
-    }),
-
-    TopicMetadata::InvariantTopic { .. } => Some(AgentTopicContext {
-      topic: topic_id_string,
-      name,
-      kind: "Invariant".to_string(),
-      sub_kind: None,
-      condition: None,
-      context,
-      expanded_context: None,
-      mentions,
-    }),
+    TopicMetadata::FeatureTopic { .. }
+    | TopicMetadata::RequirementTopic { .. }
+    | TopicMetadata::BehaviorTopic { .. }
+    | TopicMetadata::FunctionalSemanticTopic { .. }
+    | TopicMetadata::ThreatTopic { .. }
+    | TopicMetadata::InvariantTopic { .. } => {
+      let kind = match metadata {
+        TopicMetadata::FeatureTopic { .. } => "Feature",
+        TopicMetadata::RequirementTopic { .. } => "Requirement",
+        TopicMetadata::BehaviorTopic { .. } => "Behavior",
+        TopicMetadata::FunctionalSemanticTopic { .. } => "Semantic",
+        TopicMetadata::ThreatTopic { .. } => "Threat",
+        TopicMetadata::InvariantTopic { .. } => "Invariant",
+        _ => unreachable!(),
+      };
+      Some(AgentTopicContext {
+        topic: topic_id_string,
+        name,
+        kind: kind.to_string(),
+        sub_kind: None,
+        condition: None,
+        context,
+        expanded_context: None,
+        mentions,
+      })
+    }
 
     TopicMetadata::DocumentationTopic {
       is_technical, ..
@@ -2330,23 +2287,31 @@ pub fn render_contract_for_behavior_extraction(
 
   // Build semantic annotations for declarations in this contract
   let mut semantics: Vec<serde_json::Value> = Vec::new();
-  for (decl_topic, sems) in &audit_data.functional_semantics {
+  for (decl_topic, sem_topics) in &audit_data.declaration_semantics {
     // Check if this declaration is scoped to this contract
-    if let Some(metadata) = audit_data.topic_metadata.get(decl_topic) {
-      let in_contract = match metadata.scope() {
-        core::Scope::Component { component, .. } => *component == contract_topic,
-        core::Scope::Member { component, .. } => *component == contract_topic,
-        core::Scope::ContainingBlock { component, .. } => *component == contract_topic,
-        _ => false,
-      };
-      if in_contract {
-        for sem in sems {
-          semantics.push(json!({
-            "declaration_topic": decl_topic.id(),
-            "name": metadata.name().unwrap_or(""),
-            "semantic": sem.text,
-          }));
-        }
+    let Some(metadata) = audit_data.topic_metadata.get(decl_topic) else {
+      continue;
+    };
+    let in_contract = match metadata.scope() {
+      core::Scope::Component { component, .. } => *component == contract_topic,
+      core::Scope::Member { component, .. } => *component == contract_topic,
+      core::Scope::ContainingBlock { component, .. } => *component == contract_topic,
+      _ => false,
+    };
+    if !in_contract {
+      continue;
+    }
+    let name = metadata.name().unwrap_or("");
+    for sem_topic in sem_topics {
+      if let Some(core::TopicMetadata::FunctionalSemanticTopic {
+        description, ..
+      }) = audit_data.topic_metadata.get(sem_topic)
+      {
+        semantics.push(json!({
+          "declaration_topic": decl_topic.id(),
+          "name": name,
+          "semantic": description,
+        }));
       }
     }
   }
