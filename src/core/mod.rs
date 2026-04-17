@@ -178,7 +178,9 @@ pub enum ContractKind {
 }
 
 /// Severity level for threats and invariants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+  Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ThreatSeverity {
   Low,
@@ -225,14 +227,6 @@ pub struct FunctionalSemantic {
   pub text: String,
   /// D-prefixed documentation topics this semantic was derived from
   pub documentation_topics: Vec<topic::Topic>,
-  pub author_id: i64,
-  pub created_at: String,
-}
-
-/// A functional purpose — why a subject exists in the context of the project.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FunctionalPurpose {
-  pub text: String,
   pub author_id: i64,
   pub created_at: String,
 }
@@ -373,7 +367,6 @@ pub struct AuditData {
   /// Requirements keyed by R-prefixed topic ID. Links to features are in feature_requirement_links.
   pub requirements: BTreeMap<topic::Topic, Requirement>,
   /// Functional purpose stored per subject topic: "why does this exist?"
-  pub functional_purposes: BTreeMap<topic::Topic, FunctionalPurpose>,
   /// Functional semantics with provenance: "what does this represent?" + doc source.
   /// Multiple semantics per topic are supported — different documentation sections
   /// may contribute distinct semantic facets for the same declaration.
@@ -518,7 +511,6 @@ impl TopicNameIndex {
     self.by_qualified_name.keys().map(|s| s.as_str()).collect()
   }
 }
-
 
 /// Cached static parts of a topic view (AST-derived, never invalidated).
 #[derive(Debug, Clone)]
@@ -1141,10 +1133,17 @@ impl NestedSourceContext {
 
 /// Merges a list of SourceContext entries, combining entries that share the
 /// same scope into a single group with merged references.
-pub fn merge_context_groups(contexts: Vec<SourceContext>) -> Vec<SourceContext> {
+pub fn merge_context_groups(
+  contexts: Vec<SourceContext>,
+) -> Vec<SourceContext> {
   let mut merged: Vec<SourceContext> = Vec::new();
   for ctx in contexts {
-    ensure_context(&mut merged, ctx.scope.clone(), ctx.sort_key, ctx.is_in_scope);
+    ensure_context(
+      &mut merged,
+      ctx.scope.clone(),
+      ctx.sort_key,
+      ctx.is_in_scope,
+    );
     let group = merged.iter_mut().find(|g| g.scope == ctx.scope).unwrap();
     for r in ctx.scope_references {
       insert_ref_sorted(&mut group.scope_references, r);
@@ -1162,7 +1161,10 @@ fn insert_nested_sorted(
   nested_refs: &mut Vec<NestedSourceContext>,
   nested: NestedSourceContext,
 ) {
-  if let Some(existing) = nested_refs.iter_mut().find(|n| n.subscope == nested.subscope) {
+  if let Some(existing) = nested_refs
+    .iter_mut()
+    .find(|n| n.subscope == nested.subscope)
+  {
     for child in nested.children {
       existing.children.push(child);
     }
@@ -1561,7 +1563,7 @@ pub enum TopicMetadata {
     topic: topic::Topic,
     description: String,
     /// The D-prefixed documentation section this requirement was extracted from
-    section_topic: Option<topic::Topic>,
+    section_topic: topic::Topic,
     author_id: i64,
     created_at: String,
   },
@@ -1603,7 +1605,6 @@ pub enum TopicMetadata {
     is_technical: bool,
   },
 }
-
 
 impl TopicMetadata {
   pub fn scope(&self) -> &Scope {
@@ -1653,7 +1654,6 @@ impl TopicMetadata {
       | TopicMetadata::DocumentationTopic { topic, .. } => topic,
     }
   }
-
 
   pub fn expanded_context(&self) -> &[SourceContext] {
     match self {
@@ -1738,12 +1738,8 @@ impl TopicMetadata {
     match self {
       TopicMetadata::CommentTopic { target_topic, .. } => Some(target_topic),
       TopicMetadata::RequirementTopic { .. } => None,
-      TopicMetadata::ThreatTopic { subject_topic, .. } => {
-        Some(subject_topic)
-      }
-      TopicMetadata::InvariantTopic { threat_topic, .. } => {
-        Some(threat_topic)
-      }
+      TopicMetadata::ThreatTopic { subject_topic, .. } => Some(subject_topic),
+      TopicMetadata::InvariantTopic { threat_topic, .. } => Some(threat_topic),
       _ => None,
     }
   }
@@ -2007,9 +2003,7 @@ pub fn load_security_notes(
 ) -> Result<Option<String>, String> {
   let security_file = project_root.join("security.md");
   if !security_file.exists() {
-    return Err(
-      "security.md file not found in project root".to_string(),
-    );
+    return Err("security.md file not found in project root".to_string());
   }
 
   let content = std::fs::read_to_string(&security_file)
@@ -2066,7 +2060,10 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
   // Rebuild section_requirements: section D-topic → R-topics
   audit_data.section_requirements.clear();
   for (req_topic, metadata) in &audit_data.topic_metadata {
-    if let TopicMetadata::RequirementTopic { section_topic: Some(st), .. } = metadata {
+    if let TopicMetadata::RequirementTopic {
+      section_topic: st, ..
+    } = metadata
+    {
       audit_data
         .section_requirements
         .entry(st.clone())
@@ -2088,7 +2085,8 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
   }
 
   // Build reverse index: doc_topic -> [requirement_topics]
-  let mut doc_to_requirements: HashMap<topic::Topic, Vec<topic::Topic>> = HashMap::new();
+  let mut doc_to_requirements: HashMap<topic::Topic, Vec<topic::Topic>> =
+    HashMap::new();
   for (req_topic, requirement) in &audit_data.requirements {
     for doc_topic in &requirement.documentation_topics {
       doc_to_requirements
@@ -2099,7 +2097,8 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
   }
 
   // Build reverse index: requirement → [features] from feature_requirement_links
-  let mut req_to_features: HashMap<topic::Topic, Vec<topic::Topic>> = HashMap::new();
+  let mut req_to_features: HashMap<topic::Topic, Vec<topic::Topic>> =
+    HashMap::new();
   for (ft, req_topics) in &audit_data.feature_requirement_links {
     for rt in req_topics {
       let features = req_to_features.entry(rt.clone()).or_default();
@@ -2111,7 +2110,8 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
 
   // Update expanded_context for documentation topics (TitledTopic/UnnamedTopic)
   // Show the parent feature(s) of the requirements that link to this doc topic
-  let mut doc_to_features: HashMap<topic::Topic, Vec<topic::Topic>> = HashMap::new();
+  let mut doc_to_features: HashMap<topic::Topic, Vec<topic::Topic>> =
+    HashMap::new();
   for (doc_topic, req_topics) in &doc_to_requirements {
     for rt in req_topics {
       if let Some(fts) = req_to_features.get(rt) {
@@ -2168,7 +2168,9 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }];
 
     // Requirements linked to this feature
-    if let Some(req_topics) = audit_data.feature_requirement_links.get(feature_topic) {
+    if let Some(req_topics) =
+      audit_data.feature_requirement_links.get(feature_topic)
+    {
       for rt in req_topics {
         let sort_key = rt.numeric_id().map(|id| id as usize);
         scope_references.push(Reference::ProjectReference {
@@ -2192,7 +2194,9 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
       topic::Topic,
       Vec<topic::Topic>,
     > = std::collections::BTreeMap::new();
-    if let Some(beh_topics) = audit_data.feature_behavior_links.get(feature_topic) {
+    if let Some(beh_topics) =
+      audit_data.feature_behavior_links.get(feature_topic)
+    {
       for bt in beh_topics {
         if let Some(TopicMetadata::BehaviorTopic { member_topic, .. }) =
           audit_data.topic_metadata.get(bt)
@@ -2260,7 +2264,8 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
   }
 
   // Build reverse index: behavior → [features] from feature_behavior_links
-  let mut beh_to_features: HashMap<topic::Topic, Vec<topic::Topic>> = HashMap::new();
+  let mut beh_to_features: HashMap<topic::Topic, Vec<topic::Topic>> =
+    HashMap::new();
   for (ft, beh_topics) in &audit_data.feature_behavior_links {
     for bt in beh_topics {
       let features = beh_to_features.entry(bt.clone()).or_default();
@@ -2288,9 +2293,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
       }],
       nested_references: vec![],
     }];
-    audit_data
-      .topic_context
-      .insert(beh_topic.clone(), context);
+    audit_data.topic_context.insert(beh_topic.clone(), context);
   }
 
   // Build context for ThreatTopics: subject + threat as scope refs,
@@ -2309,8 +2312,10 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
           sort_key: threat_sort_key,
         },
       ];
-      let nested_references =
-        build_invariant_nested_refs(&[threat_topic.clone()], &audit_data.threats);
+      let nested_references = build_invariant_nested_refs(
+        &[threat_topic.clone()],
+        &audit_data.threats,
+      );
       let context = vec![SourceContext {
         scope: threat_topic.clone(),
         sort_key: threat_sort_key,
@@ -2338,9 +2343,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         }],
         nested_references: vec![],
       }];
-      audit_data
-        .topic_context
-        .insert(inv_topic.clone(), context);
+      audit_data.topic_context.insert(inv_topic.clone(), context);
     }
   }
 
@@ -2498,7 +2501,6 @@ pub fn new_audit_data(
     topic_context: BTreeMap::new(),
     features: BTreeMap::new(),
     requirements: BTreeMap::new(),
-    functional_purposes: BTreeMap::new(),
     functional_semantics: BTreeMap::new(),
     semantic_links: Vec::new(),
     section_requirements: BTreeMap::new(),

@@ -87,16 +87,27 @@ pub fn create_router(state: AppState) -> Router {
       get(handlers::get_comment_status).put(handlers::update_comment_status),
     )
     // ============================================
-    // Feature routes
+    // Feature & requirement routes (read-only)
     // ============================================
     .route(
       "/api/v1/audits/:audit_id/features",
-      get(handlers::get_features).post(handlers::create_feature),
+      get(handlers::get_features),
     )
     .route(
       "/api/v1/audits/:audit_id/features/:feature_id/requirements",
       get(handlers::get_feature_requirements),
     )
+    .route(
+      "/api/v1/audits/:audit_id/requirements/:requirement_id",
+      get(handlers::get_requirement),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/requirements/topic/:topic_id",
+      get(handlers::get_topic_requirements),
+    )
+    // ============================================
+    // Pipeline routes
+    // ============================================
     .route(
       "/api/v1/audits/:audit_id/analyze",
       post(handlers::analyze),
@@ -117,14 +128,6 @@ pub fn create_router(state: AppState) -> Router {
       "/api/v1/audits/:audit_id/pipeline/synthesize",
       post(handlers::pipeline_synthesize),
     )
-    .route(
-      "/api/v1/audits/:audit_id/requirements/:requirement_id/documentation_topics",
-      post(handlers::add_requirement_documentation_topic),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/requirements/:requirement_id/documentation_topics/:topic_id",
-      delete(handlers::remove_requirement_documentation_topic),
-    )
     // ============================================
     // Documentation routes
     // ============================================
@@ -132,43 +135,23 @@ pub fn create_router(state: AppState) -> Router {
       "/api/v1/audits/:audit_id/documentation",
       post(handlers::get_documentation_panel),
     )
-    .route(
-      "/api/v1/audits/:audit_id/requirements/topic/:topic_id",
-      get(handlers::get_topic_requirements),
-    )
     // ============================================
-    // Requirement routes
+    // Subject property routes (read-only)
     // ============================================
-    .route(
-      "/api/v1/audits/:audit_id/features/:feature_id/requirements",
-      post(handlers::create_requirement),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/features/:feature_id/requirements/:requirement_id",
-      delete(handlers::delete_requirement),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/requirements/:requirement_id",
-      get(handlers::get_requirement),
-    )
-    // ============================================
-    // ============================================
-    // Reconciliation routes
-    // ============================================
-    .route(
-      "/api/v1/audits/:audit_id/reconciliation/:feature_id",
-      get(handlers::get_reconciliation),
-    )
-    // ============================================
-    // Subject property routes
-    // ============================================
-    .route(
-      "/api/v1/audits/:audit_id/subjects/:topic_id/purpose",
-      get(handlers::get_functional_purpose).put(handlers::set_functional_purpose),
-    )
     .route(
       "/api/v1/audits/:audit_id/subjects/:topic_id/semantics",
-      get(handlers::get_functional_semantics).put(handlers::add_functional_semantic),
+      get(handlers::get_functional_semantics),
+    )
+    // ============================================
+    // Behavior routes (read-only)
+    // ============================================
+    .route(
+      "/api/v1/audits/:audit_id/behaviors",
+      get(handlers::get_behaviors),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/behaviors/:behavior_id",
+      get(handlers::get_behavior),
     )
     // ============================================
     // Impact analysis routes
@@ -195,17 +178,6 @@ pub fn create_router(state: AppState) -> Router {
     .route(
       "/api/v1/audits/:audit_id/conditions/id/:condition_id",
       delete(handlers::delete_condition),
-    )
-    // ============================================
-    // Behavior routes
-    // ============================================
-    .route(
-      "/api/v1/audits/:audit_id/behaviors",
-      get(handlers::get_behaviors).post(handlers::create_behavior),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/behaviors/:behavior_id",
-      get(handlers::get_behavior).delete(handlers::delete_behavior),
     )
     // ============================================
     // Threat routes

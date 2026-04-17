@@ -218,7 +218,7 @@ async fn parse_requirements_response(
         core::TopicMetadata::RequirementTopic {
           topic: req_topic.clone(),
           description: raw_req.description,
-          section_topic: Some(section_topic.clone()),
+          section_topic: section_topic.clone(),
           author_id: AUTHOR_AGENT_LARGE,
           created_at: String::new(),
         },

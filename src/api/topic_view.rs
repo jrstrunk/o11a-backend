@@ -39,7 +39,6 @@ pub struct ConversationEntry {
 #[serde(rename_all = "snake_case")]
 pub enum ConversationEntryKind {
   FunctionalSemantics,
-  FunctionalPurpose,
   Behavior,
   Requirement,
   Comment,
@@ -1551,29 +1550,6 @@ pub fn build_conversation(
         html,
       });
     }
-  }
-
-  // Functional purpose (why this topic exists)
-  if let Some(purpose) = audit_data.functional_purposes.get(&topic) {
-    let header =
-      render_authored_header("purpose", purpose.author_id, &purpose.created_at);
-    let desc_html = crate::collaborator::formatter::render_description_html(
-      &purpose.text, &topic, audit_data,
-    );
-    let html = format!(
-      "<div class=\"functional-purpose\" data-topic=\"{}\" style=\"{}\">{}\
-       <p style=\"margin: 0\">{}</p></div>",
-      html_escape(topic_id),
-      COMBINED_PANEL_STYLE,
-      header,
-      desc_html
-    );
-    entries.push(ConversationEntry {
-      topic_id: topic_id.to_string(),
-      kind: ConversationEntryKind::FunctionalPurpose,
-      created_at: Some(purpose.created_at.clone()),
-      html,
-    });
   }
 
   // Behaviors for this source code member (immediate, no scope traversal)

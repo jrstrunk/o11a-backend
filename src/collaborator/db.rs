@@ -92,27 +92,6 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .execute(pool)
   .await?;
 
-  // Feature-topic associations
-  sqlx::query(
-    r#"
-        CREATE TABLE IF NOT EXISTS feature_topics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            feature_id INTEGER NOT NULL,
-            topic_id TEXT NOT NULL,
-            relation TEXT NOT NULL,
-            UNIQUE(feature_id, topic_id, relation)
-        )
-        "#,
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_feature_topics_feature ON feature_topics(feature_id)",
-  )
-  .execute(pool)
-  .await?;
-
   // Requirements table (links to features are in feature_requirement_links)
   sqlx::query(
     r#"
@@ -272,36 +251,6 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
   sqlx::query(
     "CREATE INDEX IF NOT EXISTS idx_semantic_links_audit ON semantic_links(audit_id)",
-  )
-  .execute(pool)
-  .await?;
-
-  // Subject properties table (functional purpose and semantics)
-  sqlx::query(
-    r#"
-        CREATE TABLE IF NOT EXISTS subject_properties (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            audit_id TEXT NOT NULL,
-            topic_id TEXT NOT NULL,
-            property_type TEXT NOT NULL,
-            value TEXT NOT NULL,
-            author_id INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            UNIQUE(audit_id, topic_id, property_type)
-        )
-        "#,
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_subj_props_audit ON subject_properties(audit_id)",
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_subj_props_topic ON subject_properties(topic_id)",
   )
   .execute(pool)
   .await?;
@@ -788,15 +737,6 @@ pub struct FeatureRow {
   pub created_at: String,
 }
 
-/// Database row for a feature-topic association
-#[derive(Debug, sqlx::FromRow)]
-pub struct FeatureTopicRow {
-  pub id: i64,
-  pub feature_id: i64,
-  pub topic_id: String,
-  pub relation: String,
-}
-
 /// Creates a new feature and returns the row
 pub async fn create_feature(
   pool: &SqlitePool,
@@ -823,45 +763,6 @@ pub async fn create_feature(
     .bind(id)
     .fetch_one(pool)
     .await
-}
-
-/// Adds a topic association to a feature
-pub async fn add_feature_topic(
-  pool: &SqlitePool,
-  feature_id: i64,
-  topic_id: &str,
-  relation: &str,
-) -> Result<(), sqlx::Error> {
-  sqlx::query(
-    r#"
-        INSERT OR IGNORE INTO feature_topics (feature_id, topic_id, relation)
-        VALUES (?, ?, ?)
-        "#,
-  )
-  .bind(feature_id)
-  .bind(topic_id)
-  .bind(relation)
-  .execute(pool)
-  .await?;
-  Ok(())
-}
-
-/// Removes a topic association from a feature
-pub async fn remove_feature_topic(
-  pool: &SqlitePool,
-  feature_id: i64,
-  topic_id: &str,
-  relation: &str,
-) -> Result<(), sqlx::Error> {
-  sqlx::query(
-    "DELETE FROM feature_topics WHERE feature_id = ? AND topic_id = ? AND relation = ?",
-  )
-  .bind(feature_id)
-  .bind(topic_id)
-  .bind(relation)
-  .execute(pool)
-  .await?;
-  Ok(())
 }
 
 /// Deletes all features and their associated data for an audit.
@@ -896,18 +797,6 @@ pub async fn delete_all_features_for_audit(
 
   // Delete feature-requirement and feature-behavior links
   delete_all_feature_links_for_audit(pool, audit_id).await?;
-
-  // Delete feature topic associations
-  sqlx::query(
-    r#"
-        DELETE FROM feature_topics WHERE feature_id IN (
-            SELECT id FROM features WHERE audit_id = ?
-        )
-        "#,
-  )
-  .bind(audit_id)
-  .execute(pool)
-  .await?;
 
   // Delete features
   sqlx::query("DELETE FROM features WHERE audit_id = ?")
@@ -1033,7 +922,7 @@ pub async fn load_all_features(
         core::TopicMetadata::RequirementTopic {
           topic: req_topic.clone(),
           description: req.description.clone(),
-          section_topic: req.section_topic.as_ref().map(|s| topic::new_topic(s)),
+          section_topic: topic::new_topic(req.section_topic.as_deref().unwrap_or("")),
           author_id: req.author_id,
           created_at: req.created_at.clone(),
         },
@@ -1207,30 +1096,6 @@ pub async fn load_all_features(
           author_id: row.author_id,
           created_at: row.created_at.clone(),
         });
-    }
-  }
-
-  // Load subject properties (functional purpose and semantics)
-  let prop_rows =
-    sqlx::query_as::<_, SubjectPropertyRow>(
-      "SELECT * FROM subject_properties",
-    )
-    .fetch_all(pool)
-    .await?;
-
-  for row in &prop_rows {
-    if let Some(audit_data) = data_context.get_audit_mut(&row.audit_id) {
-      let t = topic::new_topic(&row.topic_id);
-      match row.property_type.as_str() {
-        "functional_purpose" => {
-          audit_data.functional_purposes.insert(t, core::FunctionalPurpose {
-            text: row.value.clone(),
-            author_id: row.author_id,
-            created_at: row.created_at.clone(),
-          });
-        }
-        _ => {}
-      }
     }
   }
 
@@ -1471,21 +1336,6 @@ pub async fn add_feature_requirement_link(
   Ok(())
 }
 
-pub async fn remove_feature_requirement_link(
-  pool: &SqlitePool,
-  feature_id: i64,
-  requirement_id: i64,
-) -> Result<(), sqlx::Error> {
-  sqlx::query(
-    "DELETE FROM feature_requirement_links WHERE feature_id = ? AND requirement_id = ?",
-  )
-  .bind(feature_id)
-  .bind(requirement_id)
-  .execute(pool)
-  .await?;
-  Ok(())
-}
-
 pub async fn add_feature_behavior_link(
   pool: &SqlitePool,
   audit_id: &str,
@@ -1496,21 +1346,6 @@ pub async fn add_feature_behavior_link(
     "INSERT OR IGNORE INTO feature_behavior_links (audit_id, feature_id, behavior_id) VALUES (?, ?, ?)",
   )
   .bind(audit_id)
-  .bind(feature_id)
-  .bind(behavior_id)
-  .execute(pool)
-  .await?;
-  Ok(())
-}
-
-pub async fn remove_feature_behavior_link(
-  pool: &SqlitePool,
-  feature_id: i64,
-  behavior_id: i64,
-) -> Result<(), sqlx::Error> {
-  sqlx::query(
-    "DELETE FROM feature_behavior_links WHERE feature_id = ? AND behavior_id = ?",
-  )
   .bind(feature_id)
   .bind(behavior_id)
   .execute(pool)
@@ -1536,70 +1371,6 @@ pub async fn delete_all_feature_links_for_audit(
 // ============================================================================
 // Subject property operations (functional purpose and semantics)
 // ============================================================================
-
-#[derive(Debug, sqlx::FromRow)]
-pub struct SubjectPropertyRow {
-  pub id: i64,
-  pub audit_id: String,
-  pub topic_id: String,
-  pub property_type: String,
-  pub value: String,
-  pub author_id: i64,
-  pub created_at: String,
-}
-
-/// Sets a subject property (upserts)
-pub async fn set_subject_property(
-  pool: &SqlitePool,
-  audit_id: &str,
-  topic_id: &str,
-  property_type: &str,
-  value: &str,
-  author_id: i64,
-) -> Result<SubjectPropertyRow, sqlx::Error> {
-  sqlx::query(
-    r#"
-        INSERT INTO subject_properties (audit_id, topic_id, property_type, value, author_id)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(audit_id, topic_id, property_type) DO UPDATE SET value = ?, author_id = ?
-        "#,
-  )
-  .bind(audit_id)
-  .bind(topic_id)
-  .bind(property_type)
-  .bind(value)
-  .bind(author_id)
-  .bind(value)
-  .bind(author_id)
-  .execute(pool)
-  .await?;
-
-  sqlx::query_as::<_, SubjectPropertyRow>(
-    "SELECT * FROM subject_properties WHERE audit_id = ? AND topic_id = ? AND property_type = ?",
-  )
-  .bind(audit_id)
-  .bind(topic_id)
-  .bind(property_type)
-  .fetch_one(pool)
-  .await
-}
-
-/// Gets a subject property
-pub async fn get_subject_property(
-  pool: &SqlitePool,
-  audit_id: &str,
-  topic_id: &str,
-  property_type: &str,
-) -> Result<Option<SubjectPropertyRow>, sqlx::Error> {
-  sqlx::query_as::<_, SubjectPropertyRow>(
-    "SELECT * FROM subject_properties WHERE audit_id = ? AND topic_id = ? AND property_type = ?",
-  )
-  .bind(audit_id)
-  .bind(topic_id)
-  .bind(property_type)
-  .fetch_optional(pool)
-  .await
-}
 
 // ============================================================================
 // Impact analysis (threat-feature link) operations
@@ -1849,18 +1620,6 @@ pub async fn create_behavior(
     .await
 }
 
-/// Deletes a behavior
-pub async fn delete_behavior(
-  pool: &SqlitePool,
-  behavior_id: i64,
-) -> Result<(), sqlx::Error> {
-  sqlx::query("DELETE FROM behaviors WHERE id = ?")
-    .bind(behavior_id)
-    .execute(pool)
-    .await?;
-  Ok(())
-}
-
 // ============================================================================
 // Requirement CRUD operations
 // ============================================================================
@@ -1899,26 +1658,6 @@ pub async fn create_requirement(
     .await
 }
 
-/// Deletes a requirement and all its associated links
-pub async fn delete_requirement(
-  pool: &SqlitePool,
-  requirement_id: i64,
-) -> Result<(), sqlx::Error> {
-  sqlx::query("DELETE FROM feature_requirement_links WHERE requirement_id = ?")
-    .bind(requirement_id)
-    .execute(pool)
-    .await?;
-  sqlx::query("DELETE FROM requirement_documentation_topics WHERE requirement_id = ?")
-    .bind(requirement_id)
-    .execute(pool)
-    .await?;
-  sqlx::query("DELETE FROM requirements WHERE id = ?")
-    .bind(requirement_id)
-    .execute(pool)
-    .await?;
-  Ok(())
-}
-
 /// Database row for a requirement documentation topic association
 #[derive(Debug, sqlx::FromRow)]
 pub struct RequirementDocumentationTopicRow {
@@ -1947,21 +1686,6 @@ pub async fn add_requirement_documentation_topic(
 }
 
 /// Removes a documentation topic from a requirement
-pub async fn remove_requirement_documentation_topic(
-  pool: &SqlitePool,
-  requirement_id: i64,
-  topic_id: &str,
-) -> Result<(), sqlx::Error> {
-  sqlx::query(
-    "DELETE FROM requirement_documentation_topics WHERE requirement_id = ? AND topic_id = ?",
-  )
-  .bind(requirement_id)
-  .bind(topic_id)
-  .execute(pool)
-  .await?;
-  Ok(())
-}
-
 /// Sets the section_topic on a requirement
 pub async fn set_requirement_section(
   pool: &SqlitePool,
