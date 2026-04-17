@@ -16,10 +16,12 @@ pub fn node_to_html(
 
 /// Like `node_to_html` but with functional semantics injected after inline
 /// code references (e.g., `pID` becomes `pID` (participation identifier)).
+/// `semantics` maps a declaration topic to the semantic text strings that
+/// describe it.
 pub fn node_to_html_with_semantics(
   node: &DocumentationNode,
   nodes_map: &BTreeMap<topic::Topic, core::Node>,
-  semantics: &BTreeMap<topic::Topic, Vec<core::FunctionalSemantic>>,
+  semantics: &BTreeMap<topic::Topic, Vec<String>>,
 ) -> String {
   do_node_to_html(node, 0, nodes_map, Some(semantics))
 }
@@ -28,7 +30,7 @@ fn do_node_to_html(
   node: &DocumentationNode,
   indent_level: usize,
   nodes_map: &BTreeMap<topic::Topic, core::Node>,
-  semantics: Option<&BTreeMap<topic::Topic, Vec<core::FunctionalSemantic>>>,
+  semantics: Option<&BTreeMap<topic::Topic, Vec<String>>>,
 ) -> String {
   match node.resolve(nodes_map) {
     DocumentationNode::Root { children, .. } => {
@@ -131,7 +133,7 @@ fn do_node_to_html(
             if let Some(sems) = sem_map.get(t) {
               let joined: String = sems
                 .iter()
-                .map(|s| formatting::html_escape(&s.text))
+                .map(|s| formatting::html_escape(s))
                 .collect::<Vec<_>>()
                 .join("; ");
               if !joined.is_empty() {

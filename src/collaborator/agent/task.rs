@@ -39,7 +39,7 @@ use serde::Deserialize;
 use crate::collaborator::agent::context;
 use crate::collaborator::agent::router::{self, TaskSize};
 use crate::collaborator::models::AUTHOR_AGENT_LARGE;
-use crate::core::{self, AST, AuditData, Feature, Requirement, topic};
+use crate::core::{self, AST, AuditData, Requirement, topic};
 
 /// Raw requirement as returned by the LLM (no topic ID yet).
 #[derive(Deserialize)]
@@ -460,7 +460,6 @@ struct LLMSemanticLink {
 
 /// Result of LLM pass 3: semantic links for a (section, member) pair.
 pub struct SemanticLinkPass3Result {
-  pub section_topic: topic::Topic,
   pub links: Vec<core::SemanticLink>,
 }
 
@@ -617,15 +616,12 @@ pub async fn semantic_link_pass3(
           doc_topics
         },
         declaration_topic: topic::new_topic(&l.declaration_topic),
-        semantic_text: l.semantic_text,
+        description: l.semantic_text,
       }
     })
     .collect();
 
-  Ok(SemanticLinkPass3Result {
-    section_topic: section_topic.clone(),
-    links,
-  })
+  Ok(SemanticLinkPass3Result { links })
 }
 
 /// Collect all documentation section topics that have content (TitledTopic entries).
@@ -807,7 +803,6 @@ struct LLMSynthesizedFeature {
 
 /// Result of feature synthesis.
 pub struct SynthesizedFeatures {
-  pub features: BTreeMap<topic::Topic, Feature>,
   pub topic_metadata: BTreeMap<topic::Topic, core::TopicMetadata>,
   /// Feature → requirement links (F-topic → [R-topics])
   pub feature_requirement_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
@@ -865,9 +860,8 @@ fn render_requirements_for_reconciliation(audit_data: &AuditData) -> String {
     .keys()
     .filter(|rt| !in_sections.contains(rt))
     .filter_map(|rt| {
-      if let Some(core::TopicMetadata::RequirementTopic {
-        description, ..
-      }) = audit_data.topic_metadata.get(rt)
+      if let Some(core::TopicMetadata::RequirementTopic { description, .. }) =
+        audit_data.topic_metadata.get(rt)
       {
         Some(serde_json::json!({
           "topic": rt.id(),
@@ -968,7 +962,6 @@ pub async fn synthesize_features(
       &prompt,
     ).await?;
 
-  let mut features = BTreeMap::new();
   let mut topic_metadata = BTreeMap::new();
   let mut feature_requirement_links = BTreeMap::new();
   let mut feature_behavior_links = BTreeMap::new();
@@ -988,26 +981,22 @@ pub async fn synthesize_features(
       .map(|id| topic::new_topic(&id))
       .collect();
 
-    feature_requirement_links
-      .insert(feature_topic.clone(), requirement_topics.clone());
+    feature_requirement_links.insert(feature_topic.clone(), requirement_topics);
     feature_behavior_links.insert(feature_topic.clone(), behavior_topics);
 
     topic_metadata.insert(
       feature_topic.clone(),
       core::TopicMetadata::FeatureTopic {
-        topic: feature_topic.clone(),
+        topic: feature_topic,
         name: raw.name,
         description: raw.description,
         author_id: AUTHOR_AGENT_LARGE,
         created_at: String::new(),
       },
     );
-
-    features.insert(feature_topic, Feature);
   }
 
   Ok(SynthesizedFeatures {
-    features,
     topic_metadata,
     feature_requirement_links,
     feature_behavior_links,

@@ -148,7 +148,6 @@ pub async fn build_requirements(
     )
   });
 
-  audit_data.features.clear();
   let req_count = parsed.requirements.len();
   audit_data.requirements = parsed.requirements;
   audit_data.topic_metadata.extend(parsed.topic_metadata);
@@ -179,7 +178,8 @@ pub async fn synthesize_features(
   println!("  Reconciling requirements and behaviors into features...");
   let mut synthesized =
     task::synthesize_features(&requirements_json, &behaviors_json).await?;
-  println!("  Synthesized {} features", synthesized.features.len());
+  let feature_count = synthesized.feature_requirement_links.len();
+  println!("  Synthesized {} features", feature_count);
 
   // Delete old features (but keep requirements and behaviors — we're reassigning them)
   // Only delete feature rows, not requirements
@@ -194,8 +194,7 @@ pub async fn synthesize_features(
     audit_data
       .topic_metadata
       .retain(|_, m| !matches!(m, core::TopicMetadata::FeatureTopic { .. }));
-    audit_data.features.clear();
-      audit_data.feature_requirement_links.clear();
+    audit_data.feature_requirement_links.clear();
     audit_data.feature_behavior_links.clear();
   }
 
@@ -203,7 +202,9 @@ pub async fn synthesize_features(
   let _ = db::delete_all_feature_links_for_audit(&state.db, audit_id).await;
 
   // Persist features to database
-  for feat_topic in synthesized.features.keys() {
+  let feat_topics: Vec<topic::Topic> =
+    synthesized.feature_requirement_links.keys().cloned().collect();
+  for feat_topic in &feat_topics {
     let (name, description) = match synthesized.topic_metadata.get(feat_topic) {
       Some(core::TopicMetadata::FeatureTopic {
         name, description, ..
@@ -260,9 +261,7 @@ pub async fn synthesize_features(
       .get_audit_mut(audit_id)
       .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
 
-    let feature_count = synthesized.features.len();
     audit_data.topic_metadata.extend(synthesized.topic_metadata);
-    audit_data.features = synthesized.features;
     audit_data.feature_requirement_links = synthesized.feature_requirement_links;
     audit_data.feature_behavior_links = synthesized.feature_behavior_links;
 
@@ -330,7 +329,6 @@ pub async fn build_behaviors(
 
   // Persist to database and build in-memory state
   let mut new_metadata = std::collections::BTreeMap::new();
-  let mut new_behaviors = std::collections::BTreeMap::new();
 
   for (member_topic, description) in &all_behaviors {
     let row = db::create_behavior(
@@ -348,15 +346,13 @@ pub async fn build_behaviors(
     new_metadata.insert(
       beh_topic.clone(),
       core::TopicMetadata::BehaviorTopic {
-        topic: beh_topic.clone(),
+        topic: beh_topic,
         description: description.clone(),
         member_topic: member_topic.clone(),
         author_id: AUTHOR_AGENT_LARGE,
         created_at: row.created_at,
       },
     );
-
-    new_behaviors.insert(beh_topic, core::Behavior {});
   }
 
   // Update in-memory state
@@ -372,10 +368,8 @@ pub async fn build_behaviors(
   audit_data
     .topic_metadata
     .retain(|_, m| !matches!(m, core::TopicMetadata::BehaviorTopic { .. }));
-  audit_data.behaviors.clear();
 
   audit_data.topic_metadata.extend(new_metadata);
-  audit_data.behaviors.extend(new_behaviors);
   core::rebuild_feature_context(audit_data);
 
   println!(
@@ -524,11 +518,6 @@ pub async fn build_semantic_links(
   );
 
   // ---- Pass 2: section × contract → members (mechanical + LLM) ----
-  let mut section_members: std::collections::HashMap<
-    topic::Topic,
-    Vec<topic::Topic>,
-  > = std::collections::HashMap::new();
-
   let mut pass2_handles = Vec::new();
   for (section_topic, contract_topics) in &section_contracts {
     let (section_text, confirmed_members) = {
@@ -563,17 +552,6 @@ pub async fn build_semantic_links(
         }
       }
 
-      // Seed section_members with mechanical results
-      if !mech_members.is_empty() {
-        let existing =
-          section_members.entry(section_topic.clone()).or_default();
-        for m in &mech_members {
-          if !existing.contains(m) {
-            existing.push(m.clone());
-          }
-        }
-      }
-
       (stxt, mech_members)
     };
 
@@ -603,20 +581,11 @@ pub async fn build_semantic_links(
   for handle in pass2_handles {
     match handle.await {
       Ok(Ok(result)) => {
-        // Also add to the flat section_members for backward compatibility
-        let members = section_members
-          .entry(result.section_topic.clone())
-          .or_default();
-
         let doc_members = section_doc_members
           .entry(result.section_topic.clone())
           .or_default();
 
         for mapping in result.member_mappings {
-          if !members.contains(&mapping.member_topic) {
-            members.push(mapping.member_topic.clone());
-          }
-
           // If no doc_topics, use the section topic as fallback
           let doc_topics = if mapping.doc_topics.is_empty() {
             vec![result.section_topic.clone()]
@@ -637,13 +606,11 @@ pub async fn build_semantic_links(
     }
   }
 
-  let total_member_pairs: usize =
-    section_members.values().map(|v| v.len()).sum();
   let total_doc_groups: usize =
     section_doc_members.values().map(|dm| dm.len()).sum();
   println!(
-    "  Pass 2 complete: {} section-member pairs, {} doc-topic groups for pass3",
-    total_member_pairs, total_doc_groups
+    "  Pass 2 complete: {} doc-topic groups for pass3",
+    total_doc_groups
   );
 
   // ---- Pass 3: semantics extraction (doc-first, code for disambiguation) ----
@@ -832,7 +799,7 @@ pub async fn build_semantic_links(
     } else {
       let decl_id = decl_topic.id().to_string();
       let texts: Vec<String> =
-        links.iter().map(|l| l.semantic_text.clone()).collect();
+        links.iter().map(|l| l.description.clone()).collect();
       let original_links = links.clone();
       let decl_topic = decl_topic.clone();
       condense_count += 1;
@@ -870,7 +837,7 @@ pub async fn build_semantic_links(
           all_links.push(core::SemanticLink {
             documentation_topics: doc_topics,
             declaration_topic: decl_topic.clone(),
-            semantic_text: entry.text,
+            description: entry.text,
           });
         }
       }
@@ -902,7 +869,7 @@ pub async fn build_semantic_links(
       &state.db,
       audit_id,
       link.declaration_topic.id(),
-      &link.semantic_text,
+      &link.description,
       AUTHOR_AGENT_LARGE.into(),
       &doc_topic_ids,
     )
@@ -924,30 +891,33 @@ pub async fn build_semantic_links(
     .get_audit_mut(audit_id)
     .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
 
-  audit_data.semantic_links = all_links.clone();
-
-  // Populate functional_semantics with provenance and P-topic IDs.
-  // Transitive topics have already been resolved to their base topics
+  // Populate FunctionalSemanticTopic entries in topic_metadata with P-topic
+  // IDs. Transitive topics have already been resolved to their base topics
   // before condensation, so declaration_topic is always the base.
   let now = crate::collaborator::agent::log::iso_timestamp();
   for (link, &db_id) in all_links.iter().zip(link_ids.iter()) {
-    audit_data
-      .functional_semantics
-      .entry(link.declaration_topic.clone())
-      .or_default()
-      .push(core::FunctionalSemantic {
-        topic: topic::new_functional_property_topic(db_id as i32),
-        text: link.semantic_text.clone(),
+    let sem_topic = topic::new_functional_property_topic(db_id as i32);
+
+    audit_data.topic_metadata.insert(
+      sem_topic.clone(),
+      core::TopicMetadata::FunctionalSemanticTopic {
+        topic: sem_topic,
+        description: link.description.clone(),
+        declaration_topic: link.declaration_topic.clone(),
         documentation_topics: link.documentation_topics.clone(),
         author_id: AUTHOR_AGENT_LARGE,
         created_at: now.clone(),
-      });
+      },
+    );
   }
+
+  // Rebuild the declaration_semantics reverse index from topic_metadata.
+  core::rebuild_feature_context(audit_data);
 
   println!(
     "  Persisted {} semantic links across {} declarations",
     all_links.len(),
-    audit_data.functional_semantics.len()
+    audit_data.declaration_semantics.len()
   );
 
   Ok(())

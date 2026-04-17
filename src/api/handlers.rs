@@ -318,6 +318,7 @@ pub async fn get_contracts(
       | crate::core::TopicMetadata::FeatureTopic { .. }
       | crate::core::TopicMetadata::RequirementTopic { .. }
       | crate::core::TopicMetadata::BehaviorTopic { .. }
+      | crate::core::TopicMetadata::FunctionalSemanticTopic { .. }
       | crate::core::TopicMetadata::ThreatTopic { .. }
       | crate::core::TopicMetadata::InvariantTopic { .. }
       | crate::core::TopicMetadata::DocumentationTopic { .. } => false,
@@ -819,6 +820,17 @@ pub struct BehaviorTopicResponse {
   pub created_at: String,
 }
 
+/// Response for FunctionalSemanticTopic metadata
+#[derive(Debug, Serialize)]
+pub struct SemanticTopicResponse {
+  pub topic_id: String,
+  pub description: String,
+  pub declaration_topic: String,
+  pub documentation_topics: Vec<String>,
+  pub author_id: i64,
+  pub created_at: String,
+}
+
 /// Response for ThreatTopic metadata
 #[derive(Debug, Serialize)]
 pub struct ThreatTopicResponse {
@@ -861,6 +873,8 @@ pub enum TopicMetadataResponse {
   Requirement(RequirementTopicResponse),
   #[serde(rename = "behavior")]
   Behavior(BehaviorTopicResponse),
+  #[serde(rename = "semantic")]
+  Semantic(SemanticTopicResponse),
   #[serde(rename = "threat")]
   Threat(ThreatTopicResponse),
   #[serde(rename = "invariant")]
@@ -1013,6 +1027,25 @@ fn topic_metadata_to_response(
       topic_id: topic.id.clone(),
       description: description.clone(),
       member_topic: member_topic.id.clone(),
+      author_id: *author_id,
+      created_at: created_at.clone(),
+    }),
+
+    crate::core::TopicMetadata::FunctionalSemanticTopic {
+      description,
+      declaration_topic,
+      documentation_topics,
+      author_id,
+      created_at,
+      ..
+    } => TopicMetadataResponse::Semantic(SemanticTopicResponse {
+      topic_id: topic.id.clone(),
+      description: description.clone(),
+      declaration_topic: declaration_topic.id.clone(),
+      documentation_topics: documentation_topics
+        .iter()
+        .map(|t| t.id.clone())
+        .collect(),
       author_id: *author_id,
       created_at: created_at.clone(),
     }),
@@ -1696,13 +1729,14 @@ pub async fn get_features(
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
   let features = audit_data
-    .features
-    .keys()
-    .filter_map(|ft| {
-      audit_data
-        .topic_metadata
-        .get(ft)
-        .map(|m| topic_metadata_to_response(ft, m))
+    .topic_metadata
+    .iter()
+    .filter_map(|(t, m)| {
+      if matches!(m, crate::core::TopicMetadata::FeatureTopic { .. }) {
+        Some(topic_metadata_to_response(t, m))
+      } else {
+        None
+      }
     })
     .collect();
 
@@ -1728,7 +1762,10 @@ pub async fn get_feature_requirements(
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  if !audit_data.features.contains_key(&feature_topic) {
+  if !matches!(
+    audit_data.topic_metadata.get(&feature_topic),
+    Some(crate::core::TopicMetadata::FeatureTopic { .. })
+  ) {
     return Err(StatusCode::NOT_FOUND);
   }
 
@@ -1788,7 +1825,10 @@ fn features_for_topic(
 
   match t.kind() {
     Some(TopicKind::Feature) => {
-      if audit_data.features.contains_key(t) {
+      if matches!(
+        audit_data.topic_metadata.get(t),
+        Some(core::TopicMetadata::FeatureTopic { .. })
+      ) {
         features.push(t.clone());
       }
       return features;
@@ -1838,7 +1878,8 @@ fn features_for_topic(
   for (ft, beh_topics) in &audit_data.feature_behavior_links {
     for bt in beh_topics {
       if let Some(core::TopicMetadata::BehaviorTopic {
-        member_topic: bmt, ..
+        member_topic: bmt,
+        ..
       }) = audit_data.topic_metadata.get(bt)
       {
         if *bmt == member_topic && !features.contains(ft) {
@@ -2173,11 +2214,17 @@ pub async fn get_documentation_panel(
     }
 
     // Semantic link doc topics
-    if let Some(sems) = audit_data.functional_semantics.get(t) {
-      for sem in sems {
-        for dt in &sem.documentation_topics {
-          if !mention_topics.contains(dt) {
-            mention_topics.push(dt.clone());
+    if let Some(sem_topics) = audit_data.declaration_semantics.get(t) {
+      for sem_topic in sem_topics {
+        if let Some(core::TopicMetadata::FunctionalSemanticTopic {
+          documentation_topics,
+          ..
+        }) = audit_data.topic_metadata.get(sem_topic)
+        {
+          for dt in documentation_topics {
+            if !mention_topics.contains(dt) {
+              mention_topics.push(dt.clone());
+            }
           }
         }
       }
@@ -2252,16 +2299,28 @@ pub async fn get_functional_semantics(
 
   let t = topic::new_topic(&topic_id);
   let entries = audit_data
-    .functional_semantics
+    .declaration_semantics
     .get(&t)
-    .map(|sems| {
-      sems
+    .map(|sem_topics| {
+      sem_topics
         .iter()
-        .map(|sem| SubjectPropertyResponse {
-          topic_id: topic_id.clone(),
-          property_type: "functional_semantics".to_string(),
-          value: sem.text.clone(),
-          author_id: sem.author_id,
+        .filter_map(|sem_topic| {
+          let metadata = audit_data.topic_metadata.get(sem_topic)?;
+          if let core::TopicMetadata::FunctionalSemanticTopic {
+            description,
+            author_id,
+            ..
+          } = metadata
+          {
+            Some(SubjectPropertyResponse {
+              topic_id: topic_id.clone(),
+              property_type: "functional_semantics".to_string(),
+              value: description.clone(),
+              author_id: *author_id,
+            })
+          } else {
+            None
+          }
         })
         .collect()
     })
@@ -2681,11 +2740,14 @@ pub async fn get_behaviors(
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
   let behaviors: Vec<TopicMetadataResponse> = audit_data
-    .behaviors
-    .keys()
-    .filter_map(|bt| {
-      let metadata = audit_data.topic_metadata.get(bt)?;
-      Some(topic_metadata_to_response(bt, metadata))
+    .topic_metadata
+    .iter()
+    .filter_map(|(bt, m)| {
+      if matches!(m, core::TopicMetadata::BehaviorTopic { .. }) {
+        Some(topic_metadata_to_response(bt, m))
+      } else {
+        None
+      }
     })
     .collect();
 

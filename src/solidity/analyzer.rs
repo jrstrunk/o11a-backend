@@ -3503,6 +3503,7 @@ fn populate_context(
       TopicMetadata::FeatureTopic { .. }
       | TopicMetadata::RequirementTopic { .. }
       | TopicMetadata::BehaviorTopic { .. }
+      | TopicMetadata::FunctionalSemanticTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. }
       | TopicMetadata::DocumentationTopic { .. } => {}

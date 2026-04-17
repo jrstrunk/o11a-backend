@@ -346,18 +346,18 @@ pub fn highlighted_name(metadata: &TopicMetadata) -> String {
     TopicMetadata::FeatureTopic { name, .. } => {
       format!("<span class=\"keyword\">feat</span> {}", html_escape(name))
     }
-    TopicMetadata::RequirementTopic { description, .. } => {
-      format!(
-        "<span class=\"requirement\">{}</span>",
-        html_escape(description)
-      )
-    }
-    TopicMetadata::BehaviorTopic { description, .. } => {
-      format!(
-        "<span class=\"behavior\">{}</span>",
-        html_escape(description)
-      )
-    }
+    TopicMetadata::RequirementTopic { description, .. } => format!(
+      "<span class=\"requirement\">{}</span>",
+      html_escape(description)
+    ),
+    TopicMetadata::BehaviorTopic { description, .. } => format!(
+      "<span class=\"behavior\">{}</span>",
+      html_escape(description)
+    ),
+    TopicMetadata::FunctionalSemanticTopic { description, .. } => format!(
+      "<span class=\"semantic\">{}</span>",
+      html_escape(description)
+    ),
     TopicMetadata::ThreatTopic { description, .. } => {
       format!("<span class=\"threat\">{}</span>", html_escape(description))
     }
@@ -392,14 +392,12 @@ fn get_breadcrumb_parts<'a>(
     return vec![BreadcrumbPart::Topic(metadata.topic())];
   }
 
-  // Requirements: parent feature then "Requirement" label
-  if matches!(metadata, TopicMetadata::RequirementTopic { .. }) {
-    if let Some(feature_topic) = metadata.target_topic() {
-      return vec![
-        BreadcrumbPart::Topic(feature_topic),
-        BreadcrumbPart::Text("Requirement"),
-      ];
-    }
+  // Requirements: parent section then "Requirement" label
+  if let TopicMetadata::RequirementTopic { section_topic, .. } = metadata {
+    return vec![
+      BreadcrumbPart::Topic(section_topic),
+      BreadcrumbPart::Text("Requirement"),
+    ];
   }
 
   // Threats: parent feature then "Threat" label
@@ -604,47 +602,32 @@ pub fn render_source_text(
     ));
   }
 
-  // Requirement topics: render with comment-style header
-  if let Some(TopicMetadata::RequirementTopic {
-    description,
-    author_id,
-    created_at,
-    ..
-  }) = audit_data.topic_metadata.get(topic)
-  {
-    let header = render_authored_header("req", *author_id, created_at);
-    let desc_html = crate::collaborator::formatter::render_description_html(
-      description,
-      topic,
-      audit_data,
-    );
-    let content = format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
-    return Some(formatting::format_topic_block(
-      topic,
-      &content,
-      "requirement",
-      topic,
-    ));
-  }
-
-  // Behavior topics: render with comment-style header
-  if let Some(TopicMetadata::BehaviorTopic {
-    description,
-    author_id,
-    created_at,
-    ..
-  }) = audit_data.topic_metadata.get(topic)
-  {
-    let header = render_authored_header("behavior", *author_id, created_at);
-    let desc_html = crate::collaborator::formatter::render_description_html(
-      description,
-      topic,
-      audit_data,
-    );
-    let content = format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
-    return Some(formatting::format_topic_block(
-      topic, &content, "behavior", topic,
-    ));
+  // Generated topics (requirement/behavior/semantic): render with comment-style header.
+  if let Some(metadata) = audit_data.topic_metadata.get(topic) {
+    let labels = match metadata {
+      TopicMetadata::RequirementTopic { .. } => Some(("req", "requirement")),
+      TopicMetadata::BehaviorTopic { .. } => Some(("behavior", "behavior")),
+      TopicMetadata::FunctionalSemanticTopic { .. } => {
+        Some(("semantics", "semantic"))
+      }
+      _ => None,
+    };
+    if let Some((keyword, css_class)) = labels {
+      let description = metadata.description().unwrap_or("");
+      let author_id = metadata.author_id().unwrap_or(0);
+      let created_at = metadata.created_at().unwrap_or("");
+      let header = render_authored_header(keyword, author_id, created_at);
+      let desc_html = crate::collaborator::formatter::render_description_html(
+        description,
+        topic,
+        audit_data,
+      );
+      let content =
+        format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
+      return Some(formatting::format_topic_block(
+        topic, &content, css_class, topic,
+      ));
+    }
   }
 
   // Threat topics: render with comment-style header including severity
@@ -689,10 +672,7 @@ pub fn render_source_text(
     );
     let content = format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
     return Some(formatting::format_topic_block(
-      topic,
-      &content,
-      "invariant",
-      topic,
+      topic, &content, "invariant", topic,
     ));
   }
 
@@ -711,13 +691,14 @@ pub fn render_source_text(
         &audit_data.topic_metadata,
       ))
     }
-    Some(Node::Documentation(doc_node)) => Some(
-      crate::documentation::formatter::node_to_html_with_semantics(
+    Some(Node::Documentation(doc_node)) => {
+      let sem_texts = core::semantic_texts_by_declaration(audit_data);
+      Some(crate::documentation::formatter::node_to_html_with_semantics(
         doc_node,
         &audit_data.nodes,
-        &audit_data.functional_semantics,
-      ),
-    ),
+        &sem_texts,
+      ))
+    }
     Some(Node::Comment(nodes)) => {
       Some(crate::collaborator::formatter::render_comment_html(
         nodes,
@@ -1486,6 +1467,59 @@ pub fn build_topic_view(
   })
 }
 
+/// Build a `ConversationEntry` for a Requirement, Behavior, or
+/// FunctionalSemantic topic. Returns `None` if `metadata` is none of those.
+/// `description_container` is the topic used for resolving inline references
+/// in the description.
+fn build_generated_conversation_entry(
+  audit_data: &AuditData,
+  topic: &topic::Topic,
+  description_container: &topic::Topic,
+  metadata: &TopicMetadata,
+) -> Option<ConversationEntry> {
+  let (keyword, css_class, kind) = match metadata {
+    TopicMetadata::RequirementTopic { .. } => {
+      ("req", "requirement", ConversationEntryKind::Requirement)
+    }
+    TopicMetadata::BehaviorTopic { .. } => {
+      ("behavior", "behavior", ConversationEntryKind::Behavior)
+    }
+    TopicMetadata::FunctionalSemanticTopic { .. } => (
+      "semantics",
+      "functional-semantics",
+      ConversationEntryKind::FunctionalSemantics,
+    ),
+    _ => return None,
+  };
+
+  let description = metadata.description()?;
+  let author_id = metadata.author_id()?;
+  let created_at = metadata.created_at()?;
+
+  let header = render_authored_header(keyword, author_id, created_at);
+  let desc_html = crate::collaborator::formatter::render_description_html(
+    description,
+    description_container,
+    audit_data,
+  );
+  let html = format!(
+    "<div class=\"{}\" data-topic=\"{}\" style=\"{}\">{}\
+     <p style=\"margin: 0\">{}</p></div>",
+    css_class,
+    html_escape(topic.id()),
+    COMBINED_PANEL_STYLE,
+    header,
+    desc_html,
+  );
+
+  Some(ConversationEntry {
+    topic_id: topic.id().to_string(),
+    kind,
+    created_at: Some(created_at.to_string()),
+    html,
+  })
+}
+
 /// Build the conversation for a topic: direct comments + mentions, each with thread HTML.
 pub fn build_conversation(
   topic_id: &str,
@@ -1498,122 +1532,29 @@ pub fn build_conversation(
 
   let mut entries: Vec<ConversationEntry> = Vec::new();
 
-  // Functional semantics (what this topic represents in project context)
-  if let Some(sems) = audit_data.functional_semantics.get(&topic) {
-    for sem in sems {
-      let provenance_html = if sem.documentation_topics.is_empty() {
-        String::new()
-      } else {
-        let links: Vec<String> = sem
-          .documentation_topics
-          .iter()
-          .map(|doc_topic| {
-            let doc_name = audit_data
-              .topic_metadata
-              .get(doc_topic)
-              .and_then(|m| m.name())
-              .unwrap_or(doc_topic.id());
-            format!(
-              "<a data-topic=\"{}\">{}</a>",
-              doc_topic.id(),
-              html_escape(doc_name)
-            )
-          })
-          .collect();
-        format!(
-          " <span class=\"provenance\">(from {})</span>",
-          links.join(", ")
-        )
-      };
-
-      let header =
-        render_authored_header("semantics", sem.author_id, &sem.created_at);
-      let desc_html = crate::collaborator::formatter::render_description_html(
-        &sem.text, &topic, audit_data,
-      );
-      let html = format!(
-        "<div class=\"functional-semantics\" data-topic=\"{}\" style=\"{}\">{}\
-         <p style=\"margin: 0\">{}{}</p></div>",
-        html_escape(sem.topic.id()),
-        COMBINED_PANEL_STYLE,
-        header,
-        desc_html,
-        provenance_html
-      );
-      entries.push(ConversationEntry {
-        topic_id: sem.topic.id().to_string(),
-        kind: ConversationEntryKind::FunctionalSemantics,
-        created_at: Some(sem.created_at.clone()),
-        html,
-      });
-    }
-  }
-
-  // Behaviors for this source code member (immediate, no scope traversal)
-  if let Some(beh_topics) = audit_data.member_behaviors.get(&topic) {
-    for bt in beh_topics {
-      if let Some(TopicMetadata::BehaviorTopic {
-        description,
-        author_id,
-        created_at,
-        ..
-      }) = audit_data.topic_metadata.get(bt)
-      {
-        let header = render_authored_header("behavior", *author_id, created_at);
-        let desc_html = crate::collaborator::formatter::render_description_html(
-          description,
-          bt,
-          audit_data,
-        );
-        let html = format!(
-          "<div class=\"behavior\" data-topic=\"{}\" style=\"{}\">{}\
-           <p style=\"margin: 0\">{}</p></div>",
-          html_escape(bt.id()),
-          COMBINED_PANEL_STYLE,
-          header,
-          desc_html,
-        );
-        entries.push(ConversationEntry {
-          topic_id: bt.id().to_string(),
-          kind: ConversationEntryKind::Behavior,
-          created_at: Some(created_at.clone()),
-          html,
-        });
-      }
-    }
-  }
-
-  // Requirements for this documentation section (immediate, no scope traversal)
-  if let Some(req_topics) = audit_data.section_requirements.get(&topic) {
-    for rt in req_topics {
-      if let Some(TopicMetadata::RequirementTopic {
-        description,
-        author_id,
-        created_at,
-        ..
-      }) = audit_data.topic_metadata.get(rt)
-      {
-        let header = render_authored_header("req", *author_id, created_at);
-        let desc_html = crate::collaborator::formatter::render_description_html(
-          description,
-          rt,
-          audit_data,
-        );
-        let html = format!(
-          "<div class=\"requirement\" data-topic=\"{}\" style=\"{}\">{}\
-           <p style=\"margin: 0\">{}</p></div>",
-          html_escape(rt.id()),
-          COMBINED_PANEL_STYLE,
-          header,
-          desc_html,
-        );
-        entries.push(ConversationEntry {
-          topic_id: rt.id().to_string(),
-          kind: ConversationEntryKind::Requirement,
-          created_at: Some(created_at.clone()),
-          html,
-        });
-      }
+  // Functional semantics, behaviors, and requirements all render via the
+  // same generated-topic helper, looked up via their respective reverse indexes.
+  let related_iter = audit_data
+    .declaration_semantics
+    .get(&topic)
+    .into_iter()
+    .chain(audit_data.member_behaviors.get(&topic))
+    .chain(audit_data.section_requirements.get(&topic))
+    .flatten();
+  for rt in related_iter {
+    let Some(metadata) = audit_data.topic_metadata.get(rt) else {
+      continue;
+    };
+    // Semantics use the parent declaration as the description container;
+    // behaviors and requirements use their own topic.
+    let container = match metadata {
+      TopicMetadata::FunctionalSemanticTopic { .. } => &topic,
+      _ => rt,
+    };
+    if let Some(entry) = build_generated_conversation_entry(
+      audit_data, rt, container, metadata,
+    ) {
+      entries.push(entry);
     }
   }
 
@@ -1829,6 +1770,7 @@ fn render_topic_node(
     TopicMetadata::FeatureTopic { .. }
       | TopicMetadata::RequirementTopic { .. }
       | TopicMetadata::BehaviorTopic { .. }
+      | TopicMetadata::FunctionalSemanticTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. }
   );
@@ -1915,6 +1857,7 @@ fn topic_kind_label(metadata: &TopicMetadata) -> &'static str {
     TopicMetadata::FeatureTopic { .. } => "feature",
     TopicMetadata::RequirementTopic { .. } => "requirement",
     TopicMetadata::BehaviorTopic { .. } => "behavior",
+    TopicMetadata::FunctionalSemanticTopic { .. } => "semantic",
     TopicMetadata::ThreatTopic { .. } => "threat",
     TopicMetadata::InvariantTopic { .. } => "invariant",
   }
