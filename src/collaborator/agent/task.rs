@@ -1136,11 +1136,6 @@ Apply the following transformations:\n\
   organize the content into logical sections based on topic changes. \
   Do not change the content — only add structure to unstructured documents. \
   Documents that already have headers should keep their existing structure.\n\
-- **Code identifiers**: Wrap references to code identifiers — such as \
-  function names, variable names, contract names, role constants, event \
-  names, error names, and similar code artifacts — in backtick \
-  inline code blocks. For example, `NUDGE_ADMIN_ROLE` not NUDGE_ADMIN_ROLE, \
-  `transferFrom()` not transferFrom().\n\
 - **Content**: Do NOT alter, summarize, rephrase, or remove any textual \
   content. Every sentence, paragraph, and data point must be preserved \
   verbatim. Only formatting and presentation should change.\n\n\

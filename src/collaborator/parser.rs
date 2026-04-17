@@ -54,6 +54,18 @@ pub fn parse_comment(
   audit_data: &core::AuditData,
 ) -> (Vec<Topic>, Vec<CommentNode>) {
   let nodes = scan_inline_nodes(content, audit_data);
+  let nodes = doc_parser::split_text_code_references(
+    nodes,
+    |node| match node {
+      CommentNode::Text { value } => Some(value.as_str()),
+      _ => None,
+    },
+    |value| CommentNode::Text { value },
+    |code_str| CommentNode::InlineCode {
+      value: code_str.to_string(),
+      children: tokenize_comment_code(code_str, audit_data),
+    },
+  );
 
   let mut mentions = Vec::new();
   for node in &nodes {
@@ -327,3 +339,4 @@ fn tokenize_comment_code(
 
   tokens
 }
+
