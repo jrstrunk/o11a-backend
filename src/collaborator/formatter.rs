@@ -1,4 +1,4 @@
-use crate::collaborator::parser::CommentNode;
+use crate::collaborator::parser::{self, CommentNode};
 use crate::core;
 use crate::core::topic;
 use crate::formatting;
@@ -90,6 +90,20 @@ fn node_to_html(
       formatting::format_link(url, None, &formatting::html_escape(text))
     }
   }
+}
+
+/// Parse a description string with the comment markdown parser and render
+/// to inline HTML with code reference resolution. Does not wrap in a block.
+pub fn render_description_html(
+  text: &str,
+  owner_topic: &topic::Topic,
+  audit_data: &core::AuditData,
+) -> String {
+  let (_referenced_topics, nodes) = parser::parse_comment(text, audit_data);
+  nodes
+    .iter()
+    .map(|node| node_to_html(node, owner_topic, &audit_data.nodes))
+    .collect()
 }
 
 /// Renders comment AST nodes to plain text (raw markdown without semantics).

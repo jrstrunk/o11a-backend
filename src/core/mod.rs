@@ -219,6 +219,8 @@ pub struct Feature;
 /// context of the project, linked to the documentation topics it was derived from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionalSemantic {
+  /// P-prefixed topic ID for this semantic property
+  pub topic: topic::Topic,
   /// The semantic meaning text (e.g., "proportional reward multiplier")
   pub text: String,
   /// D-prefixed documentation topics this semantic was derived from

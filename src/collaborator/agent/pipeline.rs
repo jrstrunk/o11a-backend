@@ -776,7 +776,30 @@ pub async fn build_semantic_links(
 
   println!("  Pass 3 complete: {} semantic links", all_links.len());
 
-  // Condense repetitive semantics
+  // Resolve transitive topics before condensation so that semantics from
+  // interface stubs are grouped with their base implementation. After this
+  // step, all links carry the base (non-transitive) declaration topic.
+  {
+    let ctx = state.data_context.lock().map_err(|e| {
+      format!("Mutex poisoned in build_semantic_links (resolve transitive): {}", e)
+    })?;
+    let audit_data = ctx
+      .get_audit(audit_id)
+      .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+
+    for link in &mut all_links {
+      if let Some(base) = audit_data
+        .topic_metadata
+        .get(&link.declaration_topic)
+        .and_then(|m| m.transitive_topic())
+      {
+        link.declaration_topic = base.clone();
+      }
+    }
+  }
+
+  // Condense repetitive semantics — now grouped by base topic, so
+  // transitive semantics are condensed alongside their base.
   let unique_declarations = {
     let mut decls = std::collections::BTreeSet::new();
     for link in &all_links {
@@ -868,14 +891,15 @@ pub async fn build_semantic_links(
 
   println!("  After condensation: {} semantic links", all_links.len());
 
-  // Persist to database
+  // Persist to database, collecting the assigned IDs for P-topics.
+  let mut link_ids: Vec<i64> = Vec::with_capacity(all_links.len());
   for link in &all_links {
     let doc_topic_ids: Vec<&str> = link
       .documentation_topics
       .iter()
       .map(|dt| dt.id())
       .collect();
-    let _ = db::add_semantic_link(
+    match db::add_semantic_link(
       &state.db,
       audit_id,
       link.declaration_topic.id(),
@@ -883,7 +907,14 @@ pub async fn build_semantic_links(
       AUTHOR_AGENT_LARGE.into(),
       &doc_topic_ids,
     )
-    .await;
+    .await
+    {
+      Ok(id) => link_ids.push(id),
+      Err(e) => {
+        eprintln!("add_semantic_link failed: {}", e);
+        link_ids.push(0);
+      }
+    }
   }
 
   // Update in-memory state
@@ -896,23 +927,17 @@ pub async fn build_semantic_links(
 
   audit_data.semantic_links = all_links.clone();
 
-  // Populate functional_semantics with provenance.
-  // If the declaration is transitive (e.g., an interface member with one
-  // implementation), redirect the semantic to the implementation topic.
+  // Populate functional_semantics with provenance and P-topic IDs.
+  // Transitive topics have already been resolved to their base topics
+  // before condensation, so declaration_topic is always the base.
   let now = crate::collaborator::agent::log::iso_timestamp();
-  for link in &all_links {
-    let effective_topic = audit_data
-      .topic_metadata
-      .get(&link.declaration_topic)
-      .and_then(|m| m.transitive_topic())
-      .cloned()
-      .unwrap_or_else(|| link.declaration_topic.clone());
-
+  for (link, &db_id) in all_links.iter().zip(link_ids.iter()) {
     audit_data
       .functional_semantics
-      .entry(effective_topic)
+      .entry(link.declaration_topic.clone())
       .or_default()
       .push(core::FunctionalSemantic {
+        topic: topic::new_functional_property_topic(db_id as i32),
         text: link.semantic_text.clone(),
         documentation_topics: link.documentation_topics.clone(),
         author_id: AUTHOR_AGENT_LARGE,

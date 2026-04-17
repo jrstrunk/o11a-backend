@@ -608,8 +608,11 @@ pub fn render_source_text(
   }) = audit_data.topic_metadata.get(topic)
   {
     let header = render_authored_header("feat", *author_id, created_at);
+    let desc_html = crate::collaborator::formatter::render_description_html(
+      description, topic, audit_data,
+    );
     let content =
-      format!("{}<p style=\"margin: 0\">{}</p>", header, description);
+      format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
     return Some(formatting::format_topic_block(
       topic, &content, "feature", topic,
     ));
@@ -624,8 +627,11 @@ pub fn render_source_text(
   }) = audit_data.topic_metadata.get(topic)
   {
     let header = render_authored_header("req", *author_id, created_at);
+    let desc_html = crate::collaborator::formatter::render_description_html(
+      description, topic, audit_data,
+    );
     let content =
-      format!("{}<p style=\"margin: 0\">{}</p>", header, description);
+      format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
     return Some(formatting::format_topic_block(
       topic,
       &content,
@@ -643,8 +649,11 @@ pub fn render_source_text(
   }) = audit_data.topic_metadata.get(topic)
   {
     let header = render_authored_header("behavior", *author_id, created_at);
+    let desc_html = crate::collaborator::formatter::render_description_html(
+      description, topic, audit_data,
+    );
     let content =
-      format!("{}<p style=\"margin: 0\">{}</p>", header, description);
+      format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
     return Some(formatting::format_topic_block(
       topic,
       &content,
@@ -665,8 +674,11 @@ pub fn render_source_text(
     let sev_str = severity.map(|s| s.as_str()).unwrap_or("pending");
     let keyword = format!("threat [{}]", sev_str);
     let header = render_authored_header(&keyword, *author_id, created_at);
+    let desc_html = crate::collaborator::formatter::render_description_html(
+      description, topic, audit_data,
+    );
     let content =
-      format!("{}<p style=\"margin: 0\">{}</p>", header, description);
+      format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
     return Some(formatting::format_topic_block(
       topic, &content, "threat", topic,
     ));
@@ -684,8 +696,11 @@ pub fn render_source_text(
     let sev_str = severity.map(|s| s.as_str()).unwrap_or("pending");
     let keyword = format!("inv [{}]", sev_str);
     let header = render_authored_header(&keyword, *author_id, created_at);
+    let desc_html = crate::collaborator::formatter::render_description_html(
+      description, topic, audit_data,
+    );
     let content =
-      format!("{}<p style=\"margin: 0\">{}</p>", header, description);
+      format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
     return Some(formatting::format_topic_block(
       topic,
       &content,
@@ -1517,16 +1532,20 @@ pub fn build_conversation(
 
       let header =
         render_authored_header("semantics", sem.author_id, &sem.created_at);
+      let desc_html = crate::collaborator::formatter::render_description_html(
+        &sem.text, &topic, audit_data,
+      );
       let html = format!(
-        "<div class=\"functional-semantics\" style=\"{}\">{}\
+        "<div class=\"functional-semantics\" data-topic=\"{}\" style=\"{}\">{}\
          <p style=\"margin: 0\">{}{}</p></div>",
+        html_escape(sem.topic.id()),
         COMBINED_PANEL_STYLE,
         header,
-        html_escape(&sem.text),
+        desc_html,
         provenance_html
       );
       entries.push(ConversationEntry {
-        topic_id: topic_id.to_string(),
+        topic_id: sem.topic.id().to_string(),
         kind: ConversationEntryKind::FunctionalSemantics,
         created_at: Some(sem.created_at.clone()),
         html,
@@ -1538,12 +1557,16 @@ pub fn build_conversation(
   if let Some(purpose) = audit_data.functional_purposes.get(&topic) {
     let header =
       render_authored_header("purpose", purpose.author_id, &purpose.created_at);
+    let desc_html = crate::collaborator::formatter::render_description_html(
+      &purpose.text, &topic, audit_data,
+    );
     let html = format!(
-      "<div class=\"functional-purpose\" style=\"{}\">{}\
+      "<div class=\"functional-purpose\" data-topic=\"{}\" style=\"{}\">{}\
        <p style=\"margin: 0\">{}</p></div>",
+      html_escape(topic_id),
       COMBINED_PANEL_STYLE,
       header,
-      html_escape(&purpose.text)
+      desc_html
     );
     entries.push(ConversationEntry {
       topic_id: topic_id.to_string(),
@@ -1564,13 +1587,16 @@ pub fn build_conversation(
       }) = audit_data.topic_metadata.get(bt)
       {
         let header = render_authored_header("behavior", *author_id, created_at);
+        let desc_html = crate::collaborator::formatter::render_description_html(
+          description, bt, audit_data,
+        );
         let html = format!(
-          "<div class=\"behavior\" style=\"{}\">{}\
-           <p style=\"margin: 0\"><a data-topic=\"{}\">{}</a></p></div>",
+          "<div class=\"behavior\" data-topic=\"{}\" style=\"{}\">{}\
+           <p style=\"margin: 0\">{}</p></div>",
+          html_escape(bt.id()),
           COMBINED_PANEL_STYLE,
           header,
-          html_escape(bt.id()),
-          html_escape(description),
+          desc_html,
         );
         entries.push(ConversationEntry {
           topic_id: bt.id().to_string(),
@@ -1593,13 +1619,16 @@ pub fn build_conversation(
       }) = audit_data.topic_metadata.get(rt)
       {
         let header = render_authored_header("req", *author_id, created_at);
+        let desc_html = crate::collaborator::formatter::render_description_html(
+          description, rt, audit_data,
+        );
         let html = format!(
-          "<div class=\"requirement\" style=\"{}\">{}\
-           <p style=\"margin: 0\"><a data-topic=\"{}\">{}</a></p></div>",
+          "<div class=\"requirement\" data-topic=\"{}\" style=\"{}\">{}\
+           <p style=\"margin: 0\">{}</p></div>",
+          html_escape(rt.id()),
           COMBINED_PANEL_STYLE,
           header,
-          html_escape(rt.id()),
-          html_escape(description),
+          desc_html,
         );
         entries.push(ConversationEntry {
           topic_id: rt.id().to_string(),
