@@ -353,7 +353,6 @@ pub async fn build_behaviors(
         member_topic: member_topic.clone(),
         author_id: AUTHOR_AGENT_LARGE,
         created_at: row.created_at,
-        expanded_context: Vec::new(),
       },
     );
 

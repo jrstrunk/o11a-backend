@@ -187,7 +187,6 @@ fn process_documentation_node(
           topic: topic.clone(),
           kind: UnnamedTopicKind::DocumentationHeading,
           scope: scope.clone(),
-          expanded_context: vec![],
           transitive_topic: None,
         },
       );
@@ -238,7 +237,6 @@ fn process_documentation_node(
           scope: scope.clone(),
           kind: TitledTopicKind::DocumentationSection,
           title: title.clone(),
-          expanded_context: vec![],
         },
       );
       audit_data.topic_context.insert(topic.clone(), context);
@@ -277,7 +275,6 @@ fn process_documentation_node(
           topic: topic.clone(),
           kind: UnnamedTopicKind::DocumentationParagraph,
           scope: scope.clone(),
-          expanded_context: vec![],
           transitive_topic: None,
         },
       );
@@ -310,7 +307,6 @@ fn process_documentation_node(
           topic: topic.clone(),
           kind: UnnamedTopicKind::DocumentationSentence,
           scope: scope.clone(),
-          expanded_context: vec![],
           transitive_topic: None,
         },
       );
@@ -343,7 +339,6 @@ fn process_documentation_node(
           topic: topic.clone(),
           kind: UnnamedTopicKind::DocumentationCodeBlock,
           scope: scope.clone(),
-          expanded_context: vec![],
           transitive_topic: None,
         },
       );
@@ -375,7 +370,6 @@ fn process_documentation_node(
           topic: topic.clone(),
           kind: UnnamedTopicKind::DocumentationList,
           scope: scope.clone(),
-          expanded_context: vec![],
           transitive_topic: None,
         },
       );
@@ -407,7 +401,6 @@ fn process_documentation_node(
           topic: topic.clone(),
           kind: UnnamedTopicKind::DocumentationBlockQuote,
           scope: scope.clone(),
-          expanded_context: vec![],
           transitive_topic: None,
         },
       );
@@ -439,7 +432,6 @@ fn process_documentation_node(
           topic: topic.clone(),
           kind: UnnamedTopicKind::DocumentationInlineCode,
           scope: scope.clone(),
-          expanded_context: vec![],
           transitive_topic: None,
         },
       );

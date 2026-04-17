@@ -1000,7 +1000,6 @@ pub async fn synthesize_features(
         description: raw.description,
         author_id: AUTHOR_AGENT_LARGE,
         created_at: String::new(),
-        expanded_context: Vec::new(),
       },
     );
 

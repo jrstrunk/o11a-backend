@@ -72,6 +72,7 @@ pub fn analyze(
     &mut audit_data.nodes,
     &mut audit_data.topic_metadata,
     &mut audit_data.topic_context,
+    &mut audit_data.expanded_topic_context,
     &mut audit_data.function_properties,
     &mut audit_data.variable_types,
   )?;
@@ -1349,6 +1350,7 @@ fn second_pass(
   nodes: &mut BTreeMap<topic::Topic, Node>,
   topic_metadata: &mut BTreeMap<topic::Topic, TopicMetadata>,
   topic_context: &mut BTreeMap<topic::Topic, Vec<SourceContext>>,
+  expanded_topic_context: &mut BTreeMap<topic::Topic, Vec<SourceContext>>,
   function_properties: &mut BTreeMap<topic::Topic, FunctionModProperties>,
   variable_types: &mut BTreeMap<topic::Topic, SolidityType>,
 ) -> Result<(), String> {
@@ -1389,6 +1391,7 @@ fn second_pass(
   // (requires scopes from all ancestry-related topics)
   populate_expanded_context(
     topic_metadata,
+    expanded_topic_context,
     ancestors_map,
     descendants_map,
     relatives_map,
@@ -1513,7 +1516,6 @@ fn process_second_pass_nodes(
         ),
         name: in_scope_topic_declaration.name().clone(),
         scope: scope.clone(),
-        expanded_context: vec![],
         ancestry: vec![],
         is_mutable,
         mutations: mutation_topics,
@@ -1715,7 +1717,6 @@ fn process_second_pass_nodes(
             topic,
             scope: scope.clone(),
             kind,
-            expanded_context: vec![],
             transitive_topic,
           },
         );
@@ -3516,7 +3517,8 @@ fn populate_context(
 /// This was written by Claude Code and I think it is pretty bloated, but
 /// it works.
 fn populate_expanded_context(
-  topic_metadata: &mut BTreeMap<topic::Topic, TopicMetadata>,
+  topic_metadata: &BTreeMap<topic::Topic, TopicMetadata>,
+  expanded_topic_context: &mut BTreeMap<topic::Topic, Vec<SourceContext>>,
   ancestors_map: &AncestorsMap,
   descendants_map: &DescendantsMap,
   relatives_map: &RelativesMap,
@@ -3663,14 +3665,16 @@ fn populate_expanded_context(
       })
       .collect();
 
-  // Now update each metadata with expanded_context
-  for (topic, metadata) in topic_metadata.iter_mut() {
+  // Now insert expanded_context entries for NamedTopics
+  for (topic, metadata) in topic_metadata.iter() {
+    if !matches!(metadata, TopicMetadata::NamedTopic { .. }) {
+      continue;
+    }
     if let Some(expanded_refs) = expanded_refs_map.get(topic) {
-      if let TopicMetadata::NamedTopic {
-        expanded_context, ..
-      } = metadata
-      {
-        *expanded_context = expanded_refs.clone();
+      if expanded_refs.is_empty() {
+        expanded_topic_context.remove(topic);
+      } else {
+        expanded_topic_context.insert(topic.clone(), expanded_refs.clone());
       }
     }
   }

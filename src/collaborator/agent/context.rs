@@ -2041,8 +2041,13 @@ pub fn build_agent_topic_context(
       let (kind_str, sub_kind) = named_kind_to_string(kind);
 
       let expanded = if include_expanded_context {
+        let empty_ctx: Vec<crate::core::SourceContext> = vec![];
+        let expanded_ctx = audit_data
+          .expanded_topic_context
+          .get(&topic)
+          .unwrap_or(&empty_ctx);
         Some(convert_source_groups(
-          metadata.expanded_context(),
+          expanded_ctx,
           &topic,
           audit_data,
           source_text_cache,

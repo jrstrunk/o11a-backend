@@ -362,6 +362,11 @@ pub struct AuditData {
   pub comment_index: HashMap<topic::Topic, Vec<topic::Topic>>,
   /// Primary source context for each topic, stored separately from TopicMetadata.
   pub topic_context: BTreeMap<topic::Topic, Vec<SourceContext>>,
+  /// Expanded source context for each topic — related browsable references
+  /// rendered in the secondary panel alongside the primary `topic_context`.
+  /// Only populated for topics that have a meaningful expanded view
+  /// (NamedTopics, documentation TitledTopics/UnnamedTopics, FeatureTopics, BehaviorTopics).
+  pub expanded_topic_context: BTreeMap<topic::Topic, Vec<SourceContext>>,
   /// Features extracted from documentation, keyed by F-prefixed topic ID.
   pub features: BTreeMap<topic::Topic, Feature>,
   /// Requirements keyed by R-prefixed topic ID. Links to features are in feature_requirement_links.
@@ -1483,8 +1488,6 @@ pub enum TopicMetadata {
     kind: NamedTopicKind,
     name: String,
     visibility: NamedTopicVisibility,
-    /// Context derived from recursively traversing all ancestors, descendants, and relatives.
-    expanded_context: Vec<SourceContext>,
     /// Context derived from recursively traversing ancestors and descendants only.
     ancestry: Vec<SourceContext>,
     /// Whether this topic has mutations (was previously NamedMutableTopic)
@@ -1515,9 +1518,6 @@ pub enum TopicMetadata {
     topic: topic::Topic,
     scope: Scope,
     kind: UnnamedTopicKind,
-    /// Expanded context derived from features linked to this topic.
-    /// Only populated for documentation topics.
-    expanded_context: Vec<SourceContext>,
     /// When set, this topic is a transparent proxy for another topic.
     /// The canonical case is a semantic block containing exactly one statement.
     transitive_topic: Option<topic::Topic>,
@@ -1536,8 +1536,6 @@ pub enum TopicMetadata {
     scope: Scope,
     kind: TitledTopicKind,
     title: String,
-    /// Expanded context derived from features linked to this documentation topic.
-    expanded_context: Vec<SourceContext>,
   },
   /// A comment topic with immutable metadata
   CommentTopic {
@@ -1556,7 +1554,6 @@ pub enum TopicMetadata {
     description: String,
     author_id: i64,
     created_at: String,
-    expanded_context: Vec<SourceContext>,
   },
   /// A behavioral requirement. Links to features are in feature_requirement_links.
   RequirementTopic {
@@ -1575,7 +1572,6 @@ pub enum TopicMetadata {
     member_topic: topic::Topic,
     author_id: i64,
     created_at: String,
-    expanded_context: Vec<SourceContext>,
   },
   /// A threat on a non-pure source code subject
   ThreatTopic {
@@ -1652,27 +1648,6 @@ impl TopicMetadata {
       | TopicMetadata::ThreatTopic { topic, .. }
       | TopicMetadata::InvariantTopic { topic, .. }
       | TopicMetadata::DocumentationTopic { topic, .. } => topic,
-    }
-  }
-
-  pub fn expanded_context(&self) -> &[SourceContext] {
-    match self {
-      TopicMetadata::NamedTopic {
-        expanded_context, ..
-      }
-      | TopicMetadata::UnnamedTopic {
-        expanded_context, ..
-      }
-      | TopicMetadata::TitledTopic {
-        expanded_context, ..
-      }
-      | TopicMetadata::FeatureTopic {
-        expanded_context, ..
-      }
-      | TopicMetadata::BehaviorTopic {
-        expanded_context, ..
-      } => expanded_context,
-      _ => &[],
     }
   }
 
@@ -2125,18 +2100,15 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }
   }
 
-  for (topic, metadata) in audit_data.topic_metadata.iter_mut() {
-    let expanded_context = match metadata {
-      TopicMetadata::TitledTopic {
-        expanded_context, ..
-      }
-      | TopicMetadata::UnnamedTopic {
-        expanded_context, ..
-      } => expanded_context,
-      _ => continue,
-    };
+  for (topic, metadata) in &audit_data.topic_metadata {
+    if !matches!(
+      metadata,
+      TopicMetadata::TitledTopic { .. } | TopicMetadata::UnnamedTopic { .. }
+    ) {
+      continue;
+    }
     let feature_topics = doc_to_features.remove(topic).unwrap_or_default();
-    *expanded_context = feature_topics
+    let expanded_context: Vec<SourceContext> = feature_topics
       .into_iter()
       .map(|ft| {
         let sort_key = ft.numeric_id().map(|id| id as usize);
@@ -2152,6 +2124,13 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         }
       })
       .collect();
+    if expanded_context.is_empty() {
+      audit_data.expanded_topic_context.remove(topic);
+    } else {
+      audit_data
+        .expanded_topic_context
+        .insert(topic.clone(), expanded_context);
+    }
   }
 
   // Build context for FeatureTopics: feature + requirements + behaviors as scope refs
@@ -2370,12 +2349,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     .collect();
 
   for (bt, ctx) in behavior_contexts {
-    if let Some(TopicMetadata::BehaviorTopic {
-      expanded_context, ..
-    }) = audit_data.topic_metadata.get_mut(&bt)
-    {
-      *expanded_context = ctx;
-    }
+    audit_data.expanded_topic_context.insert(bt, ctx);
   }
 
   // Populate expanded_context for FeatureTopics: show deduplicated source
@@ -2407,11 +2381,10 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     .collect();
 
   for (ft, ctx) in feature_contexts {
-    if let Some(TopicMetadata::FeatureTopic {
-      expanded_context, ..
-    }) = audit_data.topic_metadata.get_mut(&ft)
-    {
-      *expanded_context = ctx;
+    if ctx.is_empty() {
+      audit_data.expanded_topic_context.remove(&ft);
+    } else {
+      audit_data.expanded_topic_context.insert(ft, ctx);
     }
   }
 }
@@ -2434,7 +2407,6 @@ pub fn new_audit_data(
       kind: NamedTopicKind::Builtin,
       visibility: NamedTopicVisibility::Public,
       name: "keccak256".to_string(),
-      expanded_context: Vec::new(),
       ancestry: Vec::new(),
       is_mutable: false,
       mutations: Vec::new(),
@@ -2455,7 +2427,6 @@ pub fn new_audit_data(
       kind: NamedTopicKind::Builtin,
       visibility: NamedTopicVisibility::Public,
       name: "type".to_string(),
-      expanded_context: Vec::new(),
       ancestry: Vec::new(),
       is_mutable: false,
       mutations: Vec::new(),
@@ -2476,7 +2447,6 @@ pub fn new_audit_data(
       kind: NamedTopicKind::Builtin,
       visibility: NamedTopicVisibility::Public,
       name: "this".to_string(),
-      expanded_context: Vec::new(),
       ancestry: Vec::new(),
       is_mutable: false,
       mutations: Vec::new(),
@@ -2499,6 +2469,7 @@ pub fn new_audit_data(
     name_index: TopicNameIndex::empty(),
     comment_index: HashMap::new(),
     topic_context: BTreeMap::new(),
+    expanded_topic_context: BTreeMap::new(),
     features: BTreeMap::new(),
     requirements: BTreeMap::new(),
     functional_semantics: BTreeMap::new(),
