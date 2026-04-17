@@ -894,7 +894,6 @@ pub async fn load_all_features(
           description: row.description.clone(),
           author_id: row.author_id,
           created_at: row.created_at.clone(),
-          expanded_context: Vec::new(),
         },
       );
       audit_data.features.insert(feature_topic, Feature);
@@ -1198,7 +1197,6 @@ pub async fn load_all_features(
           member_topic: member_topic.clone(),
           author_id: row.author_id,
           created_at: row.created_at.clone(),
-          expanded_context: Vec::new(),
         },
       );
 

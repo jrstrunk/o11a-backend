@@ -480,20 +480,6 @@ fn render_scope_name(
   format!("<span style=\"{}\">{}</span>", SCOPE_ITEM_STYLE, name_html)
 }
 
-/// Render a breadcrumb for a scope topic.
-/// Produces the same HTML structure as the Gleam `mount_breadcrumb_parts` function.
-fn render_breadcrumb(
-  scope_topic: &topic::Topic,
-  audit_data: &AuditData,
-) -> String {
-  let parts = match audit_data.topic_metadata.get(scope_topic) {
-    Some(metadata) => get_breadcrumb_parts(metadata),
-    None => vec![BreadcrumbPart::Text("?")],
-  };
-
-  render_breadcrumb_parts(&parts, audit_data)
-}
-
 /// Render the fully-qualified breadcrumb for the history bar (uses the active topic's metadata).
 pub fn render_history_breadcrumb(
   metadata: &TopicMetadata,
@@ -608,10 +594,11 @@ pub fn render_source_text(
   {
     let header = render_authored_header("feat", *author_id, created_at);
     let desc_html = crate::collaborator::formatter::render_description_html(
-      description, topic, audit_data,
+      description,
+      topic,
+      audit_data,
     );
-    let content =
-      format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
+    let content = format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
     return Some(formatting::format_topic_block(
       topic, &content, "feature", topic,
     ));
@@ -627,10 +614,11 @@ pub fn render_source_text(
   {
     let header = render_authored_header("req", *author_id, created_at);
     let desc_html = crate::collaborator::formatter::render_description_html(
-      description, topic, audit_data,
+      description,
+      topic,
+      audit_data,
     );
-    let content =
-      format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
+    let content = format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
     return Some(formatting::format_topic_block(
       topic,
       &content,
@@ -649,15 +637,13 @@ pub fn render_source_text(
   {
     let header = render_authored_header("behavior", *author_id, created_at);
     let desc_html = crate::collaborator::formatter::render_description_html(
-      description, topic, audit_data,
+      description,
+      topic,
+      audit_data,
     );
-    let content =
-      format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
+    let content = format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
     return Some(formatting::format_topic_block(
-      topic,
-      &content,
-      "behavior",
-      topic,
+      topic, &content, "behavior", topic,
     ));
   }
 
@@ -674,10 +660,11 @@ pub fn render_source_text(
     let keyword = format!("threat [{}]", sev_str);
     let header = render_authored_header(&keyword, *author_id, created_at);
     let desc_html = crate::collaborator::formatter::render_description_html(
-      description, topic, audit_data,
+      description,
+      topic,
+      audit_data,
     );
-    let content =
-      format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
+    let content = format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
     return Some(formatting::format_topic_block(
       topic, &content, "threat", topic,
     ));
@@ -696,10 +683,11 @@ pub fn render_source_text(
     let keyword = format!("inv [{}]", sev_str);
     let header = render_authored_header(&keyword, *author_id, created_at);
     let desc_html = crate::collaborator::formatter::render_description_html(
-      description, topic, audit_data,
+      description,
+      topic,
+      audit_data,
     );
-    let content =
-      format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
+    let content = format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
     return Some(formatting::format_topic_block(
       topic,
       &content,
@@ -1145,7 +1133,6 @@ pub fn render_grouped_source_panel(
   groups: &[SourceContext],
   audit_data: &AuditData,
   source_text_cache: &std::collections::HashMap<String, String>,
-  scope_name_only: bool,
 ) -> String {
   let mut html = String::new();
 
@@ -1159,11 +1146,7 @@ pub fn render_grouped_source_panel(
       "<div class=\"topic-reference-title scope-standard\" style=\"{}\">",
       SCOPE_STYLE
     ));
-    if scope_name_only {
-      html.push_str(&render_scope_name(group.scope(), audit_data));
-    } else {
-      html.push_str(&render_breadcrumb(group.scope(), audit_data));
-    }
+    html.push_str(&render_scope_name(group.scope(), audit_data));
     html.push_str("</div>");
 
     // Calculate total reference count for first/last styling
@@ -1276,6 +1259,7 @@ fn flatten_expanded_context(expanded_context: &[SourceContext]) -> Vec<String> {
 pub fn render_highlight_css(
   topic_id: &str,
   metadata: &TopicMetadata,
+  audit_data: &AuditData,
 ) -> String {
   let expanded_ref_panel = "#expanded-references-panel";
 
@@ -1289,13 +1273,19 @@ pub fn render_highlight_css(
     TopicMetadata::NamedTopic {
       ancestors,
       descendants,
+      topic,
       ..
     } => {
       let ancestor_ids: Vec<String> =
         ancestors.iter().map(|t| t.id().to_string()).collect();
       let descendant_ids: Vec<String> =
         descendants.iter().map(|t| t.id().to_string()).collect();
-      let relative_ids = flatten_expanded_context(metadata.expanded_context());
+      let empty_ctx: Vec<crate::core::SourceContext> = vec![];
+      let expanded = audit_data
+        .expanded_topic_context
+        .get(topic)
+        .unwrap_or(&empty_ctx);
+      let relative_ids = flatten_expanded_context(expanded);
       (ancestor_ids, descendant_ids, relative_ids)
     }
     _ => (vec![], vec![], vec![]),
@@ -1461,15 +1451,22 @@ pub fn build_topic_view(
         .get(view_metadata.topic())
         .unwrap_or(&empty_ctx);
       let topic_html =
-        render_grouped_source_panel(ctx, audit_data, source_text_cache, true);
+        render_grouped_source_panel(ctx, audit_data, source_text_cache);
+      let expanded_ctx = audit_data
+        .expanded_topic_context
+        .get(view_metadata.topic())
+        .unwrap_or(&empty_ctx);
       let expanded_html = render_grouped_source_panel(
-        view_metadata.expanded_context(),
+        expanded_ctx,
         audit_data,
         source_text_cache,
-        true,
       );
       let breadcrumb = render_history_breadcrumb(metadata, audit_data);
-      let css = render_highlight_css(view_metadata.topic().id(), view_metadata);
+      let css = render_highlight_css(
+        view_metadata.topic().id(),
+        view_metadata,
+        audit_data,
+      );
       (topic_html, expanded_html, breadcrumb, css)
     }
   };
@@ -1564,7 +1561,9 @@ pub fn build_conversation(
       {
         let header = render_authored_header("behavior", *author_id, created_at);
         let desc_html = crate::collaborator::formatter::render_description_html(
-          description, bt, audit_data,
+          description,
+          bt,
+          audit_data,
         );
         let html = format!(
           "<div class=\"behavior\" data-topic=\"{}\" style=\"{}\">{}\
@@ -1596,7 +1595,9 @@ pub fn build_conversation(
       {
         let header = render_authored_header("req", *author_id, created_at);
         let desc_html = crate::collaborator::formatter::render_description_html(
-          description, rt, audit_data,
+          description,
+          rt,
+          audit_data,
         );
         let html = format!(
           "<div class=\"requirement\" data-topic=\"{}\" style=\"{}\">{}\
@@ -1998,5 +1999,5 @@ pub fn build_documentation_panel(
   }
 
   let merged = crate::core::merge_context_groups(all_contexts);
-  render_grouped_source_panel(&merged, audit_data, source_text_cache, true)
+  render_grouped_source_panel(&merged, audit_data, source_text_cache)
 }
