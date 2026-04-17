@@ -2716,19 +2716,19 @@ pub async fn set_functional_purpose(
 }
 
 /// PUT /api/v1/audits/:audit_id/subjects/:topic_id/semantics
-/// Sets or updates the functional semantics of a subject.
+/// Adds a functional semantic to a subject via the semantic_links table.
 pub async fn add_functional_semantic(
   State(state): State<AppState>,
   Path((audit_id, topic_id)): Path<(String, String)>,
   Json(payload): Json<SetSubjectPropertyRequest>,
 ) -> Result<Json<SubjectPropertyResponse>, StatusCode> {
-  let row = db::set_subject_property(
+  let link_id = db::add_semantic_link(
     &state.db,
     &audit_id,
     &topic_id,
-    "functional_semantics",
     &payload.value,
     payload.author_id,
+    &[],
   )
   .await
   .map_err(|e| {
@@ -2748,18 +2748,19 @@ pub async fn add_functional_semantic(
       .entry(t)
       .or_default()
       .push(core::FunctionalSemantic {
-        text: row.value.clone(),
+        topic: topic::new_functional_property_topic(link_id as i32),
+        text: payload.value.clone(),
         documentation_topics: vec![],
-        author_id: row.author_id,
-        created_at: row.created_at.clone(),
+        author_id: payload.author_id,
+        created_at: String::new(),
       });
   }
 
   Ok(Json(SubjectPropertyResponse {
-    topic_id: row.topic_id,
+    topic_id,
     property_type: "functional_semantics".to_string(),
-    value: row.value,
-    author_id: row.author_id,
+    value: payload.value,
+    author_id: payload.author_id,
   }))
 }
 
@@ -2784,23 +2785,35 @@ pub async fn get_functional_purpose(
 }
 
 /// GET /api/v1/audits/:audit_id/subjects/:topic_id/semantics
+/// Returns all functional semantics for a subject from the in-memory state.
 pub async fn get_functional_semantics(
   State(state): State<AppState>,
   Path((audit_id, topic_id)): Path<(String, String)>,
-) -> Result<Json<Option<SubjectPropertyResponse>>, StatusCode> {
-  let row = db::get_subject_property(&state.db, &audit_id, &topic_id, "functional_semantics")
-    .await
-    .map_err(|e| {
-      eprintln!("get_functional_semantics failed: {}", e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+) -> Result<Json<Vec<SubjectPropertyResponse>>, StatusCode> {
+  let ctx = state.data_context.lock().map_err(|e| {
+    eprintln!("Mutex poisoned in get_functional_semantics: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?;
+  let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
-  Ok(Json(row.map(|r| SubjectPropertyResponse {
-    topic_id: r.topic_id,
-    property_type: "functional_semantics".to_string(),
-    value: r.value,
-    author_id: r.author_id,
-  })))
+  let t = topic::new_topic(&topic_id);
+  let entries = audit_data
+    .functional_semantics
+    .get(&t)
+    .map(|sems| {
+      sems
+        .iter()
+        .map(|sem| SubjectPropertyResponse {
+          topic_id: topic_id.clone(),
+          property_type: "functional_semantics".to_string(),
+          value: sem.text.clone(),
+          author_id: sem.author_id,
+        })
+        .collect()
+    })
+    .unwrap_or_default();
+
+  Ok(Json(entries))
 }
 
 // ============================================

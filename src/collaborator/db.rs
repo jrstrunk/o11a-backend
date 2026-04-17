@@ -1193,18 +1193,15 @@ pub async fn load_all_features(
         semantic_text: row.semantic_text.clone(),
       });
 
+      // declaration_topic is already the base topic (transitive topics
+      // are resolved before persisting), so no redirect needed.
       let decl_topic = topic::new_topic(&row.declaration_topic);
-      let effective_topic = audit_data
-        .topic_metadata
-        .get(&decl_topic)
-        .and_then(|m| m.transitive_topic())
-        .cloned()
-        .unwrap_or(decl_topic);
       audit_data
         .functional_semantics
-        .entry(effective_topic)
+        .entry(decl_topic)
         .or_default()
         .push(core::FunctionalSemantic {
+          topic: topic::new_functional_property_topic(row.id as i32),
           text: row.semantic_text.clone(),
           documentation_topics,
           author_id: row.author_id,
@@ -1231,18 +1228,6 @@ pub async fn load_all_features(
             author_id: row.author_id,
             created_at: row.created_at.clone(),
           });
-        }
-        "functional_semantics" => {
-          audit_data
-            .functional_semantics
-            .entry(t)
-            .or_default()
-            .push(core::FunctionalSemantic {
-              text: row.value.clone(),
-              documentation_topics: vec![],
-              author_id: row.author_id,
-              created_at: row.created_at.clone(),
-            });
         }
         _ => {}
       }
@@ -1387,7 +1372,7 @@ pub async fn add_semantic_link(
   semantic_text: &str,
   author_id: i64,
   documentation_topics: &[&str],
-) -> Result<(), sqlx::Error> {
+) -> Result<i64, sqlx::Error> {
   let result = sqlx::query(
     r#"
         INSERT INTO semantic_links (audit_id, declaration_topic, semantic_text, author_id)
@@ -1425,7 +1410,7 @@ pub async fn add_semantic_link(
     .execute(pool)
     .await?;
   }
-  Ok(())
+  Ok(link_id)
 }
 
 /// Deletes all semantic links for an audit
