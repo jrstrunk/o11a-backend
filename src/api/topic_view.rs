@@ -576,47 +576,51 @@ fn render_authored_header(
   )
 }
 
+/// Returns the (keyword, css_class) for any topic that should render as an
+/// authored topic block (header + description). Returns `None` for topics
+/// whose body is rendered as raw source code or documentation.
+fn authored_topic_label(metadata: &TopicMetadata) -> Option<(String, &'static str)> {
+  match metadata {
+    TopicMetadata::FeatureTopic { .. } => Some(("feat".to_string(), "feature")),
+    TopicMetadata::RequirementTopic { .. } => {
+      Some(("req".to_string(), "requirement"))
+    }
+    TopicMetadata::BehaviorTopic { .. } => {
+      Some(("behavior".to_string(), "behavior"))
+    }
+    TopicMetadata::FunctionalSemanticTopic { .. } => {
+      Some(("semantics".to_string(), "semantic"))
+    }
+    TopicMetadata::ThreatTopic { severity, .. } => {
+      let sev = severity.map(|s| s.as_str()).unwrap_or("pending");
+      Some((format!("threat [{}]", sev), "threat"))
+    }
+    TopicMetadata::InvariantTopic { severity, .. } => {
+      let sev = severity.map(|s| s.as_str()).unwrap_or("pending");
+      Some((format!("inv [{}]", sev), "invariant"))
+    }
+    _ => None,
+  }
+}
+
 /// Render source text HTML for a topic from its data.
 /// Returns None if the topic has no renderable content.
+///
+/// For authored topics (Feature/Requirement/Behavior/FunctionalSemantic/
+/// Threat/Invariant) returns a styled topic block with an authored header
+/// and the description. For other topics returns raw source/documentation/
+/// comment HTML.
 pub fn render_source_text(
   topic: &topic::Topic,
   audit_data: &AuditData,
 ) -> Option<String> {
-  // Feature topics: render with comment-style header
-  if let Some(TopicMetadata::FeatureTopic {
-    description,
-    author_id,
-    created_at,
-    ..
-  }) = audit_data.topic_metadata.get(topic)
-  {
-    let header = render_authored_header("feat", *author_id, created_at);
-    let desc_html = crate::collaborator::formatter::render_description_html(
-      description,
-      topic,
-      audit_data,
-    );
-    let content = format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
-    return Some(formatting::format_topic_block(
-      topic, &content, "feature", topic,
-    ));
-  }
-
-  // Generated topics (requirement/behavior/semantic): render with comment-style header.
+  // Authored topics: header + description, wrapped in a styled topic block.
   if let Some(metadata) = audit_data.topic_metadata.get(topic) {
-    let labels = match metadata {
-      TopicMetadata::RequirementTopic { .. } => Some(("req", "requirement")),
-      TopicMetadata::BehaviorTopic { .. } => Some(("behavior", "behavior")),
-      TopicMetadata::FunctionalSemanticTopic { .. } => {
-        Some(("semantics", "semantic"))
-      }
-      _ => None,
-    };
-    if let Some((keyword, css_class)) = labels {
+    if let Some((keyword, css_class)) = authored_topic_label(metadata) {
       let description = metadata.description().unwrap_or("");
       let author_id = metadata.author_id().unwrap_or(0);
       let created_at = metadata.created_at().unwrap_or("");
-      let header = render_authored_header(keyword, author_id, created_at);
+      let header = render_authored_header(&keyword, author_id, created_at);
       let desc_html = crate::collaborator::formatter::render_description_html(
         description,
         topic,
@@ -628,52 +632,6 @@ pub fn render_source_text(
         topic, &content, css_class, topic,
       ));
     }
-  }
-
-  // Threat topics: render with comment-style header including severity
-  if let Some(TopicMetadata::ThreatTopic {
-    description,
-    author_id,
-    created_at,
-    severity,
-    ..
-  }) = audit_data.topic_metadata.get(topic)
-  {
-    let sev_str = severity.map(|s| s.as_str()).unwrap_or("pending");
-    let keyword = format!("threat [{}]", sev_str);
-    let header = render_authored_header(&keyword, *author_id, created_at);
-    let desc_html = crate::collaborator::formatter::render_description_html(
-      description,
-      topic,
-      audit_data,
-    );
-    let content = format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
-    return Some(formatting::format_topic_block(
-      topic, &content, "threat", topic,
-    ));
-  }
-
-  // Invariant topics: render with comment-style header including severity
-  if let Some(TopicMetadata::InvariantTopic {
-    description,
-    author_id,
-    created_at,
-    severity,
-    ..
-  }) = audit_data.topic_metadata.get(topic)
-  {
-    let sev_str = severity.map(|s| s.as_str()).unwrap_or("pending");
-    let keyword = format!("inv [{}]", sev_str);
-    let header = render_authored_header(&keyword, *author_id, created_at);
-    let desc_html = crate::collaborator::formatter::render_description_html(
-      description,
-      topic,
-      audit_data,
-    );
-    let content = format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
-    return Some(formatting::format_topic_block(
-      topic, &content, "invariant", topic,
-    ));
   }
 
   // Global builtins
@@ -1754,28 +1712,19 @@ fn build_comment_thread_html(
   html
 }
 
-/// Render a non-comment topic as a thread node.
-/// Shows a metadata header (kind + name) followed by the topic's source text.
-/// For features and requirements, the header is already included in render_source_text.
+/// Wrap a topic's body in a conversation-thread node. For non-authored
+/// topics, prepends a small kind+name meta header so the reader knows what
+/// the source/documentation is. The body itself comes from `render_source_text`,
+/// which is canonical.
 fn render_topic_node(
   metadata: &TopicMetadata,
   audit_data: &AuditData,
   source_text_cache: &std::collections::HashMap<String, String>,
 ) -> String {
   let topic_id = metadata.topic().id();
+  let is_authored = authored_topic_label(metadata).is_some();
 
-  // Features and requirements include their own authored header in render_source_text
-  let has_authored_header = matches!(
-    metadata,
-    TopicMetadata::FeatureTopic { .. }
-      | TopicMetadata::RequirementTopic { .. }
-      | TopicMetadata::BehaviorTopic { .. }
-      | TopicMetadata::FunctionalSemanticTopic { .. }
-      | TopicMetadata::ThreatTopic { .. }
-      | TopicMetadata::InvariantTopic { .. }
-  );
-
-  let meta_html = if has_authored_header {
+  let meta_html = if is_authored {
     String::new()
   } else {
     let kind_label = topic_kind_label(metadata);
@@ -1792,7 +1741,7 @@ fn render_topic_node(
   let content_html =
     get_source_text(metadata.topic(), audit_data, source_text_cache);
 
-  let content_class = if has_authored_header {
+  let content_class = if is_authored {
     "comment-content"
   } else {
     "comment-content code-style"

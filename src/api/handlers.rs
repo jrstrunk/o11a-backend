@@ -2188,6 +2188,21 @@ pub async fn get_documentation_panel(
       }
     }
 
+    // For functional semantic topics, include their source documentation
+    if t.kind() == Some(TopicKind::FunctionalProperty) {
+      if let Some(core::TopicMetadata::FunctionalSemanticTopic {
+        documentation_topics,
+        ..
+      }) = audit_data.topic_metadata.get(&t)
+      {
+        for dt in documentation_topics {
+          if !mention_topics.contains(dt) {
+            mention_topics.push(dt.clone());
+          }
+        }
+      }
+    }
+
     // If this is a declaration scoped to a member, include the member too
     if let Some(metadata) = audit_data.topic_metadata.get(&t) {
       let member = match metadata.scope() {

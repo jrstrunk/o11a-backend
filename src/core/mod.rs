@@ -337,7 +337,8 @@ pub struct AuditData {
   /// Expanded source context for each topic — related browsable references
   /// rendered in the secondary panel alongside the primary `topic_context`.
   /// Only populated for topics that have a meaningful expanded view
-  /// (NamedTopics, documentation TitledTopics/UnnamedTopics, FeatureTopics, BehaviorTopics).
+  /// (NamedTopics, documentation TitledTopics/UnnamedTopics, FeatureTopics,
+  /// BehaviorTopics, FunctionalSemanticTopics).
   pub expanded_topic_context: BTreeMap<topic::Topic, Vec<SourceContext>>,
   /// Requirements keyed by R-prefixed topic ID. Links to features are in feature_requirement_links.
   pub requirements: BTreeMap<topic::Topic, Requirement>,
@@ -2035,14 +2036,16 @@ pub fn semantic_texts_for_declaration(
   audit_data: &AuditData,
   decl_topic: &topic::Topic,
 ) -> Vec<String> {
-  let Some(sem_topics) = audit_data.declaration_semantics.get(decl_topic) else {
+  let Some(sem_topics) = audit_data.declaration_semantics.get(decl_topic)
+  else {
     return Vec::new();
   };
   sem_topics
     .iter()
     .filter_map(|sem_topic| {
-      if let Some(TopicMetadata::FunctionalSemanticTopic { description, .. }) =
-        audit_data.topic_metadata.get(sem_topic)
+      if let Some(TopicMetadata::FunctionalSemanticTopic {
+        description, ..
+      }) = audit_data.topic_metadata.get(sem_topic)
       {
         Some(description.clone())
       } else {
@@ -2062,8 +2065,9 @@ pub fn semantic_texts_by_declaration(
   for (decl_topic, sem_topics) in &audit_data.declaration_semantics {
     let mut texts = Vec::with_capacity(sem_topics.len());
     for sem_topic in sem_topics {
-      if let Some(TopicMetadata::FunctionalSemanticTopic { description, .. }) =
-        audit_data.topic_metadata.get(sem_topic)
+      if let Some(TopicMetadata::FunctionalSemanticTopic {
+        description, ..
+      }) = audit_data.topic_metadata.get(sem_topic)
       {
         texts.push(description.clone());
       }
@@ -2336,6 +2340,25 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     audit_data.topic_context.insert(beh_topic.clone(), context);
   }
 
+  // Build context for FunctionalSemanticTopics (same self-ref pattern)
+  for (sem_topic, metadata) in &audit_data.topic_metadata {
+    if !matches!(metadata, TopicMetadata::FunctionalSemanticTopic { .. }) {
+      continue;
+    }
+    let sort_key = sem_topic.numeric_id().map(|id| id as usize);
+    let context = vec![SourceContext {
+      scope: sem_topic.clone(),
+      sort_key,
+      is_in_scope: true,
+      scope_references: vec![Reference::ProjectReference {
+        reference_topic: sem_topic.clone(),
+        sort_key,
+      }],
+      nested_references: vec![],
+    }];
+    audit_data.topic_context.insert(sem_topic.clone(), context);
+  }
+
   // Build context for ThreatTopics: subject + threat as scope refs,
   // invariants as nested refs indented under the threat
   for (threat_topic, metadata) in &audit_data.topic_metadata {
@@ -2411,6 +2434,36 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
 
   for (bt, ctx) in behavior_contexts {
     audit_data.expanded_topic_context.insert(bt, ctx);
+  }
+
+  // Populate expanded_context for FunctionalSemanticTopics: show the
+  // source declaration the semantic describes.
+  let semantic_contexts: Vec<(topic::Topic, Vec<SourceContext>)> = audit_data
+    .topic_metadata
+    .iter()
+    .filter_map(|(pt, m)| {
+      if let TopicMetadata::FunctionalSemanticTopic {
+        declaration_topic, ..
+      } = m
+      {
+        let ctx = audit_data
+          .topic_context
+          .get(declaration_topic)
+          .cloned()
+          .unwrap_or_default();
+        if !ctx.is_empty() {
+          Some((pt.clone(), ctx))
+        } else {
+          None
+        }
+      } else {
+        None
+      }
+    })
+    .collect();
+
+  for (pt, ctx) in semantic_contexts {
+    audit_data.expanded_topic_context.insert(pt, ctx);
   }
 
   // Populate expanded_context for FeatureTopics: show deduplicated source
