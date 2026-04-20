@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
@@ -5,12 +7,12 @@ use super::log as agent_log;
 
 /// Maximum number of concurrent LLM API requests across all tasks.
 /// All calls to `chat_completion` acquire a permit before sending a request,
-/// ensuring that pipeline bursts, user-triggered tasks, and repair calls
-/// collectively stay within this limit.
+/// ensuring that pipeline bursts and user-triggered tasks collectively stay
+/// within this limit.
 const MAX_CONCURRENT_REQUESTS: usize = 10;
 
-static REQUEST_SEMAPHORE: std::sync::LazyLock<Semaphore> =
-  std::sync::LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_REQUESTS));
+static REQUEST_SEMAPHORE: LazyLock<Semaphore> =
+  LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_REQUESTS));
 
 const LARGE_MODEL: &str = "z-ai/glm-5.1"; // "anthropic/claude-opus-4.6";
 const MEDIUM_MODEL: &str = "z-ai/glm-5.1";
@@ -61,6 +63,17 @@ impl TaskSize {
   }
 }
 
+/// A JSON Schema used to constrain an LLM response via OpenRouter's
+/// `response_format: { type: "json_schema", strict: true }` mode.
+///
+/// `empty_response` is returned during `AGENT_DRY_RUN` so that downstream
+/// parsing stays on the valid-shape path without sending a real request.
+pub struct JsonSchema {
+  pub name: &'static str,
+  pub schema: serde_json::Value,
+  pub empty_response: &'static str,
+}
+
 #[derive(Debug, Serialize)]
 struct ChatMessage {
   role: &'static str,
@@ -96,7 +109,7 @@ pub async fn chat_completion(
   system_message: &str,
   prompt: &str,
   dry_run_label: Option<&str>,
-  json_mode: bool,
+  response_schema: Option<&JsonSchema>,
 ) -> Result<String, String> {
   if let Ok(base_path) = std::env::var("AGENT_DRY_RUN") {
     let path = match dry_run_label {
@@ -129,9 +142,15 @@ pub async fn chat_completion(
     std::fs::write(&path, &output)
       .map_err(|e| format!("Failed to write dry run to '{}': {}", path, e))?;
     println!("Dry run prompt written to: {}", path);
-    // Return empty JSON array so the pipeline continues with empty results,
-    // allowing all passes to fire and write their prompt files.
-    return Ok("[]".to_string());
+    // Return the schema's empty-shape sentinel so downstream parsing sees a
+    // well-formed response and the pipeline continues with empty results,
+    // letting every pass fire and write its prompt file. Callers that do not
+    // pass a schema (raw text output) get an empty string.
+    return Ok(
+      response_schema
+        .map(|s| s.empty_response.to_string())
+        .unwrap_or_default(),
+    );
   }
 
   let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
@@ -158,9 +177,17 @@ pub async fn chat_completion(
   let mut body = serde_json::json!({
     "model": model,
     "messages": messages,
+    "provider": { "require_parameters": true },
   });
-  if json_mode {
-    body["response_format"] = serde_json::json!({ "type": "json_object" });
+  if let Some(schema) = response_schema {
+    body["response_format"] = serde_json::json!({
+      "type": "json_schema",
+      "json_schema": {
+        "name": schema.name,
+        "strict": true,
+        "schema": schema.schema,
+      }
+    });
   }
 
   let task_label = dry_run_label.unwrap_or("unknown");
@@ -404,292 +431,26 @@ pub async fn chat_completion(
   Err("API response has no usable content".to_string())
 }
 
-/// Extract the last valid JSON array from an LLM response.
+/// Deserialize a schema-constrained LLM response into `T`.
 ///
-/// Scans backwards for `]`, finds the matching `[`, and attempts to parse.
-/// Falls back to stripping markdown fences. If all local parsing fails,
-/// sends the malformed response to the small model for repair.
-pub async fn extract_json<T: serde::de::DeserializeOwned>(
+/// Responses are constrained server-side by a `json_schema` response format,
+/// so the payload is guaranteed to be a well-formed JSON object matching the
+/// schema. A parse failure here means a model silently ignored the schema or
+/// the schema and target type have drifted apart — fail loudly in either case.
+pub fn parse_response<T: serde::de::DeserializeOwned>(
   response: &str,
   label: &str,
-  expected_format: &str,
-  original_prompt: &str,
+  prompt: &str,
 ) -> Result<T, String> {
-  if let Some(parsed) = try_parse_json::<T>(response) {
-    return Ok(parsed);
-  }
-
-  let trimmed = response.trim();
-
-  // If the response contains no JSON-like characters at all, the model
-  // produced no structured output. Return the empty form of the expected
-  // type (e.g. `[]` for arrays) rather than asking the repair model to
-  // hallucinate data.
-  if !trimmed.contains('[') && !trimmed.contains('{') {
-    agent_log::warn(
-      "no_json_in_response",
+  serde_json::from_str(response).map_err(|e| {
+    agent_log::error(
+      "response_parse_error",
       None,
       Some(label),
-      "Response contains no JSON, returning empty default",
-      Some(original_prompt),
-      Some(trimmed),
-    );
-    return serde_json::from_str::<T>("[]")
-      .or_else(|_| serde_json::from_str::<T>("{}"))
-      .map_err(|e| {
-        format!("Failed to parse {} (no JSON in response): {}", label, e)
-      });
-  }
-
-  // If the response contains valid JSON but it doesn't match the expected
-  // type, try deterministic shape coercions before giving up. This avoids
-  // wasting an API call on repair when the data is correct but the
-  // structure is wrong.
-  let json_source = serde_json::from_str::<serde_json::Value>(trimmed)
-    .ok()
-    .map(|v| (v, trimmed))
-    .or_else(|| {
-      extract_first_json_candidate(trimmed).and_then(|c| {
-        serde_json::from_str::<serde_json::Value>(c)
-          .ok()
-          .map(|v| (v, c))
-      })
-    });
-
-  if let Some((value, source)) = json_source {
-    // Try coercions to recover the expected type from a wrong shape.
-    if let Some(result) = try_coerce_json::<T>(&value) {
-      agent_log::prompt("json_shape_coerced", label, original_prompt, source);
-      return Ok(result);
-    }
-
-    agent_log::error(
-      "json_wrong_shape",
-      None,
-      Some(label),
-      "Response is valid JSON but does not match expected type and could not be coerced",
-      Some(original_prompt),
-      Some(source),
-    );
-    return Err(format!(
-      "Failed to parse {}: response is valid JSON but wrong shape",
-      label
-    ));
-  }
-
-  // Local parsing failed and response is malformed — ask the small model to fix it.
-  agent_log::warn(
-    "json_parse_failed",
-    None,
-    Some(label),
-    "Local JSON parse failed, attempting LLM repair",
-    Some(original_prompt),
-    Some(response),
-  );
-  let repair_prompt = format!(
-    "The following LLM response should be valid JSON matching the expected \
-    format below, but is malformed or contains extra text. Your job is to \
-    extract and return ONLY the valid JSON, preserving all data.\n\n\
-    CRITICAL RULES:\n\
-    - Return ONLY the JSON value — no explanation, reasoning, or markdown.\n\
-    - The returned JSON MUST match the structure shown in the expected \
-    format exactly (same type: array, object, etc.).\n\
-    - Do NOT modify the data values — only fix structural issues like \
-    trailing commas, missing brackets, duplicated values, or extra text \
-    before/after the JSON.\n\n\
-    Expected format:\n{}\n\n\
-    Malformed response:\n{}",
-    expected_format, response
-  );
-  let repaired = chat_completion(
-    TaskSize::Small,
-    "You are a JSON repair utility. Return ONLY valid JSON, nothing else.",
-    &repair_prompt,
-    None,
-    true,
-  )
-  .await
-  .map_err(|e| {
-    agent_log::error(
-      "repair_failed",
-      Some(SMALL_MODEL),
-      Some(label),
-      &format!("LLM repair request failed: {}", e),
-      Some(original_prompt),
+      &format!("Failed to deserialize schema-constrained response: {}", e),
+      Some(prompt),
       Some(response),
     );
-    format!("Failed to parse {} (repair also failed: {})", label, e)
-  })?;
-
-  try_parse_json::<T>(&repaired).ok_or_else(|| {
-    agent_log::error(
-      "repair_invalid_json",
-      Some(SMALL_MODEL),
-      Some(label),
-      "LLM repair did not produce valid JSON",
-      Some(original_prompt),
-      Some(&repaired),
-    );
-    format!("Failed to parse {} (repair produced invalid JSON)", label)
+    format!("Failed to parse {}: {}", label, e)
   })
-}
-
-/// Try to parse a JSON value from a response string using bracket matching
-/// and markdown fence stripping. Returns `None` if all attempts fail.
-fn try_parse_json<T: serde::de::DeserializeOwned>(response: &str) -> Option<T> {
-  // Try bracket-matching from the end of the string for both arrays and objects.
-  for (open, close_ch) in [(b'[', b']'), (b'{', b'}')] {
-    let bytes = response.as_bytes();
-    let mut end = bytes.len();
-    while end > 0 {
-      let close = match bytes[..end].iter().rposition(|&b| b == close_ch) {
-        Some(i) => i,
-        None => break,
-      };
-      let mut depth = 0i32;
-      let mut pos = close;
-      loop {
-        match bytes[pos] {
-          b if b == close_ch => depth += 1,
-          b if b == open => {
-            depth -= 1;
-            if depth == 0 {
-              break;
-            }
-          }
-          _ => {}
-        }
-        if pos == 0 {
-          break;
-        }
-        pos -= 1;
-      }
-      if depth == 0 {
-        let candidate = &response[pos..=close];
-        if let Ok(parsed) = serde_json::from_str::<T>(candidate) {
-          return Some(parsed);
-        }
-      }
-      end = close;
-    }
-  }
-
-  // Fallback: strip markdown fences and try the whole thing.
-  let stripped = response
-    .trim()
-    .strip_prefix("```json")
-    .or_else(|| response.trim().strip_prefix("```"))
-    .unwrap_or(response.trim());
-  let stripped = stripped.strip_suffix("```").unwrap_or(stripped).trim();
-
-  serde_json::from_str::<T>(stripped).ok()
-}
-
-/// Extract the last bracket-matched JSON candidate as a string slice,
-/// without attempting to deserialize. Used to check if valid JSON exists
-/// but doesn't match the expected type.
-fn extract_first_json_candidate(response: &str) -> Option<&str> {
-  for (open, close_ch) in [(b'[', b']'), (b'{', b'}')] {
-    let bytes = response.as_bytes();
-    let mut end = bytes.len();
-    while end > 0 {
-      let close = match bytes[..end].iter().rposition(|&b| b == close_ch) {
-        Some(i) => i,
-        None => break,
-      };
-      let mut depth = 0i32;
-      let mut pos = close;
-      loop {
-        match bytes[pos] {
-          b if b == close_ch => depth += 1,
-          b if b == open => {
-            depth -= 1;
-            if depth == 0 {
-              break;
-            }
-          }
-          _ => {}
-        }
-        if pos == 0 {
-          break;
-        }
-        pos -= 1;
-      }
-      if depth == 0 {
-        return Some(&response[pos..=close]);
-      }
-      end = close;
-    }
-  }
-  None
-}
-
-/// Try deterministic shape coercions on a valid JSON value to match the
-/// expected deserialization target `T`. Returns `None` if no coercion works.
-///
-/// Coercions attempted:
-/// - Object → wrap in array: `{...}` → `[{...}]`
-/// - Object → extract keys as string array: `{"K1": ..., "K2": ...}` → `["K1", "K2"]`
-/// - Object → extract values as array: `{"k": [...]}` → `[...]` (single-key object wrapping an array)
-/// - Scalar/string → wrap in array: `"foo"` → `["foo"]`
-fn try_coerce_json<T: serde::de::DeserializeOwned>(
-  value: &serde_json::Value,
-) -> Option<T> {
-  use serde_json::Value;
-
-  match value {
-    Value::Object(map) => {
-      // Empty object → empty array (model returned `{}` meaning "nothing").
-      if map.is_empty() {
-        if let Ok(parsed) = serde_json::from_value::<T>(Value::Array(vec![])) {
-          return Some(parsed);
-        }
-      }
-
-      // Object with a single key whose value is an array — unwrap it.
-      // e.g. `{"results": [...]}` → `[...]`
-      if map.len() == 1 {
-        if let Some(inner) = map.values().next() {
-          if inner.is_array() {
-            if let Ok(parsed) = serde_json::from_value::<T>(inner.clone()) {
-              return Some(parsed);
-            }
-          }
-        }
-      }
-
-      // Wrap the object in an array: `{...}` → `[{...}]`
-      // e.g. `{"declaration_topic": "N-1234", "semantic_text": "..."}` → `[{...}]`
-      let wrapped = Value::Array(vec![value.clone()]);
-      if let Ok(parsed) = serde_json::from_value::<T>(wrapped) {
-        return Some(parsed);
-      }
-
-      // Extract values as array (when values are objects, e.g. a map keyed by ID):
-      // `{"N1": {"declaration_topic": "N1", ...}, "N2": {...}}` → `[{...}, {...}]`
-      if map.values().all(|v| v.is_object()) {
-        let values: Vec<Value> = map.values().cloned().collect();
-        let values_array = Value::Array(values);
-        if let Ok(parsed) = serde_json::from_value::<T>(values_array) {
-          return Some(parsed);
-        }
-      }
-
-      // Extract keys as a string array: `{"K1": v1, "K2": v2}` → `["K1", "K2"]`
-      let keys: Vec<Value> =
-        map.keys().map(|k| Value::String(k.clone())).collect();
-      let key_array = Value::Array(keys);
-      if let Ok(parsed) = serde_json::from_value::<T>(key_array) {
-        return Some(parsed);
-      }
-
-      None
-    }
-    Value::String(_) | Value::Number(_) | Value::Bool(_) => {
-      // Wrap scalar in an array.
-      let wrapped = Value::Array(vec![value.clone()]);
-      serde_json::from_value::<T>(wrapped).ok()
-    }
-    _ => None,
-  }
 }

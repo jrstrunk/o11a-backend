@@ -33,11 +33,13 @@
 //!    reconciliation of all requirements and behaviors into features.
 
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 
 use serde::Deserialize;
+use serde_json::json;
 
 use crate::collaborator::agent::context;
-use crate::collaborator::agent::router::{self, TaskSize};
+use crate::collaborator::agent::router::{self, JsonSchema, TaskSize};
 use crate::collaborator::models::AUTHOR_AGENT_LARGE;
 use crate::core::{self, AST, AuditData, Requirement, topic};
 
@@ -110,7 +112,8 @@ single call must be supported\" are two requirements, not one joined with \
 Group requirements under the documentation **section** they were extracted from, \
 using the section's D-prefixed topic ID. Each section that contains behavioral \
 content should produce one or more requirements.\n\n\
-Return a JSON array of section groups, where each group has:\n\
+Return a JSON object with a `sections` key whose value is an array of section \
+groups. Each section group has:\n\
 - `section_topic`: the D-prefixed topic ID of the section header (e.g., \"D5\")\n\
 - `requirements`: an array of requirement objects, each with:\n\
   - `description`: a single, specific, testable statement of what the system must do or prevent\n\
@@ -132,8 +135,7 @@ describes constraints often reflect important design distinctions.\n\
 rules, or invariants, capture those as requirements.\n\
 - Each section group should have at least one requirement.\n\
 - Sections with no behavioral content (boilerplate, navigation, etc.) should be omitted.\n\
-- If the document contains no behavioral content at all, return an empty array `[]`.\n\
-- Return ONLY a JSON array of section group objects, no other text.\n\n\
+- If the document contains no behavioral content at all, return `{\"sections\": []}`.\n\n\
 Documentation:\n";
 
 /// Prompt for consolidating requirements extracted from multiple documents.
@@ -145,7 +147,8 @@ Your task is to consolidate these into a single, deduplicated list of \
 requirements grouped by section. For each group of similar requirements \
 across different sections, merge them into the most specific section and \
 combine their documentation_topics.\n\n\
-Return a JSON array of section groups, where each group has:\n\
+Return a JSON object with a `sections` key whose value is an array of section \
+groups. Each section group has:\n\
 - `section_topic`: the D-prefixed topic ID\n\
 - `requirements`: array of requirement objects with `description` and `documentation_topics`\n\n\
 Rules:\n\
@@ -161,8 +164,7 @@ preserve the details and nuances of both perspectives.\n\
 in behavioral terms.\n\
 - Each requirement must describe exactly one claim. If a merged requirement \
 covers two distinct things, split it back into separate requirements.\n\
-- If no requirements remain after deduplication, return an empty array `[]`.\n\
-- Return ONLY a JSON array of section group objects, no other text.\n\n\
+- If no requirements remain after deduplication, return `{\"sections\": []}`.\n\n\
 Requirements to consolidate:\n";
 
 /// Raw section group as returned by the requirement extraction LLM.
@@ -171,6 +173,49 @@ struct LLMSectionGroup {
   section_topic: String,
   requirements: Vec<LLMRequirement>,
 }
+
+#[derive(Deserialize)]
+struct LLMRequirementsResponse {
+  sections: Vec<LLMSectionGroup>,
+}
+
+static REQUIREMENTS_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
+  name: "requirements",
+  schema: json!({
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["sections"],
+    "properties": {
+      "sections": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["section_topic", "requirements"],
+          "properties": {
+            "section_topic": { "type": "string" },
+            "requirements": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["description", "documentation_topics"],
+                "properties": {
+                  "description": { "type": "string" },
+                  "documentation_topics": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }),
+  empty_response: r#"{"sections":[]}"#,
+});
 
 /// Result of parsing LLM requirements: requirements grouped by section, no features.
 pub struct ParsedRequirements {
@@ -181,17 +226,13 @@ pub struct ParsedRequirements {
 }
 
 /// Parse the LLM response for section-grouped requirements.
-async fn parse_requirements_response(
+fn parse_requirements_response(
   response: &str,
   prompt: &str,
 ) -> Result<ParsedRequirements, String> {
-  let raw_sections: Vec<LLMSectionGroup> =
-    router::extract_json(
-      response,
-      "requirements",
-      r#"[{"section_topic": "D5", "requirements": [{"description": "...", "documentation_topics": ["D6", "D7"]}]}]"#,
-      prompt,
-    ).await?;
+  let wrapper: LLMRequirementsResponse =
+    router::parse_response(response, "requirements", prompt)?;
+  let raw_sections = wrapper.sections;
 
   let mut requirements = BTreeMap::new();
   let mut topic_metadata = BTreeMap::new();
@@ -260,10 +301,10 @@ pub async fn extract_requirements_from_documentation(
       router::SYSTEM_MESSAGE_DOCUMENTATION,
       &prompt,
       None,
-      true,
+      Some(&REQUIREMENTS_SCHEMA),
     )
     .await?;
-    return parse_requirements_response(&response, &prompt).await;
+    return parse_requirements_response(&response, &prompt);
   }
 
   let mut handles = Vec::new();
@@ -276,7 +317,7 @@ pub async fn extract_requirements_from_documentation(
         router::SYSTEM_MESSAGE_DOCUMENTATION,
         &prompt,
         Some(&label),
-        true,
+        Some(&REQUIREMENTS_SCHEMA),
       )
       .await
     }));
@@ -306,8 +347,7 @@ pub async fn extract_requirements_from_documentation(
     return parse_requirements_response(
       &per_doc_results[0],
       EXTRACT_REQUIREMENTS_PROMPT,
-    )
-    .await;
+    );
   }
 
   let combined = per_doc_results.join("\n");
@@ -317,11 +357,11 @@ pub async fn extract_requirements_from_documentation(
     router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some("requirements_consolidate"),
-    true,
+    Some(&REQUIREMENTS_SCHEMA),
   )
   .await?;
 
-  parse_requirements_response(&response, &prompt).await
+  parse_requirements_response(&response, &prompt)
 }
 
 // ============================================================================
@@ -339,10 +379,31 @@ Your task is to identify any **additional** contracts that this documentation \
 section is relevant to beyond the confirmed ones.\n\n\
 A contract is relevant if the documentation section describes behavior, \
 requirements, or properties that apply to that contract's functionality.\n\n\
-Return a JSON array of N-prefixed contract topic ID strings for ONLY the \
-newly identified contracts. If there are no additional contracts beyond the \
-confirmed ones, return an empty array `[]`.\n\
-Return ONLY the JSON array, no other text.\n\n";
+Return a JSON object with a `contract_topics` key whose value is an array of \
+N-prefixed contract topic ID strings for ONLY the newly identified contracts. \
+If there are no additional contracts beyond the confirmed ones, return \
+`{\"contract_topics\": []}`.\n\n";
+
+static SEMANTIC_PASS1_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
+  name: "semantic_link_pass1",
+  schema: json!({
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["contract_topics"],
+    "properties": {
+      "contract_topics": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    }
+  }),
+  empty_response: r#"{"contract_topics":[]}"#,
+});
+
+#[derive(Deserialize)]
+struct LLMPass1Response {
+  contract_topics: Vec<String>,
+}
 
 /// LLM pass 2: Given a documentation section and a contract's member signatures,
 /// identify which members this section is relevant to.
@@ -360,19 +421,19 @@ specify which specific D-prefixed child elements of the documentation \
 describe it.\n\n\
 A member is relevant if the documentation section describes behavior, \
 requirements, or properties that apply to that member's functionality.\n\n\
-Return a JSON array of objects, each with:\n\
+Return a JSON object with a `members` key whose value is an array of objects, \
+each with:\n\
 - `member_topic`: the N-prefixed member topic ID\n\
 - `doc_topics`: array of D-prefixed topic IDs for the specific paragraphs, \
 lists, or subsections within the documentation that describe this member\n\n\
-Example: `[{\"member_topic\": \"N-1234\", \"doc_topics\": [\"D42\", \"D43\"]}]`\n\n\
+Example: `{\"members\": [{\"member_topic\": \"N-1234\", \"doc_topics\": [\"D42\", \"D43\"]}]}`\n\n\
 Rules:\n\
 - Only include members not already in the confirmed list.\n\
 - The `doc_topics` must be D-prefixed IDs that actually appear in the \
 provided documentation section. Do not invent IDs.\n\
 - If a member relates to the entire section rather than specific child \
 elements, use the section's own D-prefixed ID.\n\
-- If there are no additional members, return an empty array `[]`.\n\
-- Return ONLY the JSON array, no other text.\n\n";
+- If there are no additional members, return `{\"members\": []}`.\n\n";
 
 /// LLM pass 3: Given a documentation section, a list of declarations needing
 /// semantics, and the member's source code for disambiguation.
@@ -392,7 +453,9 @@ meaning from how the code uses a variable. If the documentation says a \
 variable is a \"proportional reward factor\" but the code uses it as a \
 divisor, the semantic should still be \"proportional reward factor\" — that \
 mismatch is valuable information for auditors.\n\n\
-For each declaration, provide an object with ALL of these fields (all are required):\n\
+Return a JSON object with a `links` key whose value is an array of objects. \
+For each declaration with documented semantics, include one object with ALL \
+of these fields (all are required):\n\
 - `declaration_topic` (required): the N-prefixed topic ID of the declaration\n\
 - `semantic_text` (required): a concise description of what the documentation says this \
 declaration represents in project context (e.g., \"proportional reward \
@@ -417,13 +480,8 @@ control check for admin role\").\n\
 - Each `documentation_topics` entry must be a D-prefixed ID that appears in \
 the provided documentation section.\n\
 - If the documentation does not describe any of the provided declarations, \
-return an empty array `[]`. Do NOT echo back the documentation input or \
-return the documentation structure — only return semantic link objects \
-or an empty array.\n\
-- Every object MUST include all three fields.\n\
-- Always return a JSON **array**, even for a single result: `[{...}]` not `{...}`.\n\
-- Do NOT return an empty object `{}` — use an empty array `[]` instead.\n\
-- Return ONLY a JSON array of objects, no other text.\n\n";
+return `{\"links\": []}`.\n\
+- Every link object MUST include all three fields.\n\n";
 
 /// Result of LLM pass 1: relevant contract topics for a section.
 pub struct SemanticLinkPass1Result {
@@ -449,14 +507,78 @@ struct LLMPass2MemberMapping {
   doc_topics: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct LLMPass2Response {
+  members: Vec<LLMPass2MemberMapping>,
+}
+
+static SEMANTIC_PASS2_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
+  name: "semantic_link_pass2",
+  schema: json!({
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["members"],
+    "properties": {
+      "members": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["member_topic", "doc_topics"],
+          "properties": {
+            "member_topic": { "type": "string" },
+            "doc_topics": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }),
+  empty_response: r#"{"members":[]}"#,
+});
+
 /// A single semantic link from LLM pass 3.
 #[derive(Deserialize)]
 struct LLMSemanticLink {
   declaration_topic: String,
   semantic_text: String,
-  #[serde(default)]
   documentation_topics: Vec<String>,
 }
+
+#[derive(Deserialize)]
+struct LLMPass3Response {
+  links: Vec<LLMSemanticLink>,
+}
+
+static SEMANTIC_PASS3_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
+  name: "semantic_link_pass3",
+  schema: json!({
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["links"],
+    "properties": {
+      "links": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["declaration_topic", "semantic_text", "documentation_topics"],
+          "properties": {
+            "declaration_topic": { "type": "string" },
+            "semantic_text": { "type": "string" },
+            "documentation_topics": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }),
+  empty_response: r#"{"links":[]}"#,
+});
 
 /// Result of LLM pass 3: semantic links for a (section, member) pair.
 pub struct SemanticLinkPass3Result {
@@ -489,21 +611,17 @@ pub async fn semantic_link_pass1(
     router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some(&label),
-    true,
+    Some(&SEMANTIC_PASS1_SCHEMA),
   )
   .await?;
 
-  let contract_ids: Vec<String> = router::extract_json(
-    &response,
-    "semantic link pass1",
-    r#"["N-1234", "N-5678"]"#,
-    &prompt,
-  )
-  .await?;
+  let wrapper: LLMPass1Response =
+    router::parse_response(&response, "semantic link pass1", &prompt)?;
 
   Ok(SemanticLinkPass1Result {
     section_topic: section_topic.clone(),
-    contract_topics: contract_ids
+    contract_topics: wrapper
+      .contract_topics
       .into_iter()
       .map(|id| topic::new_topic(&id))
       .collect(),
@@ -535,21 +653,17 @@ pub async fn semantic_link_pass2(
     router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some(&label),
-    true,
+    Some(&SEMANTIC_PASS2_SCHEMA),
   )
   .await?;
 
-  let raw_mappings: Vec<LLMPass2MemberMapping> = router::extract_json(
-    &response,
-    "semantic link pass2",
-    r#"[{"member_topic": "N-1234", "doc_topics": ["D42", "D43"]}]"#,
-    &prompt,
-  )
-  .await?;
+  let wrapper: LLMPass2Response =
+    router::parse_response(&response, "semantic link pass2", &prompt)?;
 
   Ok(SemanticLinkPass2Result {
     section_topic: section_topic.clone(),
-    member_mappings: raw_mappings
+    member_mappings: wrapper
+      .members
       .into_iter()
       .map(|m| MemberDocMapping {
         member_topic: topic::new_topic(&m.member_topic),
@@ -587,19 +701,15 @@ pub async fn semantic_link_pass3(
     router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some(&label),
-    true,
+    Some(&SEMANTIC_PASS3_SCHEMA),
   )
   .await?;
 
-  let raw_links: Vec<LLMSemanticLink> = router::extract_json(
-    &response,
-    "semantic link pass3",
-    r#"[{"declaration_topic": "N-1234", "semantic_text": "...", "documentation_topics": ["D42", "D43"]}]"#,
-    &prompt,
-  )
-  .await?;
+  let wrapper: LLMPass3Response =
+    router::parse_response(&response, "semantic link pass3", &prompt)?;
 
-  let links = raw_links
+  let links = wrapper
+    .links
     .into_iter()
     .map(|l| {
       let doc_topics: Vec<topic::Topic> = l
@@ -669,13 +779,14 @@ details from all sources into one comprehensive entry. Only keep entries as \
 separate if they describe **fundamentally different aspects** (e.g., one \
 describes purpose, another describes access control, another describes an \
 error condition).\n\n\
-Return a JSON array of objects, where each object has:\n\
+Return a JSON object with an `entries` key whose value is an array of \
+objects. Each object has:\n\
 - `text`: the condensed semantic description\n\
 - `sources`: array of 1-based indices of ALL original entries that were \
 merged into this entry (for provenance tracking)\n\n\
-Example: `[{\"text\": \"event emitted when a user joins a campaign\", \
-\"sources\": [1, 3, 5, 8]}, {\"text\": \"enables offchain tracking of \
-participation details\", \"sources\": [2, 4]}]`\n\n\
+Example: `{\"entries\": [{\"text\": \"event emitted when a user joins a \
+campaign\", \"sources\": [1, 3, 5, 8]}, {\"text\": \"enables offchain \
+tracking of participation details\", \"sources\": [2, 4]}]}`\n\n\
 Rules:\n\
 - Preserve nuances BY MERGING them into fewer entries, not by keeping \
 redundant entries. A single dense description that captures all facets is \
@@ -683,14 +794,45 @@ better than multiple overlapping ones.\n\
 - When merging, include the most specific details from all sources \
 (e.g., access control restrictions, specific parameters, business context).\n\
 - Each output entry should be a concise, self-contained semantic description.\n\
-- Every original entry index must appear in exactly one `sources` array.\n\
-- Return ONLY a JSON array of objects, no other text, reasoning, or thought process.\n\n";
+- Every original entry index must appear in exactly one `sources` array.\n\n";
 
 #[derive(Deserialize)]
 struct LLMCondensedSemantic {
   text: String,
   sources: Vec<usize>,
 }
+
+#[derive(Deserialize)]
+struct LLMCondenseResponse {
+  entries: Vec<LLMCondensedSemantic>,
+}
+
+static CONDENSE_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
+  name: "condense_semantics",
+  schema: json!({
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["entries"],
+    "properties": {
+      "entries": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["text", "sources"],
+          "properties": {
+            "text": { "type": "string" },
+            "sources": {
+              "type": "array",
+              "items": { "type": "integer" }
+            }
+          }
+        }
+      }
+    }
+  }),
+  empty_response: r#"{"entries":[]}"#,
+});
 
 /// A condensed semantic entry with the text and indices of the original
 /// entries (0-based) that were merged into it.
@@ -726,20 +868,16 @@ pub async fn condense_semantics(
     router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some(&label),
-    true,
+    Some(&CONDENSE_SCHEMA),
   )
   .await?;
 
-  let raw: Vec<LLMCondensedSemantic> = router::extract_json(
-    &response,
-    "condensed semantics",
-    r#"[{"text": "concise semantic", "sources": [1, 2, 5]}]"#,
-    &prompt,
-  )
-  .await?;
+  let wrapper: LLMCondenseResponse =
+    router::parse_response(&response, "condensed semantics", &prompt)?;
 
   Ok(
-    raw
+    wrapper
+      .entries
       .into_iter()
       .map(|entry| CondensedSemantic {
         text: entry.text,
@@ -768,7 +906,8 @@ Your task is to **synthesize features** that represent the system's \
 capabilities. Each feature connects the documented intent (requirements) \
 with the implemented reality (behaviors) for a coherent area of \
 functionality.\n\n\
-For each feature, provide:\n\
+Return a JSON object with a `features` key whose value is an array of \
+feature objects. Each feature has:\n\
 - `name`: a short, descriptive feature name (behavioral, not technical)\n\
 - `description`: a summary synthesized from both the documented intent and \
 the implemented reality\n\
@@ -789,8 +928,7 @@ it still belongs to a feature (undocumented implementation).\n\
 - Do not force weak matches. It is better to leave a requirement or behavior \
 in a single feature than to artificially spread it across features where \
 the connection is tenuous.\n\
-- If no features can be synthesized, return an empty array `[]`.\n\
-- Return ONLY a JSON array of feature objects, no other text.\n\n";
+- If no features can be synthesized, return `{\"features\": []}`.\n\n";
 
 /// Raw feature from reconciliation LLM.
 #[derive(Deserialize)]
@@ -800,6 +938,43 @@ struct LLMSynthesizedFeature {
   requirement_topics: Vec<String>,
   behavior_topics: Vec<String>,
 }
+
+#[derive(Deserialize)]
+struct LLMFeaturesResponse {
+  features: Vec<LLMSynthesizedFeature>,
+}
+
+static FEATURES_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
+  name: "synthesize_features",
+  schema: json!({
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["features"],
+    "properties": {
+      "features": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "description", "requirement_topics", "behavior_topics"],
+          "properties": {
+            "name": { "type": "string" },
+            "description": { "type": "string" },
+            "requirement_topics": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "behavior_topics": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }),
+  empty_response: r#"{"features":[]}"#,
+});
 
 /// Result of feature synthesis.
 pub struct SynthesizedFeatures {
@@ -950,17 +1125,13 @@ pub async fn synthesize_features(
     router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some("synthesize_features"),
-    true,
+    Some(&FEATURES_SCHEMA),
   )
   .await?;
 
-  let raw_features: Vec<LLMSynthesizedFeature> =
-    router::extract_json(
-      &response,
-      "synthesized features",
-      r#"[{"name": "...", "description": "...", "requirement_topics": ["R1"], "behavior_topics": ["B1"]}]"#,
-      &prompt,
-    ).await?;
+  let wrapper: LLMFeaturesResponse =
+    router::parse_response(&response, "synthesized features", &prompt)?;
+  let raw_features = wrapper.features;
 
   let mut topic_metadata = BTreeMap::new();
   let mut feature_requirement_links = BTreeMap::new();
@@ -1023,7 +1194,8 @@ proportional reward share for the staker\" rather than \"multiplies \
 propFactor by stakerBalance.\"\n\n\
 Each behavior belongs to exactly one function or modifier. \
 Each function/modifier may have multiple behaviors.\n\n\
-Return a JSON array of member groups, where each group has:\n\
+Return a JSON object with a `members` key whose value is an array of member \
+groups. Each group has:\n\
 - `member_topic`: the N-prefixed topic ID of the function/modifier\n\
 - `behaviors`: an array of behavior description strings\n\n\
 Rules:\n\
@@ -1036,8 +1208,7 @@ subtle differences in naming often reflect important design distinctions.\n\
 access control checks, state mutations).\n\
 - Do not describe implementation details like \"calls _transfer internally\" — \
 describe the observable effect: \"transfers tokens from sender to recipient.\"\n\
-- If the contract has no functions or modifiers, return an empty array `[]`.\n\
-- Return ONLY the JSON array, no other text.\n\n";
+- If the contract has no functions or modifiers, return `{\"members\": []}`.\n\n";
 
 /// Raw member behavior group from LLM.
 #[derive(Deserialize)]
@@ -1045,6 +1216,38 @@ struct LLMMemberBehaviors {
   member_topic: String,
   behaviors: Vec<String>,
 }
+
+#[derive(Deserialize)]
+struct LLMBehaviorsResponse {
+  members: Vec<LLMMemberBehaviors>,
+}
+
+static BEHAVIORS_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
+  name: "extract_behaviors",
+  schema: json!({
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["members"],
+    "properties": {
+      "members": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["member_topic", "behaviors"],
+          "properties": {
+            "member_topic": { "type": "string" },
+            "behaviors": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }),
+  empty_response: r#"{"members":[]}"#,
+});
 
 /// Result of behavior extraction for a contract.
 pub struct ParsedBehaviors {
@@ -1065,20 +1268,15 @@ pub async fn extract_behaviors_from_contract(
     router::SYSTEM_MESSAGE_CODE,
     &prompt,
     Some(&label),
-    true,
+    Some(&BEHAVIORS_SCHEMA),
   )
   .await?;
 
-  let raw_groups: Vec<LLMMemberBehaviors> = router::extract_json(
-    &response,
-    "behaviors",
-    r#"[{"member_topic": "N-1234", "behaviors": ["...", "..."]}]"#,
-    &prompt,
-  )
-  .await?;
+  let wrapper: LLMBehaviorsResponse =
+    router::parse_response(&response, "behaviors", &prompt)?;
 
   let mut behaviors = Vec::new();
-  for group in raw_groups {
+  for group in wrapper.members {
     let member_topic = topic::new_topic(&group.member_topic);
     for desc in group.behaviors {
       behaviors.push((member_topic.clone(), desc));
@@ -1186,7 +1384,7 @@ pub async fn normalize_documentation(
         router::SYSTEM_MESSAGE_DOCUMENTATION,
         &prompt,
         Some(&file_path),
-        false,
+        None,
       )
       .await;
       (file_path, result)
