@@ -1458,8 +1458,6 @@ pub enum TopicMetadata {
     kind: NamedTopicKind,
     name: String,
     visibility: NamedTopicVisibility,
-    /// Context derived from recursively traversing ancestors and descendants only.
-    ancestry: Vec<SourceContext>,
     /// Whether this topic has mutations (was previously NamedMutableTopic)
     is_mutable: bool,
     /// The assignment or unary operation nodes that mutate this variable.
@@ -1638,13 +1636,6 @@ impl TopicMetadata {
       | TopicMetadata::ThreatTopic { topic, .. }
       | TopicMetadata::InvariantTopic { topic, .. }
       | TopicMetadata::DocumentationTopic { topic, .. } => topic,
-    }
-  }
-
-  pub fn ancestry(&self) -> &[SourceContext] {
-    match self {
-      TopicMetadata::NamedTopic { ancestry, .. } => ancestry,
-      _ => &[],
     }
   }
 
@@ -2529,7 +2520,6 @@ pub fn new_audit_data(
       kind: NamedTopicKind::Builtin,
       visibility: NamedTopicVisibility::Public,
       name: "keccak256".to_string(),
-      ancestry: Vec::new(),
       is_mutable: false,
       mutations: Vec::new(),
       ancestors: Vec::new(),
@@ -2550,7 +2540,6 @@ pub fn new_audit_data(
       kind: NamedTopicKind::Builtin,
       visibility: NamedTopicVisibility::Public,
       name: "type".to_string(),
-      ancestry: Vec::new(),
       is_mutable: false,
       mutations: Vec::new(),
       ancestors: Vec::new(),
@@ -2571,7 +2560,6 @@ pub fn new_audit_data(
       kind: NamedTopicKind::Builtin,
       visibility: NamedTopicVisibility::Public,
       name: "this".to_string(),
-      ancestry: Vec::new(),
       is_mutable: false,
       mutations: Vec::new(),
       ancestors: Vec::new(),
