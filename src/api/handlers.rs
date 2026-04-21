@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
 use crate::api::AppState;
-use crate::collaborator::{db, formatter, models::*, parser, store};
+use crate::collaborator::{db, models::*};
 use crate::core::{
   self, project,
   topic::{self, TopicKind, new_topic},
@@ -1362,24 +1362,8 @@ pub async fn create_comment(
       .data_context
       .lock()
       .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let audit_data =
-      ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
-    let (mentions, nodes) = parser::parse_comment(&payload.content, audit_data);
-    let html =
-      formatter::render_comment_html(&nodes, &comment_topic, &audit_data.nodes);
-
-    // Store comment AST in nodes
-    audit_data
-      .nodes
-      .insert(comment_topic.clone(), core::Node::Comment(nodes));
-
-    store::register_comment_in_audit_data(
-      audit_data, &comment, &scope, &mentions,
-    );
-
-    // Cache rendered HTML
-    ctx.cache_source_text(&audit_id, &comment_topic_id, html);
+    let mentions = db::ingest_comment(&mut ctx, &comment, &scope);
 
     // Build conversation entries for broadcasting
     let source_text_cache = ctx
@@ -2219,9 +2203,13 @@ pub async fn get_documentation_panel(
   }
 
   for t in &related_topics {
-    // Mentions
-    if let Some(mentioning) = audit_data.mentions_index.get(t) {
-      for mt in mentioning {
+    // Pull the static doc_references list from the referenced topic's metadata.
+    // Only NamedTopic carries doc_references; other kinds are not addressable
+    // as inline code references in documentation.
+    if let Some(core::TopicMetadata::NamedTopic { doc_references, .. }) =
+      audit_data.topic_metadata.get(t)
+    {
+      for mt in doc_references {
         if !mention_topics.contains(mt) {
           mention_topics.push(mt.clone());
         }

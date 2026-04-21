@@ -422,15 +422,84 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 // Startup loading
 // ============================================================================
 
-/// Load and parse all comments on server startup.
-/// Registers each comment in audit_data.topic_metadata (including mention
-/// wiring) and caches rendered HTML in data_context.source_text_cache.
-/// Returns the number of comments loaded.
+/// Ingest a `Comment` into in-memory state: parse markdown, render HTML, insert
+/// the AST node, register topic metadata + reverse indexes, and cache the
+/// rendered HTML on the data context. Returns the parsed mention topics so
+/// callers can broadcast follow-up events. No-op if the audit is unknown.
+pub fn ingest_comment(
+  data_context: &mut DataContext,
+  comment: &Comment,
+  scope: &ScopeInfo,
+) -> Vec<topic::Topic> {
+  let (mentions, html) = {
+    let Some(audit_data) = data_context.get_audit_mut(&comment.audit_id) else {
+      return Vec::new();
+    };
+
+    let comment_topic = comment.comment_topic();
+    let target_topic = topic::new_topic(&comment.topic_id);
+
+    let (mentions, nodes) =
+      parser::parse_comment(&comment.content_markdown, audit_data);
+    let html = formatter::render_comment_html(
+      &nodes,
+      &comment_topic,
+      &audit_data.nodes,
+    );
+
+    audit_data
+      .nodes
+      .insert(comment_topic.clone(), core::Node::Comment(nodes));
+
+    let mut mentioned_topics: Vec<topic::Topic> = mentions.clone();
+    mentioned_topics.sort_unstable();
+    mentioned_topics.dedup();
+
+    audit_data.topic_metadata.insert(
+      comment_topic.clone(),
+      core::TopicMetadata::CommentTopic {
+        topic: comment_topic.clone(),
+        author_id: comment.author_id,
+        comment_type: comment.comment_type.clone(),
+        target_topic: target_topic.clone(),
+        created_at: comment.created_at.clone(),
+        scope: scope.to_scope(),
+        mentioned_topics,
+      },
+    );
+
+    let comments = audit_data.comment_index.entry(target_topic).or_default();
+    if !comments.contains(&comment_topic) {
+      comments.push(comment_topic.clone());
+    }
+
+    for mention in &mentions {
+      let entries = audit_data
+        .mentions_index
+        .entry(mention.clone())
+        .or_default();
+      if !entries.contains(&comment_topic) {
+        entries.push(comment_topic.clone());
+      }
+    }
+
+    (mentions, html)
+  };
+
+  data_context.cache_source_text(
+    &comment.audit_id,
+    &comment.comment_topic_id(),
+    html,
+  );
+
+  mentions
+}
+
+/// Load and parse all comments on server startup. Returns the number loaded.
 pub async fn load_and_parse_all_comments(
   pool: &SqlitePool,
   data_context: &mut DataContext,
 ) -> Result<usize, sqlx::Error> {
-  // Fetch all non-hidden comments from database
   let comments = sqlx::query_as::<_, Comment>(
     "SELECT * FROM comments WHERE status != 'hidden'",
   )
@@ -439,39 +508,10 @@ pub async fn load_and_parse_all_comments(
 
   let count = comments.len();
 
-  // Parse each comment with its audit's data
   for comment in &comments {
-    if let Some(audit_data) = data_context.get_audit_mut(&comment.audit_id) {
-      let (mentions, nodes) =
-        parser::parse_comment(&comment.content_markdown, audit_data);
-      let comment_topic = comment.comment_topic();
-      let html = formatter::render_comment_html(
-        &nodes,
-        &comment_topic,
-        &audit_data.nodes,
-      );
-
-      // Store comment AST in nodes
-      audit_data
-        .nodes
-        .insert(comment_topic.clone(), core::Node::Comment(nodes));
-
-      // Parse scope from stored JSON
-      let scope: crate::api::ScopeInfo =
-        serde_json::from_str(&comment.scope).unwrap_or_default();
-
-      // Register in topic_metadata and wire up mentions
-      super::store::register_comment_in_audit_data(
-        audit_data, &comment, &scope, &mentions,
-      );
-
-      // Cache rendered HTML
-      data_context.cache_source_text(
-        &comment.audit_id,
-        &comment.comment_topic_id(),
-        html,
-      );
-    }
+    let scope: ScopeInfo =
+      serde_json::from_str(&comment.scope).unwrap_or_default();
+    ingest_comment(data_context, comment, &scope);
   }
 
   Ok(count)

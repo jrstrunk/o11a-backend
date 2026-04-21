@@ -364,8 +364,11 @@ pub struct AuditData {
   pub feature_requirement_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Feature-to-behavior links (many-to-many). Keyed by F-prefixed topic.
   pub feature_behavior_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
-  /// Reverse index: mentioned topic → comment topics that mention it.
-  /// Updated on comment create.
+  /// Reverse index: mentioned topic → comment topics that mention it. Updated
+  /// on comment create. Feeds the conversation panel.
+  ///
+  /// Doc-sourced references are not stored here; they live as a static field
+  /// (`doc_references`) on the referenced NamedTopic/FeatureTopic metadata.
   pub mentions_index: HashMap<topic::Topic, Vec<topic::Topic>>,
 }
 
@@ -420,12 +423,14 @@ impl TopicNameIndex {
     let mut simple_name_candidates: HashMap<String, Vec<topic::Topic>> =
       HashMap::new();
 
+    // Only NamedTopic (code declarations) participates in name_index lookup.
+    // Feature names and section titles are user-supplied phrases, not code
+    // identifiers, and must not shadow declarations.
     for (topic, metadata) in &audit_data.topic_metadata {
-      if let Some(qname) = metadata.qualified_name(audit_data) {
-        by_qualified_name.insert(qname, topic.clone());
-      }
-
-      if let Some(sname) = metadata.name() {
+      if let TopicMetadata::NamedTopic { name: sname, .. } = metadata {
+        if let Some(qname) = metadata.qualified_name(audit_data) {
+          by_qualified_name.insert(qname, topic.clone());
+        }
         if !is_common_word(sname) {
           simple_name_candidates
             .entry(sname.to_string())
@@ -1478,6 +1483,9 @@ pub enum TopicMetadata {
     /// member with exactly one in-scope implementation — the interface member is
     /// transitive to the implementation member.
     transitive_topic: Option<topic::Topic>,
+    /// Documentation topics that reference this declaration via inline code
+    /// references. Populated by documentation analyzer at startup.
+    doc_references: Vec<topic::Topic>,
   },
   UnnamedTopic {
     topic: topic::Topic,
@@ -2528,6 +2536,7 @@ pub fn new_audit_data(
       descendants: Vec::new(),
       relatives: Vec::new(),
       transitive_topic: None,
+      doc_references: Vec::new(),
     },
   );
 
@@ -2548,6 +2557,7 @@ pub fn new_audit_data(
       descendants: Vec::new(),
       relatives: Vec::new(),
       transitive_topic: None,
+      doc_references: Vec::new(),
     },
   );
 
@@ -2568,6 +2578,7 @@ pub fn new_audit_data(
       descendants: Vec::new(),
       relatives: Vec::new(),
       transitive_topic: None,
+      doc_references: Vec::new(),
     },
   );
 

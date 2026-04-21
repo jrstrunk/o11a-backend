@@ -1490,17 +1490,19 @@ fn process_second_pass_nodes(
       // implementation are transitive to their implementation counterpart.
       let transitive_topic = match node {
         ASTNode::FunctionDefinition { signature, .. }
-        | ASTNode::ModifierDefinition { signature, .. } => match signature.as_ref() {
-          ASTNode::FunctionSignature {
-            implementation_declaration: Some(impl_id),
-            ..
+        | ASTNode::ModifierDefinition { signature, .. } => {
+          match signature.as_ref() {
+            ASTNode::FunctionSignature {
+              implementation_declaration: Some(impl_id),
+              ..
+            }
+            | ASTNode::ModifierSignature {
+              implementation_declaration: Some(impl_id),
+              ..
+            } => Some(topic::new_node_topic(impl_id)),
+            _ => None,
           }
-          | ASTNode::ModifierSignature {
-            implementation_declaration: Some(impl_id),
-            ..
-          } => Some(topic::new_node_topic(impl_id)),
-          _ => None,
-        },
+        }
         ASTNode::VariableDeclaration {
           implementation_declaration: Some(impl_id),
           ..
@@ -1523,6 +1525,7 @@ fn process_second_pass_nodes(
         descendants: descendant_topics,
         relatives: relative_topics,
         transitive_topic: transitive_topic.clone(),
+        doc_references: Vec::new(),
       };
 
       topic_metadata.insert(topic.clone(), topic_metadata_entry);
@@ -1701,15 +1704,16 @@ fn process_second_pass_nodes(
 
         // A semantic block with exactly one child statement is transitive
         // to that statement — they represent the same logical unit.
-        let transitive_topic = if let ASTNode::SemanticBlock { statements, .. } = node {
-          if statements.len() == 1 {
-            Some(topic::new_node_topic(&statements[0].node_id()))
+        let transitive_topic =
+          if let ASTNode::SemanticBlock { statements, .. } = node {
+            if statements.len() == 1 {
+              Some(topic::new_node_topic(&statements[0].node_id()))
+            } else {
+              None
+            }
           } else {
             None
-          }
-        } else {
-          None
-        };
+          };
 
         topic_metadata.insert(
           topic.clone(),
