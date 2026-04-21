@@ -30,6 +30,7 @@ pub struct AgentTopicContext {
   pub context: Vec<AgentSourceGroup>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub expanded_context: Option<Vec<AgentSourceGroup>>,
+  pub doc_references: Vec<String>,
   pub mentions: Vec<String>,
 }
 
@@ -2015,6 +2016,13 @@ pub fn build_agent_topic_context(
     audit_data,
     source_text_cache,
   );
+  let doc_references: Vec<String> = match audit_data.topic_metadata.get(&topic)
+  {
+    Some(TopicMetadata::NamedTopic { doc_references, .. }) => {
+      doc_references.iter().map(|t| t.id.clone()).collect()
+    }
+    _ => Vec::new(),
+  };
   let mentions: Vec<String> = audit_data
     .mentions_index
     .get(&topic)
@@ -2049,6 +2057,7 @@ pub fn build_agent_topic_context(
         condition: None,
         context,
         expanded_context: expanded,
+        doc_references,
         mentions,
       })
     }
@@ -2061,6 +2070,7 @@ pub fn build_agent_topic_context(
       condition: None,
       context,
       expanded_context: None,
+      doc_references,
       mentions,
     }),
 
@@ -2091,6 +2101,7 @@ pub fn build_agent_topic_context(
         condition: condition_snippet,
         context,
         expanded_context: None,
+        doc_references,
         mentions,
       })
     }
@@ -2114,6 +2125,7 @@ pub fn build_agent_topic_context(
         condition: None,
         context,
         expanded_context: None,
+        doc_references,
         mentions,
       })
     }
@@ -2127,6 +2139,7 @@ pub fn build_agent_topic_context(
         condition: None,
         context,
         expanded_context: None,
+        doc_references,
         mentions,
       })
     }
@@ -2154,6 +2167,7 @@ pub fn build_agent_topic_context(
         condition: None,
         context,
         expanded_context: None,
+        doc_references,
         mentions,
       })
     }
@@ -2173,6 +2187,7 @@ pub fn build_agent_topic_context(
       condition: None,
       context,
       expanded_context: None,
+      doc_references,
       mentions,
     }),
   }

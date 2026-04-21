@@ -78,13 +78,17 @@ pub fn analyze(
     }
   }
 
-  // Populate mentions_index: for each referenced topic, record the most specific
-  // doc topic (member if present, otherwise component) that mentions it.
+  // Populate doc_references on each referenced NamedTopic with the most
+  // specific doc topic (member if present, otherwise component) that
+  // references it. Mirrors the cross-stage enrichment pattern used by
+  // populate_ancestry in the solidity analyzer. Only NamedTopics participate
+  // in name_index lookup, so referenced_topic can only be a NamedTopic here.
   for (referenced_topic, scopes) in mentions_by_topic {
-    let entries = audit_data
-      .mentions_index
-      .entry(referenced_topic)
-      .or_default();
+    let Some(core::TopicMetadata::NamedTopic { doc_references, .. }) =
+      audit_data.topic_metadata.get_mut(&referenced_topic)
+    else {
+      continue;
+    };
     for scope in scopes {
       let mentioning_topic = match &scope {
         Scope::Member { member, .. }
@@ -92,8 +96,8 @@ pub fn analyze(
         Scope::Component { component, .. } => component.clone(),
         Scope::Global | Scope::Container { .. } => continue,
       };
-      if !entries.contains(&mentioning_topic) {
-        entries.push(mentioning_topic);
+      if !doc_references.contains(&mentioning_topic) {
+        doc_references.push(mentioning_topic);
       }
     }
   }

@@ -1530,9 +1530,21 @@ pub fn build_conversation(
     }
   }
 
-  // Topic mentions (inline code references in docs) are rendered in the
-  // documentation panel instead of the conversation panel, where they can
-  // be deduplicated with other linked documentation sections.
+  // Comments that mention this topic. Documentation-sourced references are
+  // rendered in the documentation panel instead, where they can be
+  // deduplicated with other linked documentation sections.
+  if let Some(mentioning_topics) = audit_data.mentions_index.get(&topic) {
+    for mentioning_topic in mentioning_topics {
+      if let Some(entry) = build_conversation_entry(
+        mentioning_topic,
+        ConversationEntryKind::Mention,
+        audit_data,
+        source_text_cache,
+      ) {
+        entries.push(entry);
+      }
+    }
+  }
 
   Some(ConversationResponse { entries })
 }

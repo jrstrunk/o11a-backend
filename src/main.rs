@@ -28,12 +28,6 @@ async fn main() {
     .await
     .expect("Failed to run migrations");
 
-  // Run collaborator migrations
-  println!("Running collaborator migrations...");
-  collab_db::run_migrations(&pool)
-    .await
-    .expect("Failed to run collaborator migrations");
-
   println!("Creating DataContext...");
 
   // Create empty DataContext
@@ -106,7 +100,7 @@ async fn main() {
   let app = routes::create_router(state);
 
   // Start server
-  let addr = "0.0.0.0:3000";
+  let addr = "0.0.0.0:3058";
   println!("Server running on http://{}", addr);
 
   let listener = tokio::net::TcpListener::bind(addr)
