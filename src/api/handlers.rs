@@ -376,17 +376,19 @@ pub async fn get_source_text(
 ) -> Result<impl IntoResponse, StatusCode> {
   println!("GET /api/v1/audits/{}/source_text/{}", audit_id, topic_id);
 
-  let ctx = state.data_context.lock().map_err(|e| {
+  let mut ctx = state.data_context.lock().map_err(|e| {
     eprintln!("Mutex poisoned in get_source_text: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
-  // Check source text cache first
-  if let Some(html) = ctx.get_cached_source_text(&audit_id, &topic_id) {
+  let core::DataContext { audits, source_text_cache, .. } = &mut *ctx;
+  let audit_data = audits.get(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+  let cache = source_text_cache.entry(audit_id.clone()).or_default();
+
+  // Check cache first
+  if let Some(html) = cache.get(&topic_id) {
     return Ok(Html(html.clone()));
   }
-
-  let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
   // Create topic from the topic_id
   let topic = new_topic(&topic_id);
@@ -396,6 +398,8 @@ pub async fn get_source_text(
     eprintln!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
     StatusCode::NOT_FOUND
   })?;
+
+  cache.insert(topic_id, source_text.clone());
 
   Ok(Html(source_text))
 }
@@ -984,7 +988,7 @@ fn topic_metadata_to_response(
     } => TopicMetadataResponse::CommentTopic(CommentTopicResponse {
       topic_id: topic.id.clone(),
       author_id: *author_id,
-      comment_type: comment_type.clone(),
+      comment_type: comment_type.as_str().to_string(),
       target_topic: target_topic.id.clone(),
       created_at: created_at.clone(),
       scope: scope_info,
@@ -1128,28 +1132,32 @@ pub async fn get_topic_view(
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
-  let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-
-  let source_text_cache = ctx
-    .source_text_cache
-    .get(&audit_id)
-    .cloned()
-    .unwrap_or_default();
+  let core::DataContext {
+    audits,
+    source_text_cache,
+    topic_view_cache,
+    ..
+  } = &mut *ctx;
+  let audit_data = audits.get(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+  let cache = source_text_cache.entry(audit_id.clone()).or_default();
 
   // Build the dynamic comment parent chain prefix (empty for non-comment topics)
   let prefix = super::topic_view::build_topic_panel_prefix(
     &topic_id,
     audit_data,
-    &source_text_cache,
+    cache,
   );
 
   // Check cache for static parts
-  let cached = ctx.get_cached_topic_view(&audit_id, &topic_id).cloned();
+  let cached = topic_view_cache
+    .get(&audit_id)
+    .and_then(|m| m.get(&topic_id))
+    .cloned();
 
   let response = super::topic_view::build_topic_view(
     &topic_id,
     audit_data,
-    &source_text_cache,
+    cache,
     cached.as_ref(),
     &prefix,
   )
@@ -1170,18 +1178,20 @@ pub async fn get_topic_view(
       response.topic_panel_html[prefix.len()..].to_string()
     };
 
-    ctx.cache_topic_view(
-      &audit_id,
-      &topic_id,
-      core::CachedTopicView {
-        topic_panel_html: static_topic_panel,
-        expanded_references_panel_html: response
-          .expanded_references_panel_html
-          .clone(),
-        breadcrumb_html: response.breadcrumb_html.clone(),
-        highlight_css: response.highlight_css.clone(),
-      },
-    );
+    topic_view_cache
+      .entry(audit_id.clone())
+      .or_default()
+      .insert(
+        topic_id.clone(),
+        core::CachedTopicView {
+          topic_panel_html: static_topic_panel,
+          expanded_references_panel_html: response
+            .expanded_references_panel_html
+            .clone(),
+          breadcrumb_html: response.breadcrumb_html.clone(),
+          highlight_css: response.highlight_css.clone(),
+        },
+      );
   }
 
   Ok(Json(response))
@@ -1196,23 +1206,19 @@ pub async fn get_conversation(
 ) -> Result<Json<super::topic_view::ConversationResponse>, StatusCode> {
   println!("GET /api/v1/audits/{}/conversation/{}", audit_id, topic_id);
 
-  let ctx = state.data_context.lock().map_err(|e| {
+  let mut ctx = state.data_context.lock().map_err(|e| {
     eprintln!("Mutex poisoned in get_conversation: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
-  let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-
-  let source_text_cache = ctx
-    .source_text_cache
-    .get(&audit_id)
-    .cloned()
-    .unwrap_or_default();
+  let core::DataContext { audits, source_text_cache, .. } = &mut *ctx;
+  let audit_data = audits.get(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+  let cache = source_text_cache.entry(audit_id.clone()).or_default();
 
   let response = super::topic_view::build_conversation(
     &topic_id,
     audit_data,
-    &source_text_cache,
+    cache,
   )
   .ok_or_else(|| {
     eprintln!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
@@ -1230,21 +1236,17 @@ pub async fn get_thread(
 ) -> Result<impl IntoResponse, StatusCode> {
   println!("GET /api/v1/audits/{}/thread/{}", audit_id, topic_id);
 
-  let ctx = state.data_context.lock().map_err(|e| {
+  let mut ctx = state.data_context.lock().map_err(|e| {
     eprintln!("Mutex poisoned in get_thread: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
-  let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-
-  let source_text_cache = ctx
-    .source_text_cache
-    .get(&audit_id)
-    .cloned()
-    .unwrap_or_default();
+  let core::DataContext { audits, source_text_cache, .. } = &mut *ctx;
+  let audit_data = audits.get(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+  let cache = source_text_cache.entry(audit_id.clone()).or_default();
 
   let html =
-    super::topic_view::build_thread(&topic_id, audit_data, &source_text_cache)
+    super::topic_view::build_thread(&topic_id, audit_data, cache)
       .ok_or_else(|| {
         eprintln!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
         StatusCode::NOT_FOUND
@@ -1350,7 +1352,7 @@ pub async fn create_comment(
   let comment_topic_id = comment.comment_topic_id();
   let comment_topic = comment.comment_topic();
 
-  // Parse mentions, render HTML, register in audit_data, and cache source text.
+  // Parse mentions, render HTML, register in audit_data.
   // Build ConversationEntry objects for WebSocket broadcasting.
   let mut conversation_events: Vec<(
     String,
@@ -1365,13 +1367,9 @@ pub async fn create_comment(
 
     let mentions = db::ingest_comment(&mut ctx, &comment, &scope);
 
-    // Build conversation entries for broadcasting
-    let source_text_cache = ctx
-      .source_text_cache
-      .get(&audit_id)
-      .cloned()
-      .unwrap_or_default();
-    let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+    let core::DataContext { audits, source_text_cache, .. } = &mut *ctx;
+    let audit_data = audits.get(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+    let cache = source_text_cache.entry(audit_id.clone()).or_default();
 
     // Collect parent comment chain for thread invalidation.
     // If the target is a comment, its thread (and all ancestor comment threads)
@@ -1400,7 +1398,7 @@ pub async fn create_comment(
       &comment_topic,
       super::topic_view::ConversationEntryKind::Comment,
       audit_data,
-      &source_text_cache,
+      cache,
     ) {
       conversation_events.push((
         payload.topic_id.clone(),
@@ -1421,7 +1419,7 @@ pub async fn create_comment(
           &comment_topic,
           super::topic_view::ConversationEntryKind::Mention,
           audit_data,
-          &source_text_cache,
+          cache,
         ) {
           conversation_events.push((mentioned_id.to_string(), entry, vec![]));
         }
@@ -1666,24 +1664,20 @@ pub async fn get_agent_context(
 > {
   println!("GET /api/v1/audits/{}/agent_context/{}", audit_id, topic_id);
 
-  let ctx = state.data_context.lock().map_err(|e| {
+  let mut ctx = state.data_context.lock().map_err(|e| {
     eprintln!("Mutex poisoned in get_agent_context: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
-  let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-
-  let source_text_cache = ctx
-    .source_text_cache
-    .get(&audit_id)
-    .cloned()
-    .unwrap_or_default();
+  let core::DataContext { audits, source_text_cache, .. } = &mut *ctx;
+  let audit_data = audits.get(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+  let cache = source_text_cache.entry(audit_id.clone()).or_default();
 
   let response =
     crate::collaborator::agent::context::build_agent_topic_context(
       &topic_id,
       audit_data,
-      &source_text_cache,
+      cache,
       params.include_expanded_context,
     )
     .ok_or_else(|| {
@@ -2116,12 +2110,13 @@ pub async fn get_documentation_panel(
 ) -> Result<impl IntoResponse, StatusCode> {
   println!("POST /api/v1/audits/{}/documentation", audit_id);
 
-  let ctx = state.data_context.lock().map_err(|e| {
+  let mut ctx = state.data_context.lock().map_err(|e| {
     eprintln!("Mutex poisoned in get_documentation_panel: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
-  let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+  let core::DataContext { audits, source_text_cache, .. } = &mut *ctx;
+  let audit_data = audits.get(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
   // Resolve all input topic IDs to feature topics.
   // Track whether any input was a direct feature topic — if so, show
@@ -2148,11 +2143,7 @@ pub async fn get_documentation_panel(
   }
   let show_features_as_headers = !has_direct_feature_input;
 
-  let source_text_cache = ctx
-    .source_text_cache
-    .get(&audit_id)
-    .cloned()
-    .unwrap_or_default();
+  let cache = source_text_cache.entry(audit_id.clone()).or_default();
 
   // Collect doc topics from mentions, semantic links, and requirement documentation.
   let mut mention_topics: Vec<topic::Topic> = Vec::new();
@@ -2239,7 +2230,7 @@ pub async fn get_documentation_panel(
     &mention_topics,
     show_features_as_headers,
     audit_data,
-    &source_text_cache,
+    cache,
   );
 
   Ok(Html(html))

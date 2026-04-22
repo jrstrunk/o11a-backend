@@ -7,6 +7,54 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 // ============================================================================
+// Comment Type
+// ============================================================================
+
+/// Comment type for classification. Used in TopicMetadata::CommentTopic and
+/// in the collaborator layer for DB serialization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommentType {
+  Note,             // General observation or annotation
+  Info,             // Informational context or explanation
+  Question,         // Question needing an answer
+  Answer,           // Answer to a question
+  Todo,             // Action item to be completed
+  FindingLead,      // Potential vulnerability or issue to investigate
+  DevTechnical,     // Inline developer comment from source code (// and /* */)
+  DevDocumentation, // NatSpec @notice docstring from source code
+}
+
+impl CommentType {
+  pub fn as_str(&self) -> &'static str {
+    match self {
+      CommentType::Note => "note",
+      CommentType::Info => "info",
+      CommentType::Question => "question",
+      CommentType::Answer => "answer",
+      CommentType::Todo => "todo",
+      CommentType::FindingLead => "finding_lead",
+      CommentType::DevTechnical => "dev_technical",
+      CommentType::DevDocumentation => "dev_documentation",
+    }
+  }
+
+  pub fn from_str(s: &str) -> Option<Self> {
+    match s {
+      "note" => Some(CommentType::Note),
+      "info" => Some(CommentType::Info),
+      "question" => Some(CommentType::Question),
+      "answer" => Some(CommentType::Answer),
+      "todo" => Some(CommentType::Todo),
+      "finding_lead" => Some(CommentType::FindingLead),
+      "dev_technical" => Some(CommentType::DevTechnical),
+      "dev_documentation" => Some(CommentType::DevDocumentation),
+      _ => None,
+    }
+  }
+}
+
+// ============================================================================
 // Solidity Type System (for checker module)
 // ============================================================================
 
@@ -1513,7 +1561,7 @@ pub enum TopicMetadata {
     topic: topic::Topic,
     scope: Scope,
     target_topic: topic::Topic,
-    comment_type: String,
+    comment_type: CommentType,
     author_id: i64,
     created_at: String,
     mentioned_topics: Vec<topic::Topic>,
@@ -1729,10 +1777,10 @@ impl TopicMetadata {
     }
   }
 
-  pub fn comment_type(&self) -> Option<&str> {
+  pub fn comment_type(&self) -> Option<&CommentType> {
     match self {
       TopicMetadata::CommentTopic { comment_type, .. } => {
-        Some(comment_type.as_str())
+        Some(comment_type)
       }
       _ => None,
     }
@@ -2642,32 +2690,6 @@ impl DataContext {
   /// Lists all audit IDs
   pub fn list_audits(&self) -> Vec<String> {
     self.audits.keys().cloned().collect()
-  }
-
-  /// Cache rendered source text HTML for a topic
-  pub fn cache_source_text(
-    &mut self,
-    audit_id: &str,
-    topic_id: &str,
-    html: String,
-  ) {
-    self
-      .source_text_cache
-      .entry(audit_id.to_string())
-      .or_default()
-      .insert(topic_id.to_string(), html);
-  }
-
-  /// Get cached source text HTML for a topic
-  pub fn get_cached_source_text(
-    &self,
-    audit_id: &str,
-    topic_id: &str,
-  ) -> Option<&String> {
-    self
-      .source_text_cache
-      .get(audit_id)
-      .and_then(|m| m.get(topic_id))
   }
 
   /// Cache static topic view panels (AST-derived, never invalidated)

@@ -672,18 +672,20 @@ pub fn render_source_text(
 fn get_source_text(
   topic: &topic::Topic,
   audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
 ) -> String {
   if let Some(html) = source_text_cache.get(topic.id()) {
     return html.clone();
   }
 
-  render_source_text(topic, audit_data).unwrap_or_else(|| {
+  let html = render_source_text(topic, audit_data).unwrap_or_else(|| {
     format!(
       "<div class=\"error\">Source text not found for {}</div>",
       html_escape(topic.id())
     )
-  })
+  });
+  source_text_cache.insert(topic.id().to_string(), html.clone());
+  html
 }
 
 // ============================================================================
@@ -744,7 +746,7 @@ fn count_source_child_blocks(children: &[SourceChild]) -> usize {
 fn render_reference_source(
   reference: &Reference,
   audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
 ) -> String {
   let ref_topic = reference.reference_topic();
   let source_text = get_source_text(ref_topic, audit_data, source_text_cache);
@@ -917,7 +919,7 @@ fn render_source_children(
   depth: usize,
   subscope_title: Option<&topic::Topic>,
   audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
 ) -> (String, usize) {
   let mut html = String::new();
   let mut index = current_index;
@@ -999,7 +1001,7 @@ fn render_annotated_block_group(
   subscope_title: Option<&topic::Topic>,
   depth: usize,
   audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
 ) -> (String, usize) {
   let mut html = String::new();
 
@@ -1071,7 +1073,7 @@ fn render_annotated_block_group(
 pub fn render_grouped_source_panel(
   groups: &[SourceContext],
   audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
 ) -> String {
   let mut html = String::new();
 
@@ -1287,7 +1289,7 @@ fn resolve_comment_target<'a>(
 pub fn build_topic_panel_prefix(
   topic_id: &str,
   audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
 ) -> String {
   let topic = topic::new_topic(topic_id);
   let metadata = match audit_data.topic_metadata.get(&topic) {
@@ -1361,7 +1363,7 @@ pub fn build_topic_panel_prefix(
 pub fn build_topic_view(
   topic_id: &str,
   audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
   cached: Option<&core::CachedTopicView>,
   topic_panel_prefix: &str,
 ) -> Option<TopicViewResponse> {
@@ -1482,7 +1484,7 @@ fn build_generated_conversation_entry(
 pub fn build_conversation(
   topic_id: &str,
   audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
 ) -> Option<ConversationResponse> {
   let topic = topic::new_topic(topic_id);
   // Verify the topic exists
@@ -1554,7 +1556,7 @@ pub fn build_conversation_entry(
   entry_topic: &topic::Topic,
   kind: ConversationEntryKind,
   audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
 ) -> Option<ConversationEntry> {
   let metadata = audit_data.topic_metadata.get(entry_topic)?;
 
@@ -1582,7 +1584,7 @@ pub fn build_conversation_entry(
 pub fn build_thread(
   topic_id: &str,
   audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
 ) -> Option<String> {
   let topic = topic::new_topic(topic_id);
   let metadata = audit_data.topic_metadata.get(&topic)?;
@@ -1608,11 +1610,14 @@ fn render_comment_node(
   total: usize,
   depth: usize,
   audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
 ) -> String {
   let topic_id = metadata.topic().id();
   let author_id = metadata.author_id().unwrap_or(0);
-  let comment_type = metadata.comment_type().unwrap_or("note");
+  let comment_type = metadata
+    .comment_type()
+    .map(|ct| ct.as_str())
+    .unwrap_or("note");
   let created_at = metadata.created_at().unwrap_or("");
 
   // Metadata header
@@ -1702,7 +1707,7 @@ fn build_comment_thread_html(
   topic: &topic::Topic,
   metadata: &TopicMetadata,
   audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
 ) -> String {
   let mut flat: Vec<(&TopicMetadata, usize)> = vec![(metadata, 0)];
   collect_children_recursive(topic, 1, audit_data, &mut flat);
@@ -1731,7 +1736,7 @@ fn build_comment_thread_html(
 fn render_topic_node(
   metadata: &TopicMetadata,
   audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
 ) -> String {
   let topic_id = metadata.topic().id();
   let is_authored = authored_topic_label(metadata).is_some();
@@ -1840,7 +1845,7 @@ pub fn build_documentation_panel(
   mention_topics: &[topic::Topic],
   show_features_as_headers: bool,
   audit_data: &AuditData,
-  source_text_cache: &std::collections::HashMap<String, String>,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
 ) -> String {
   let mut all_contexts: Vec<SourceContext> = Vec::new();
   let mut seen_doc_topics: Vec<topic::Topic> = Vec::new();

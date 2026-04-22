@@ -1,5 +1,5 @@
 use crate::collaborator::models::*;
-use crate::collaborator::{formatter, parser};
+use crate::collaborator::parser;
 use crate::core::{self, topic, DataContext, Requirement};
 use sqlx::SqlitePool;
 
@@ -431,25 +431,19 @@ pub fn ingest_comment(
   comment: &Comment,
   scope: &ScopeInfo,
 ) -> Vec<topic::Topic> {
-  let (mentions, html) = {
-    let Some(audit_data) = data_context.get_audit_mut(&comment.audit_id) else {
-      return Vec::new();
-    };
+  let Some(audit_data) = data_context.get_audit_mut(&comment.audit_id) else {
+    return Vec::new();
+  };
 
-    let comment_topic = comment.comment_topic();
-    let target_topic = topic::new_topic(&comment.topic_id);
+  let comment_topic = comment.comment_topic();
+  let target_topic = topic::new_topic(&comment.topic_id);
 
-    let (mentions, nodes) =
-      parser::parse_comment(&comment.content_markdown, audit_data);
-    let html = formatter::render_comment_html(
-      &nodes,
-      &comment_topic,
-      &audit_data.nodes,
-    );
+  let (mentions, nodes) =
+    parser::parse_comment(&comment.content_markdown, audit_data);
 
-    audit_data
-      .nodes
-      .insert(comment_topic.clone(), core::Node::Comment(nodes));
+  audit_data
+    .nodes
+    .insert(comment_topic.clone(), core::Node::Comment(nodes));
 
     let mut mentioned_topics: Vec<topic::Topic> = mentions.clone();
     mentioned_topics.sort_unstable();
@@ -460,7 +454,11 @@ pub fn ingest_comment(
       core::TopicMetadata::CommentTopic {
         topic: comment_topic.clone(),
         author_id: comment.author_id,
-        comment_type: comment.comment_type.clone(),
+        comment_type: core::CommentType::from_str(&comment.comment_type)
+          .expect(&format!(
+            "Unknown comment type '{}' in comment {}",
+            comment.comment_type, comment.id
+          )),
         target_topic: target_topic.clone(),
         created_at: comment.created_at.clone(),
         scope: scope.to_scope(),
@@ -482,15 +480,6 @@ pub fn ingest_comment(
         entries.push(comment_topic.clone());
       }
     }
-
-    (mentions, html)
-  };
-
-  data_context.cache_source_text(
-    &comment.audit_id,
-    &comment.comment_topic_id(),
-    html,
-  );
 
   mentions
 }

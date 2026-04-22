@@ -27,3 +27,6 @@ target
 
 # SQLite database files
 /data
+
+# Pi agent
+/.pi
