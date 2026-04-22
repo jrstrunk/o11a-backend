@@ -1,12 +1,27 @@
+use crate::collaborator::models;
+use crate::collaborator::parser as comment_parser;
 use crate::core;
 use crate::core::topic;
 use crate::core::{
+  CommentType,
   AST, AuditData, DataContext, Node, Scope, TitledTopicKind, TopicMetadata,
   UnnamedTopicKind, insert_into_context,
 };
 use crate::documentation::parser::{self, DocumentationAST, DocumentationNode};
+use crate::solidity::parser::ASTNode;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
+
+/// Global counter for synthetic developer documentation comment IDs.
+/// Uses negative IDs starting from -10 to avoid collision with
+/// real DB comments (positive auto-increment). The topic prefix system
+/// (C vs N) prevents collision with generated AST node IDs.
+static NEXT_DEV_DOC_COMMENT_ID: AtomicI32 = AtomicI32::new(-10);
+
+fn next_dev_doc_comment_id() -> i32 {
+  NEXT_DEV_DOC_COMMENT_ID.fetch_sub(1, Ordering::SeqCst)
+}
 
 /// Analyzes documentation files and integrates them with the solidity DataContext
 /// This MUST be called after solidity analysis completes, as it needs the solidity
@@ -102,7 +117,101 @@ pub fn analyze(
     }
   }
 
+  // Inject developer documentation from source code as synthetic in-memory
+  // CommentTopics. These are derived from inline comments on SemanticBlocks
+  // and will eventually include NatSpec docstrings on function/contract
+  // declarations. They are rebuilt from source on every load — never persisted
+  // to the comment database.
+  inject_developer_documentation(audit_data);
+
   Ok(())
+}
+
+/// Walk all in-memory nodes to find SemanticBlocks with `documentation`
+/// and create synthetic CommentTopics for each. This runs after the name_index
+/// is built so that code references in the developer's prose can be resolved.
+fn inject_developer_documentation(audit_data: &mut AuditData) {
+  // Collect (target_node_topic, documentation_text) pairs first to avoid
+  // borrowing audit_data mutably while iterating.
+  let mut dev_docs: Vec<(topic::Topic, String)> = Vec::new();
+
+  for (node_topic, node) in &audit_data.nodes {
+    let Node::Solidity(ast_node) = node else {
+      continue;
+    };
+    let ASTNode::SemanticBlock {
+      documentation: Some(doc),
+      ..
+    } = ast_node
+    else {
+      continue;
+    };
+    if doc.trim().is_empty() {
+      continue;
+    }
+    dev_docs.push((node_topic.clone(), doc.clone()));
+  }
+
+  // Now create synthetic CommentTopics for each documentation entry.
+  for (target_topic, doc_text) in dev_docs {
+    let comment_id = next_dev_doc_comment_id();
+    let comment_topic = topic::new_comment_topic(comment_id);
+
+    // Parse the documentation text through the comment parser to resolve
+    // code references (mentions) in the developer's prose.
+    let (mentions, comment_nodes) =
+      comment_parser::parse_comment(&doc_text, audit_data);
+
+    // Store the parsed AST (rendered on demand by render_source_text)
+    audit_data
+      .nodes
+      .insert(comment_topic.clone(), Node::Comment(comment_nodes));
+
+    // Deduplicate mentions
+    let mut mentioned_topics = mentions.clone();
+    mentioned_topics.sort_unstable();
+    mentioned_topics.dedup();
+
+    // Get the scope from the target topic's metadata
+    let scope = audit_data
+      .topic_metadata
+      .get(&target_topic)
+      .map(|m| m.scope().clone())
+      .unwrap_or(Scope::Global);
+
+    // Insert CommentTopic metadata
+    audit_data.topic_metadata.insert(
+      comment_topic.clone(),
+      TopicMetadata::CommentTopic {
+        topic: comment_topic.clone(),
+        target_topic: target_topic.clone(),
+        comment_type: CommentType::DevTechnical,
+        author_id: models::AUTHOR_DEV_TECHNICAL,
+        created_at: String::new(), // Synthetic — no real timestamp
+        scope,
+        mentioned_topics: mentioned_topics.clone(),
+      },
+    );
+
+    // Update comment_index: target → [comment topics]
+    let comments = audit_data
+      .comment_index
+      .entry(target_topic.clone())
+      .or_default();
+    comments.push(comment_topic.clone());
+
+    // Update mentions_index: mentioned topic → [comment topics]
+    for mention in &mentioned_topics {
+      let entries = audit_data
+        .mentions_index
+        .entry(mention.clone())
+        .or_default();
+      entries.push(comment_topic.clone());
+    }
+
+    // HTML is rendered and cached lazily on first access via
+    // topic_view::get_source_text.
+  }
 }
 
 fn process_documentation_ast(

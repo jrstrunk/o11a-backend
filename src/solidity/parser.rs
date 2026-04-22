@@ -955,6 +955,7 @@ pub enum ASTNode {
   ContractSignature {
     node_id: i32,
     src_location: SourceLocation,
+    documentation: Option<Box<ASTNode>>,
     name: String,
     name_location: SourceLocation,
     referenced_id: i32,
@@ -1610,11 +1611,15 @@ impl ASTNode {
         None => vec![condition],
       },
       ASTNode::ContractSignature {
+        documentation,
         base_contracts,
         directives,
         ..
       } => {
         let mut result = vec![];
+        if let Some(doc) = documentation {
+          result.push(&**doc);
+        }
         for item in base_contracts {
           result.push(item);
         }
@@ -1985,11 +1990,16 @@ impl ASTNode {
         result
       }
       ASTNode::ContractSignature {
+        documentation,
         base_contracts,
         directives,
         ..
       } => {
-        let mut result: Vec<&mut ASTNode> = base_contracts.iter_mut().collect();
+        let mut result: Vec<&mut ASTNode> = vec![];
+        if let Some(doc) = documentation {
+          result.push(doc.as_mut());
+        }
+        result.extend(base_contracts.iter_mut());
         result.extend(directives.iter_mut());
         result
       }
@@ -2821,6 +2831,7 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
     ASTNode::ContractSignature {
       node_id,
       src_location,
+      documentation,
       name,
       name_location,
       referenced_id,
@@ -2831,6 +2842,10 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
     } => ASTNode::ContractSignature {
       node_id: node_id,
       src_location: src_location,
+      documentation: match documentation {
+        Some(d) => Some(Box::new(node_to_stub(&d))),
+        None => None,
+      },
       name: name,
       name_location: name_location,
       referenced_id: referenced_id,
@@ -4877,6 +4892,12 @@ fn node_from_json(
         node_type_str,
         context,
       )?;
+      let documentation = get_optional_node_with_context(
+        val,
+        "documentation",
+        node_type_str,
+        context,
+      )?;
       let name = get_required_string_with_context(val, "name", node_type_str)?;
       let name_location = get_required_source_location_with_context(
         val,
@@ -4896,6 +4917,7 @@ fn node_from_json(
       let signature = ASTNode::ContractSignature {
         node_id: signature_node_id,
         src_location: src_location.clone(),
+        documentation,
         name,
         name_location,
         referenced_id: node_id,

@@ -3,64 +3,16 @@ use sqlx::FromRow;
 
 pub use crate::api::ScopeInfo;
 use crate::core::topic;
+pub use crate::core::CommentType;
 
 /// Reserved author IDs
 pub const AUTHOR_SYSTEM: i64 = 1;
-pub const AUTHOR_AGENT_SMALL: i64 = 2;
-pub const AUTHOR_AGENT_MEDIUM: i64 = 3;
-pub const AUTHOR_AGENT_LARGE: i64 = 4;
-
-/// Comment type for classification
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CommentType {
-  Note,        // General observation or annotation
-  Info,        // Informational context or explanation
-  Question,    // Question needing an answer
-  Answer,      // Answer to a question
-  Todo,        // Action item to be completed
-  FindingLead, // Potential vulnerability or issue to investigate
-}
-
-impl Default for CommentType {
-  fn default() -> Self {
-    Self::Note
-  }
-}
-
-impl CommentType {
-  pub fn as_str(&self) -> &'static str {
-    match self {
-      CommentType::Note => "note",
-      CommentType::Info => "info",
-      CommentType::Question => "question",
-      CommentType::Answer => "answer",
-      CommentType::Todo => "todo",
-      CommentType::FindingLead => "finding_lead",
-    }
-  }
-
-  pub fn from_str(s: &str) -> Option<Self> {
-    match s {
-      "note" => Some(CommentType::Note),
-      "info" => Some(CommentType::Info),
-      "question" => Some(CommentType::Question),
-      "answer" => Some(CommentType::Answer),
-      "todo" => Some(CommentType::Todo),
-      "finding_lead" => Some(CommentType::FindingLead),
-      _ => None,
-    }
-  }
-
-  /// Returns the default status for this comment type
-  pub fn default_status(&self) -> CommentStatus {
-    match self {
-      CommentType::Question => CommentStatus::Unanswered,
-      CommentType::FindingLead => CommentStatus::Unconfirmed,
-      _ => CommentStatus::Active,
-    }
-  }
-}
+pub const AUTHOR_DEV_TECHNICAL: i64 = 2;
+pub const AUTHOR_DEV_DOCUMENTATION: i64 = 3;
+pub const AUTHOR_AGENT_MICRO: i64 = 4;
+pub const AUTHOR_AGENT_SMALL: i64 = 5;
+pub const AUTHOR_AGENT_MEDIUM: i64 = 6;
+pub const AUTHOR_AGENT_LARGE: i64 = 7;
 
 /// Comment status - controls visibility and state
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -104,6 +56,17 @@ impl CommentStatus {
       "unconfirmed" => CommentStatus::Unconfirmed,
       "confirmed" => CommentStatus::Confirmed,
       "rejected" => CommentStatus::Rejected,
+      _ => CommentStatus::Active,
+    }
+  }
+}
+
+impl CommentType {
+  /// Returns the default status for this comment type
+  pub fn default_status(&self) -> CommentStatus {
+    match self {
+      CommentType::Question => CommentStatus::Unanswered,
+      CommentType::FindingLead => CommentStatus::Unconfirmed,
       _ => CommentStatus::Active,
     }
   }
@@ -165,8 +128,12 @@ impl Comment {
   }
 
   /// Returns the parsed comment type
+  ///
+  /// Panics if the stored type string is not a known variant. This indicates
+  /// a data integrity issue in the database.
   pub fn get_comment_type(&self) -> CommentType {
-    CommentType::from_str(&self.comment_type).unwrap_or_default()
+    CommentType::from_str(&self.comment_type)
+      .unwrap_or_else(|| panic!("Unknown comment type '{}' in comment {}", self.comment_type, self.id))
   }
 
   /// Returns the parsed comment status
@@ -189,14 +156,18 @@ pub struct CommentVote {
 // Request types
 // ============================================================================
 
+fn default_comment_type() -> CommentType {
+  CommentType::Note
+}
+
 /// Request to create a new comment
 #[derive(Debug, Deserialize)]
 pub struct CreateCommentRequest {
   pub topic_id: String, // Topic to comment on (N123, D45, or C99 for replies)
   pub content: String,  // Markdown content
   pub author_id: i64,   // 1=system, 2=agent, 3+=users
-  #[serde(default)]
-  pub comment_type: CommentType, // Defaults to Note
+  #[serde(default = "default_comment_type")]
+  pub comment_type: CommentType, // Defaults to Note when omitted
 }
 
 /// Request to update comment status

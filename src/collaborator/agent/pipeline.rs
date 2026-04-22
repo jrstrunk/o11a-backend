@@ -281,19 +281,16 @@ pub async fn build_behaviors(
   use crate::collaborator::agent::context;
 
   let contracts = {
-    let ctx = state
+    let mut ctx = state
       .data_context
       .lock()
       .map_err(|e| format!("Mutex poisoned in build_behaviors: {}", e))?;
-    let audit_data = ctx
-      .get_audit(audit_id)
-      .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
-    let stc = ctx
-      .source_text_cache
+    let crate::core::DataContext { audits, source_text_cache, .. } = &mut *ctx;
+    let audit_data = audits
       .get(audit_id)
-      .cloned()
-      .unwrap_or_default();
-    context::collect_contracts_for_behavior_extraction(audit_data, &stc)
+      .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+    let cache = source_text_cache.entry(audit_id.to_string()).or_default();
+    context::collect_contracts_for_behavior_extraction(audit_data, cache)
   };
 
   if contracts.is_empty() {
@@ -393,23 +390,20 @@ pub async fn build_semantic_links(
 
   // Mechanical resolution (shared by passes 1 and 2)
   let (mechanical, sections, contracts) = {
-    let ctx = state
+    let mut ctx = state
       .data_context
       .lock()
       .map_err(|e| format!("Mutex poisoned in build_semantic_links: {}", e))?;
-    let audit_data = ctx
-      .get_audit(audit_id)
-      .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
-    let stc = ctx
-      .source_text_cache
+    let crate::core::DataContext { audits, source_text_cache, .. } = &mut *ctx;
+    let audit_data = audits
       .get(audit_id)
-      .cloned()
-      .unwrap_or_default();
+      .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+    let cache = source_text_cache.entry(audit_id.to_string()).or_default();
 
     let mechanical = context::mechanical_semantic_links(audit_data);
     let sections = task::collect_documentation_sections(audit_data);
     let contracts =
-      context::render_contract_list_for_semantic_linking(audit_data, &stc);
+      context::render_contract_list_for_semantic_linking(audit_data, cache);
 
     (mechanical, sections, contracts)
   };
@@ -635,18 +629,15 @@ pub async fn build_semantic_links(
 
     for (doc_topic, member_topics) in doc_member_map {
       let (declarations_json, source_code) = {
-        let ctx = state
+        let mut ctx = state
           .data_context
           .lock()
           .map_err(|e| format!("Mutex poisoned (pass3 batch): {}", e))?;
-        let audit_data = ctx
-          .get_audit(audit_id)
-          .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
-        let stc = ctx
-          .source_text_cache
+        let crate::core::DataContext { audits, source_text_cache, .. } = &mut *ctx;
+        let audit_data = audits
           .get(audit_id)
-          .cloned()
-          .unwrap_or_default();
+          .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+        let cache = source_text_cache.entry(audit_id.to_string()).or_default();
 
         let decls = context::render_batched_member_declarations_for_semantics(
           member_topics,
@@ -655,7 +646,7 @@ pub async fn build_semantic_links(
         let source = context::render_batched_member_sources_for_semantics(
           member_topics,
           audit_data,
-          &stc,
+          cache,
         );
 
         (decls, source)
@@ -684,18 +675,15 @@ pub async fn build_semantic_links(
   // (b) Contract-scoped: batch all contracts' state vars/events/structs per section
   for (section_topic, contract_topics) in &section_contracts {
     let (section_text, declarations_json, signatures_source) = {
-      let ctx = state
+      let mut ctx = state
         .data_context
         .lock()
         .map_err(|e| format!("Mutex poisoned (pass3 contract): {}", e))?;
-      let audit_data = ctx
-        .get_audit(audit_id)
-        .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
-      let stc = ctx
-        .source_text_cache
+      let crate::core::DataContext { audits, source_text_cache, .. } = &mut *ctx;
+      let audit_data = audits
         .get(audit_id)
-        .cloned()
-        .unwrap_or_default();
+        .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+      let cache = source_text_cache.entry(audit_id.to_string()).or_default();
 
       let stxt = context::render_section_text(section_topic, audit_data)
         .unwrap_or_default();
@@ -706,7 +694,7 @@ pub async fn build_semantic_links(
       let sigs = context::render_batched_contract_declaration_signatures(
         contract_topics,
         audit_data,
-        &stc,
+        cache,
       );
 
       (stxt, decls, sigs)

@@ -5,7 +5,7 @@ use serde_json::json;
 
 use crate::collaborator::formatter as comment_formatter;
 use crate::core::{
-  self, AuditData, BlockAnnotationKind, ContractKind, ControlFlowStatementKind,
+  self, AuditData, BlockAnnotationKind, CommentType, ContractKind, ControlFlowStatementKind,
   FunctionKind, NamedTopicKind, NamedTopicVisibility, Node, Reference,
   SourceChild, SourceContext, TitledTopicKind, TopicMetadata, UnnamedTopicKind,
   VariableMutability, topic,
@@ -77,7 +77,7 @@ fn resolve_topic_name(topic: &topic::Topic, audit_data: &AuditData) -> String {
       control_flow_kind_to_string(kind).to_string()
     }
     Some(TopicMetadata::CommentTopic { comment_type, .. }) => {
-      comment_type.clone()
+      comment_type.as_str().to_string()
     }
     Some(TopicMetadata::FeatureTopic { name, .. }) => name.clone(),
     Some(TopicMetadata::RequirementTopic { description, .. })
@@ -194,7 +194,7 @@ fn plaintext_name_from_metadata(metadata: &TopicMetadata) -> String {
     TopicMetadata::ControlFlow { kind, .. } => {
       control_flow_kind_to_string(kind).to_string()
     }
-    TopicMetadata::CommentTopic { comment_type, .. } => comment_type.clone(),
+    TopicMetadata::CommentTopic { comment_type, .. } => comment_type.as_str().to_string(),
     TopicMetadata::FeatureTopic { name, .. } => name.clone(),
     TopicMetadata::RequirementTopic { description, .. }
     | TopicMetadata::BehaviorTopic { description, .. }
@@ -222,7 +222,7 @@ fn build_scope_title(
   }
 }
 
-/// Look up info comments targeting a topic from the CommentIndex.
+/// Look up info and dev documentation comments targeting a topic from the CommentIndex.
 fn lookup_topic_comments(
   topic: &topic::Topic,
   audit_data: &AuditData,
@@ -235,11 +235,14 @@ fn lookup_topic_comments(
   comment_topics
     .iter()
     .filter_map(|comment_topic| {
-      let is_info = matches!(audit_data.topic_metadata.get(comment_topic),
-        Some(TopicMetadata::CommentTopic { comment_type, .. })
-          if comment_type == "info"
-      );
-      if !is_info {
+      let metadata = audit_data.topic_metadata.get(comment_topic)?;
+      let TopicMetadata::CommentTopic { comment_type, .. } = metadata else {
+        return None;
+      };
+      let is_relevant = *comment_type == CommentType::Info
+        || *comment_type == CommentType::DevTechnical
+        || *comment_type == CommentType::DevDocumentation;
+      if !is_relevant {
         return None;
       }
       let content = match audit_data.nodes.get(comment_topic) {
@@ -252,7 +255,14 @@ fn lookup_topic_comments(
       if content.is_empty() {
         return None;
       }
-      Some(content)
+      // Prefix developer documentation comments so the agent can distinguish
+      // them from auditor-authored comments.
+      let prefixed = match comment_type {
+        CommentType::DevTechnical => format!("[dev] {}", content),
+        CommentType::DevDocumentation => format!("[dev docs] {}", content),
+        _ => content,
+      };
+      Some(prefixed)
     })
     .collect()
 }
@@ -1867,7 +1877,7 @@ fn convert_reference(
     for mention_topic in mention_topics {
       let is_info = matches!(audit_data.topic_metadata.get(mention_topic),
         Some(TopicMetadata::CommentTopic { comment_type, .. })
-          if comment_type == "info"
+          if *comment_type == CommentType::Info
       );
       if !is_info {
         continue;
@@ -2135,7 +2145,7 @@ pub fn build_agent_topic_context(
         topic: topic_id_string,
         name,
         kind: "Comment".to_string(),
-        sub_kind: Some(comment_type.clone()),
+        sub_kind: Some(comment_type.as_str().to_string()),
         condition: None,
         context,
         expanded_context: None,

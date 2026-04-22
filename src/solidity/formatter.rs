@@ -878,6 +878,7 @@ fn do_node_to_source_text(
     ASTNode::SemanticBlock {
       node_id,
       statements,
+      documentation: _,
       ..
     } => {
       let statements = statements
@@ -898,11 +899,9 @@ fn do_node_to_source_text(
       let block_placeholder =
         formatting::format_containing_block_placeholder(&topic);
 
-      if statements.len() == 1 {
-        // If there is only one statement, we don't need to render the
-        // semantic block, as it is redundant with the statement.
-        format!("{}{}", block_placeholder, statements)
-      } else if ctx.target_topic == topic {
+      // TODO: eventually we will want transitive semantic blocks if there
+      // is only one statement within them
+      if ctx.target_topic == topic {
         // When the semantic block is the target topic, render it as the
         // target topic, so that the UI can not render it, when it is redundant
         // with its container. This is especially impactful for the references
@@ -1552,8 +1551,21 @@ fn do_node_to_source_text(
       base_contracts,
       abstract_,
       directives,
+      documentation,
       ..
     } => {
+      let documentation = documentation
+        .clone()
+        .map(|doc| match doc.as_ref().resolve(nodes_map) {
+          ASTNode::StructuredDocumentation { text, .. } => {
+            format!("<span>{}</span>", text.clone())
+          }
+          _ => {
+            println!("Unexpected documentation node: {:?}", doc);
+            String::new()
+          }
+        })
+        .unwrap_or_default();
       let kind = contract_kind_to_string(contract_kind);
       let abstract_str = if *abstract_ {
         format!("{} ", formatting::format_keyword("abstract"))
@@ -1626,7 +1638,8 @@ fn do_node_to_source_text(
       };
 
       format!(
-        "{}{} {}{}{}",
+        "{}{}{} {}{}{}",
+        documentation,
         abstract_str,
         formatting::format_keyword(&kind),
         format_identifier(
@@ -1702,8 +1715,21 @@ fn do_node_to_source_text(
       state_mutability,
       virtual_,
       implementation_declaration,
+      documentation,
       ..
     } => {
+      let documentation = documentation
+        .clone()
+        .map(|doc| match doc.as_ref().resolve(nodes_map) {
+          ASTNode::StructuredDocumentation { text, .. } => {
+            format!("<span>{}</span>", text.clone())
+          }
+          _ => {
+            println!("Unexpected documentation node: {:?}", doc);
+            String::new()
+          }
+        })
+        .unwrap_or_default();
       let virtual_str = if *virtual_ {
         format!("{} ", formatting::format_keyword("virtual"))
       } else {
@@ -1762,9 +1788,9 @@ fn do_node_to_source_text(
         )
       };
       let returns = match kind {
-        FunctionKind::Constructor | FunctionKind::Fallback | FunctionKind::Receive => {
-          String::new()
-        }
+        FunctionKind::Constructor
+        | FunctionKind::Fallback
+        | FunctionKind::Receive => String::new(),
         _ => format!(
           "\n{} {} ",
           formatting::format_keyword("returns"),
@@ -1779,7 +1805,8 @@ fn do_node_to_source_text(
       };
 
       format!(
-        "{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}",
+        documentation,
         virtual_str,
         visibility_str,
         mutability,
