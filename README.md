@@ -520,6 +520,8 @@ The backward-only strategy with invariant re-checking has one residual limitatio
 
 **Absent mechanisms.** If a contract should implement a security pattern (such as a pause mechanism) but does not, no backward-context encounter will contain a reference to the missing pattern. This class of finding is addressed by reconciliation: if the documentation describes pausability, a requirement will exist for it, and the absence of a matching behavior surfaces the gap. Additionally, when the auditor reviews the feature's requirements and finds no corresponding code, the missing mechanism is identified as unimplemented specification.
 
+Patterns could also be catalouged from the perspective of all Behaviors, relieving the need for the context mangagement strategy to reveal them as a side effect of evaluating convergences.
+
 ### Summary
 
 The backward-only context strategy is not a cost-saving approximation of bidirectional analysis. It is a design that optimizes for audit quality by keeping individual audit passes focused, while relying on the security model to provide the global coverage that forward context would otherwise supply. The security model achieves this coverage more reliably — mechanically and exhaustively — once an invariant is identified, and the investment in invariant discovery heuristics and threat generation compounds across engagements in a way that raw forward context never does.
