@@ -23,10 +23,10 @@ async fn main() {
     .await
     .expect("Failed to create database pool");
 
-  println!("Running migrations...");
-  db::run_migrations(&pool)
+  println!("Initializing schema...");
+  db::init_schema(&pool)
     .await
-    .expect("Failed to run migrations");
+    .expect("Failed to initialize database schema");
 
   println!("Creating DataContext...");
 

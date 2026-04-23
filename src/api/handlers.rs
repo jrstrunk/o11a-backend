@@ -1319,38 +1319,65 @@ pub async fn create_comment(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
   Json(payload): Json<CreateCommentRequest>,
-) -> Result<Json<CommentCreatedResponse>, StatusCode> {
-  println!("POST /api/v1/audits/{}/comments", audit_id);
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+  println!("POST /api/v1/audits/{}/comments body: {:?}", audit_id, payload);
   // Determine the scope from the target topic
   // If target is a comment (starts with "C"), copy scope from parent comment
   // Otherwise, get scope from the topic's metadata in audit data
   let target_topic = new_topic(&payload.topic_id);
+  println!("create_comment: resolved target_topic={:?}, kind={:?}", target_topic, target_topic.kind());
   let scope = if target_topic.kind() == Some(TopicKind::Comment) {
     // Target is a comment - get scope from parent comment
     let parent_comment_id: i64 =
-      target_topic.numeric_id().ok_or(StatusCode::BAD_REQUEST)?;
+      target_topic.numeric_id().ok_or_else(|| {
+        let msg = format!("Invalid comment topic ID '{}' - no numeric ID", payload.topic_id);
+        eprintln!("ERROR create_comment: {}", msg);
+        (StatusCode::BAD_REQUEST, msg)
+      })?;
     let parent_comment = db::get_comment_raw(&state.db, parent_comment_id)
       .await
-      .map_err(|_| StatusCode::NOT_FOUND)?;
+      .map_err(|e| {
+        let msg = format!("Parent comment {} not found: {}", parent_comment_id, e);
+        eprintln!("ERROR create_comment: {}", msg);
+        (StatusCode::NOT_FOUND, msg)
+      })?;
     // Parse the stored scope JSON
     serde_json::from_str(&parent_comment.scope).unwrap_or_default()
   } else {
     // Target is a regular topic - get scope from audit metadata
+    println!("create_comment: acquiring first lock for scope resolution...");
     let ctx = state
       .data_context
       .lock()
-      .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-    ScopeInfo::from_topic(&payload.topic_id, audit_data)
+      .map_err(|e| {
+        let msg = format!("Failed to lock data context: {}", e);
+        eprintln!("ERROR create_comment: {}", msg);
+        (StatusCode::INTERNAL_SERVER_ERROR, msg)
+      })?;
+    println!("create_comment: first lock acquired, looking up audit '{}'...", audit_id);
+    let audit_data = ctx.get_audit(&audit_id).ok_or_else(|| {
+      let msg = format!("Audit '{}' not found in data context", audit_id);
+      eprintln!("ERROR create_comment: {}", msg);
+      (StatusCode::NOT_FOUND, msg)
+    })?;
+    let scope = ScopeInfo::from_topic(&payload.topic_id, audit_data);
+    println!("create_comment: resolved scope={:?}", scope.scope_type);
+    scope
   };
 
   // Insert comment into database with scope
+  println!("create_comment: inserting into DB...");
   let comment = db::create_comment(&state.db, &audit_id, &payload, &scope)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| {
+      let msg = format!("Failed to create comment in DB: {}", e);
+      eprintln!("ERROR create_comment: {}", msg);
+      (StatusCode::INTERNAL_SERVER_ERROR, msg)
+    })?;
 
   let comment_topic_id = comment.comment_topic_id();
   let comment_topic = comment.comment_topic();
+  println!("create_comment: inserted as {}, ingesting...", comment_topic_id);
 
   // Parse mentions, render HTML, register in audit_data.
   // Build ConversationEntry objects for WebSocket broadcasting.
@@ -1363,12 +1390,20 @@ pub async fn create_comment(
     let mut ctx = state
       .data_context
       .lock()
-      .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+      .map_err(|e| {
+        let msg = format!("Failed to lock data context for ingest: {}", e);
+        eprintln!("ERROR create_comment: {}", msg);
+        (StatusCode::INTERNAL_SERVER_ERROR, msg)
+      })?;
 
     let mentions = db::ingest_comment(&mut ctx, &comment, &scope);
 
     let core::DataContext { audits, source_text_cache, .. } = &mut *ctx;
-    let audit_data = audits.get(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+    let audit_data = audits.get(&audit_id).ok_or_else(|| {
+      let msg = format!("Audit '{}' not found after ingest", audit_id);
+      eprintln!("ERROR create_comment: {}", msg);
+      (StatusCode::NOT_FOUND, msg)
+    })?;
     let cache = source_text_cache.entry(audit_id.clone()).or_default();
 
     // Collect parent comment chain for thread invalidation.
