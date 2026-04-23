@@ -958,7 +958,13 @@ pub enum ASTNode {
     documentation: Option<Box<ASTNode>>,
     name: String,
     name_location: SourceLocation,
-    referenced_id: i32,
+    /// The node_id of the parent definition (ContractDefinition) that owns
+    /// this signature. Set during parsing when the signature is constructed
+    /// as a child of the definition node. Unlike `referenced_declaration` on
+    /// Identifier/IdentifierPath (which represents a usage→declaration
+    /// reference), this represents an ownership relationship: the signature
+    /// is an intrinsic part of the definition, not a reference to it.
+    declaration_id: i32,
     contract_kind: ContractKind,
     abstract_: bool,
     base_contracts: Vec<ASTNode>,
@@ -972,7 +978,13 @@ pub enum ASTNode {
     modifiers: Box<ASTNode>,
     name: String,
     name_location: SourceLocation,
-    referenced_id: i32,
+    /// The node_id of the parent definition (FunctionDefinition) that owns
+    /// this signature. Set during parsing when the signature is constructed
+    /// as a child of the definition node. Unlike `referenced_declaration` on
+    /// Identifier/IdentifierPath (which represents a usage→declaration
+    /// reference), this represents an ownership relationship: the signature
+    /// is an intrinsic part of the definition, not a reference to it.
+    declaration_id: i32,
     parameters: Box<ASTNode>,
     return_parameters: Box<ASTNode>,
     scope: i32,
@@ -988,7 +1000,13 @@ pub enum ASTNode {
     documentation: Option<Box<ASTNode>>,
     name: String,
     name_location: SourceLocation,
-    referenced_id: i32,
+    /// The node_id of the parent definition (ModifierDefinition) that owns
+    /// this signature. Set during parsing when the signature is constructed
+    /// as a child of the definition node. Unlike `referenced_declaration` on
+    /// Identifier/IdentifierPath (which represents a usage→declaration
+    /// reference), this represents an ownership relationship: the signature
+    /// is an intrinsic part of the definition, not a reference to it.
+    declaration_id: i32,
     parameters: Box<ASTNode>,
     virtual_: bool,
     visibility: FunctionVisibility,
@@ -2834,7 +2852,7 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       documentation,
       name,
       name_location,
-      referenced_id,
+      declaration_id,
       contract_kind,
       abstract_,
       base_contracts,
@@ -2848,7 +2866,7 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       },
       name: name,
       name_location: name_location,
-      referenced_id: referenced_id,
+      declaration_id: declaration_id,
       contract_kind: contract_kind,
       abstract_: abstract_,
       base_contracts: base_contracts.iter().map(|n| node_to_stub(n)).collect(),
@@ -2873,7 +2891,7 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       modifiers,
       name,
       name_location,
-      referenced_id,
+      declaration_id,
       parameters,
       return_parameters,
       scope,
@@ -2892,7 +2910,7 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       modifiers: Box::new(node_to_stub(&modifiers)),
       name: name,
       name_location: name_location,
-      referenced_id: referenced_id,
+      declaration_id: declaration_id,
       parameters: Box::new(node_to_stub(&parameters)),
       return_parameters: Box::new(node_to_stub(&return_parameters)),
       scope: scope,
@@ -2949,7 +2967,7 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       documentation,
       name,
       name_location,
-      referenced_id,
+      declaration_id,
       parameters,
       virtual_,
       visibility,
@@ -2963,7 +2981,7 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       },
       name: name,
       name_location: name_location,
-      referenced_id: referenced_id,
+      declaration_id: declaration_id,
       parameters: Box::new(node_to_stub(&parameters)),
       virtual_: virtual_,
       visibility: visibility,
@@ -4920,7 +4938,7 @@ fn node_from_json(
         documentation,
         name,
         name_location,
-        referenced_id: node_id,
+        declaration_id: node_id,
         contract_kind,
         abstract_,
         base_contracts,
@@ -5014,7 +5032,7 @@ fn node_from_json(
         name,
         name_location,
         // Interface-to-implementation mapping is now applied during transform phase
-        referenced_id: node_id,
+        declaration_id: node_id,
         parameters,
         return_parameters,
         scope,
@@ -5111,7 +5129,7 @@ fn node_from_json(
         documentation,
         name,
         name_location,
-        referenced_id: node_id,
+        declaration_id: node_id,
         parameters,
         virtual_,
         visibility,

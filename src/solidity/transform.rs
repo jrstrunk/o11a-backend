@@ -650,7 +650,7 @@ fn transform_node(node: &mut ASTNode, context: &TransformContext) {
 
     // Set implementation_declaration on interface FunctionSignatures
     ASTNode::FunctionSignature {
-      referenced_id,
+      declaration_id,
       implementation_declaration,
       parameters,
       return_parameters,
@@ -659,9 +659,9 @@ fn transform_node(node: &mut ASTNode, context: &TransformContext) {
       ..
     } => {
       // Check if this function has a mapping to an implementation
-      // Use referenced_id which points to the FunctionDefinition's node_id
+      // Use declaration_id which points to the FunctionDefinition's node_id
       if let Some(&impl_id) =
-        context.interface_to_implementation.get(referenced_id)
+        context.interface_to_implementation.get(declaration_id)
       {
         *implementation_declaration = Some(impl_id);
       }
@@ -677,7 +677,7 @@ fn transform_node(node: &mut ASTNode, context: &TransformContext) {
 
     // Set implementation_declaration on interface ModifierSignatures
     ASTNode::ModifierSignature {
-      referenced_id,
+      declaration_id,
       implementation_declaration,
       parameters,
       documentation,
@@ -685,7 +685,7 @@ fn transform_node(node: &mut ASTNode, context: &TransformContext) {
     } => {
       // Check if this modifier has a mapping to an implementation
       if let Some(&impl_id) =
-        context.interface_to_implementation.get(referenced_id)
+        context.interface_to_implementation.get(declaration_id)
       {
         *implementation_declaration = Some(impl_id);
       }

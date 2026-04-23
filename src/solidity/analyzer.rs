@@ -1721,18 +1721,26 @@ fn process_second_pass_nodes(
           _ => UnnamedTopicKind::Other,
         };
 
-        // A semantic block with exactly one child statement is transitive
-        // to that statement — they represent the same logical unit.
-        let transitive_topic =
-          if let ASTNode::SemanticBlock { statements, .. } = node {
-            if statements.len() == 1 {
-              Some(topic::new_node_topic(&statements[0].node_id()))
-            } else {
-              None
-            }
-          } else {
-            None
-          };
+        let transitive_topic = match node {
+          // A semantic block with exactly one child statement is transitive
+          // to that statement — they represent the same logical unit.
+          ASTNode::SemanticBlock { statements, .. }
+            if statements.len() == 1 =>
+          {
+            Some(topic::new_node_topic(&statements[0].node_id()))
+          }
+          // Signature nodes are transitive to their parent definition node.
+          // FunctionSignature → FunctionDefinition, ModifierSignature →
+          // ModifierDefinition, ContractSignature → ContractDefinition.
+          // The `declaration_id` field on each signature points to the parent
+          // definition's node_id, set during parsing.
+          ASTNode::FunctionSignature { declaration_id, .. }
+          | ASTNode::ModifierSignature { declaration_id, .. }
+          | ASTNode::ContractSignature { declaration_id, .. } => {
+            Some(topic::new_node_topic(declaration_id))
+          }
+          _ => None,
+        };
 
         topic_metadata.insert(
           topic.clone(),
