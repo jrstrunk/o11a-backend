@@ -1,18 +1,34 @@
 use foundry_compilers_artifacts::Visibility;
 
+use crate::collaborator::models;
+use crate::collaborator::parser as comment_parser;
 use crate::core::topic;
-use crate::core::{self, UnnamedTopicKind};
 use crate::core::{
-  AST, DataContext, ElementaryType, FunctionModProperties, NamedTopicKind,
-  Node, RevertConstraintKind, Scope, SolidityType, SourceContext,
-  TopicMetadata, insert_into_context,
+  self, AuditData, UnnamedTopicKind,
+};
+use crate::core::{
+  AST, CommentType, DataContext, ElementaryType, FunctionModProperties,
+  NamedTopicKind, Node, RevertConstraintKind, Scope, SolidityType,
+  SourceContext, TopicMetadata, insert_into_context,
 };
 use crate::solidity::parser::{
-  self, ASTNode, FunctionVisibility, SolidityAST, VariableVisibility,
+  self, ASTNode, FunctionVisibility, NatSpecSection, NatSpecTag,
+  SolidityAST, VariableVisibility,
 };
 use crate::solidity::transform;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
+
+/// Global counter for synthetic developer documentation comment IDs.
+/// Uses negative IDs starting from -10 to avoid collision with
+/// real DB comments (positive auto-increment). The topic prefix system
+/// (C vs N) prevents collision with generated AST node IDs.
+static NEXT_DEV_DOC_COMMENT_ID: AtomicI32 = AtomicI32::new(-10);
+
+fn next_dev_doc_comment_id() -> i32 {
+  NEXT_DEV_DOC_COMMENT_ID.fetch_sub(1, Ordering::SeqCst)
+}
 
 pub fn analyze(
   project_root: &Path,
@@ -94,6 +110,20 @@ pub fn analyze(
         .insert(path.clone(), AST::Solidity(stubbed_ast));
     }
   }
+
+  // Build name index for fast topic lookup. Required by dev doc injection
+  // (which resolves code references in developer prose) and by the
+  // documentation analyzer (which resolves inline code tokens).
+  audit_data.name_index = core::TopicNameIndex::build(&audit_data);
+
+  // Inject developer documentation from source code as synthetic in-memory
+  // CommentTopics. Inline comments on SemanticBlocks become DevTechnical
+  // comments. NatSpec docstrings on contracts/functions/modifiers are parsed
+  // into @notice (DevDocumentation), @dev (DevTechnical), @param
+  // (DevDocumentation on the parameter), and @return (DevDocumentation on
+  // the return parameter). They are rebuilt from source on every load —
+  // never persisted to the comment database.
+  inject_developer_documentation(audit_data);
 
   Ok(())
 }
@@ -3734,6 +3764,428 @@ fn filter_and_derive_descendants(
   (filtered_ancestors, descendants, filtered_relatives)
 }
 
+// ============================================================================
+// Developer Documentation Injection
+// ============================================================================
+
+/// Collected documentation from a signature node (contract, function, modifier).
+struct SignatureDoc {
+  signature_topic: topic::Topic,
+  doc_text: String,
+  param_map: HashMap<String, topic::Topic>,
+  return_params: Vec<(String, topic::Topic)>,
+}
+
+/// A resolved developer doc ready to become a synthetic CommentTopic.
+struct ResolvedDoc {
+  target_topic: topic::Topic,
+  text: String,
+  comment_type: CommentType,
+  author_id: i64,
+}
+
+/// Walk all in-memory nodes to find developer documentation and create
+/// synthetic CommentTopics for each. Runs after the name_index is built so
+/// that code references in the developer's prose can be resolved.
+fn inject_developer_documentation(audit_data: &mut AuditData) {
+  // ── Phase 1: Collect raw documentation ──────────────────────────────────
+
+  let mut semantic_block_docs: Vec<(topic::Topic, String)> = Vec::new();
+  let mut signature_docs: Vec<SignatureDoc> = Vec::new();
+
+  for (node_topic, node) in &audit_data.nodes {
+    let Node::Solidity(ast_node) = node else {
+      continue;
+    };
+
+    match ast_node {
+      // SemanticBlock inline comments (// and /* */)
+      ASTNode::SemanticBlock {
+        documentation: Some(doc),
+        ..
+      } => {
+        if !doc.trim().is_empty() {
+          semantic_block_docs.push((node_topic.clone(), doc.clone()));
+        }
+      }
+
+      // Function NatSpec docstrings
+      ASTNode::FunctionSignature {
+        documentation,
+        parameters,
+        return_parameters,
+        ..
+      } => {
+        if let Some(sig_doc) = extract_signature_doc(
+          node_topic,
+          &documentation,
+          &audit_data.nodes,
+        ) {
+          let param_map =
+            build_param_map(parameters.as_ref(), &audit_data.nodes);
+          let return_params =
+            build_return_map(return_parameters.as_ref(), &audit_data.nodes);
+          signature_docs.push(SignatureDoc {
+            signature_topic: sig_doc.0,
+            doc_text: sig_doc.1,
+            param_map,
+            return_params,
+          });
+        }
+      }
+
+      // Modifier NatSpec docstrings
+      ASTNode::ModifierSignature {
+        documentation,
+        parameters,
+        ..
+      } => {
+        if let Some(sig_doc) =
+          extract_signature_doc(node_topic, &documentation, &audit_data.nodes)
+        {
+          let param_map =
+            build_param_map(parameters.as_ref(), &audit_data.nodes);
+          signature_docs.push(SignatureDoc {
+            signature_topic: sig_doc.0,
+            doc_text: sig_doc.1,
+            param_map,
+            return_params: Vec::new(),
+          });
+        }
+      }
+
+      // Contract NatSpec docstrings
+      ASTNode::ContractSignature {
+        documentation,
+        ..
+      } => {
+        if let Some(sig_doc) =
+          extract_signature_doc(node_topic, &documentation, &audit_data.nodes)
+        {
+          signature_docs.push(SignatureDoc {
+            signature_topic: sig_doc.0,
+            doc_text: sig_doc.1,
+            param_map: HashMap::new(),
+            return_params: Vec::new(),
+          });
+        }
+      }
+
+      _ => {}
+    }
+  }
+
+  // ── Phase 2: Create synthetic CommentTopics ─────────────────────────────
+
+  // SemanticBlock inline comments → one DevTechnical each
+  for (target_topic, doc_text) in semantic_block_docs {
+    create_synthetic_dev_comment(
+      &target_topic,
+      &doc_text,
+      CommentType::DevTechnical,
+      models::AUTHOR_DEV_TECHNICAL,
+      audit_data,
+    );
+  }
+
+  // Signature NatSpec → parsed into tagged sections and resolved
+  for sig_doc in signature_docs {
+    let sections = parser::parse_natspec(&sig_doc.doc_text);
+    let resolved = resolve_natspec(
+      &sections,
+      &sig_doc.signature_topic,
+      &sig_doc.param_map,
+      &sig_doc.return_params,
+    );
+    for doc in resolved {
+      if !doc.text.is_empty() {
+        create_synthetic_dev_comment(
+          &doc.target_topic,
+          &doc.text,
+          doc.comment_type,
+          doc.author_id,
+          audit_data,
+        );
+      }
+    }
+  }
+}
+
+// ============================================================================
+// Synthetic Comment Creation
+// ============================================================================
+
+/// Create a synthetic developer CommentTopic targeting the given topic.
+/// Parses the text through the comment parser to resolve code references.
+fn create_synthetic_dev_comment(
+  target_topic: &topic::Topic,
+  doc_text: &str,
+  comment_type: CommentType,
+  author_id: i64,
+  audit_data: &mut AuditData,
+) {
+  let comment_id = next_dev_doc_comment_id();
+  let comment_topic = topic::new_comment_topic(comment_id);
+
+  // Parse the documentation text through the comment parser to resolve
+  // code references (mentions) in the developer's prose.
+  let (mentions, comment_nodes) =
+    comment_parser::parse_comment(doc_text, audit_data);
+
+  audit_data
+    .nodes
+    .insert(comment_topic.clone(), Node::Comment(comment_nodes));
+
+  let mut mentioned_topics = mentions;
+  mentioned_topics.sort_unstable();
+  mentioned_topics.dedup();
+
+  let scope = audit_data
+    .topic_metadata
+    .get(target_topic)
+    .map(|m| m.scope().clone())
+    .unwrap_or(Scope::Global);
+
+  audit_data.topic_metadata.insert(
+    comment_topic.clone(),
+    TopicMetadata::CommentTopic {
+      topic: comment_topic.clone(),
+      target_topic: target_topic.clone(),
+      comment_type,
+      author_id,
+      created_at: String::new(), // Synthetic — no real timestamp
+      scope,
+      mentioned_topics: mentioned_topics.clone(),
+    },
+  );
+
+  audit_data
+    .comment_index
+    .entry(target_topic.clone())
+    .or_default()
+    .push(comment_topic.clone());
+
+  for mention in &mentioned_topics {
+    audit_data
+      .mentions_index
+      .entry(mention.clone())
+      .or_default()
+      .push(comment_topic.clone());
+  }
+}
+
+// ============================================================================
+// Signature Documentation Extraction
+// ============================================================================
+
+/// Extract the documentation text from a signature's StructuredDocumentation.
+/// Returns Some((signature_topic, doc_text)) if documentation is present and
+/// non-empty, None otherwise. Resolves stubs to get the full text.
+fn extract_signature_doc(
+  signature_topic: &topic::Topic,
+  documentation: &Option<Box<ASTNode>>,
+  nodes_map: &BTreeMap<topic::Topic, Node>,
+) -> Option<(topic::Topic, String)> {
+  let doc_node = documentation.as_ref()?;
+  let resolved = doc_node.resolve(nodes_map);
+  let ASTNode::StructuredDocumentation { text, .. } = resolved else {
+    return None;
+  };
+  if text.trim().is_empty() {
+    return None;
+  }
+  Some((signature_topic.clone(), text.clone()))
+}
+
+/// Build a map of parameter name → topic from a ParameterList node.
+/// Resolves stubs to get the VariableDeclaration names.
+fn build_param_map(
+  param_list_node: &ASTNode,
+  nodes_map: &BTreeMap<topic::Topic, Node>,
+) -> HashMap<String, topic::Topic> {
+  let mut map = HashMap::new();
+  let resolved = param_list_node.resolve(nodes_map);
+  let ASTNode::ParameterList { parameters, .. } = resolved else {
+    return map;
+  };
+  for param in parameters {
+    let resolved_param = param.resolve(nodes_map);
+    if let ASTNode::VariableDeclaration { node_id, name, .. } = resolved_param
+    {
+      if !name.is_empty() {
+        map.insert(name.clone(), topic::new_node_topic(node_id));
+      }
+    }
+  }
+  map
+}
+
+/// Build a list of (name, topic) for return parameters from a ParameterList
+/// node. Return params may be unnamed (empty string).
+fn build_return_map(
+  return_param_list_node: &ASTNode,
+  nodes_map: &BTreeMap<topic::Topic, Node>,
+) -> Vec<(String, topic::Topic)> {
+  let mut list = Vec::new();
+  let resolved = return_param_list_node.resolve(nodes_map);
+  let ASTNode::ParameterList { parameters, .. } = resolved else {
+    return list;
+  };
+  for param in parameters {
+    let resolved_param = param.resolve(nodes_map);
+    if let ASTNode::VariableDeclaration { node_id, name, .. } = resolved_param
+    {
+      list.push((name.clone(), topic::new_node_topic(node_id)));
+    }
+  }
+  list
+}
+
+// ============================================================================
+// NatSpec Resolution
+// ============================================================================
+
+/// Resolve parsed NatSpec sections into concrete (target, text, type, author)
+/// groups. Sections targeting the same topic with the same type are combined
+/// to minimize the total number of synthetic comments.
+fn resolve_natspec(
+  sections: &[NatSpecSection],
+  signature_topic: &topic::Topic,
+  param_map: &HashMap<String, topic::Topic>,
+  return_params: &[(String, topic::Topic)],
+) -> Vec<ResolvedDoc> {
+  let mut notice_parts: Vec<String> = Vec::new();
+  let mut dev_parts: Vec<String> = Vec::new();
+  // param name → combined text parts
+  let mut param_docs: HashMap<String, Vec<String>> = HashMap::new();
+  // return param topic → combined text parts
+  let mut return_docs: HashMap<topic::Topic, Vec<String>> = HashMap::new();
+
+  for section in sections {
+    match &section.tag {
+      NatSpecTag::Notice => {
+        if !section.text.is_empty() {
+          notice_parts.push(section.text.clone());
+        }
+      }
+      NatSpecTag::Dev | NatSpecTag::Untagged => {
+        if !section.text.is_empty() {
+          dev_parts.push(section.text.clone());
+        }
+      }
+      NatSpecTag::Param(name) => {
+        if param_map.contains_key(name) {
+          param_docs
+            .entry(name.clone())
+            .or_default()
+            .push(section.text.clone());
+        } else {
+          // Failed resolve — fall back to signature as DevTechnical
+          dev_parts.push(
+            format!("@param {} {}", name, section.text)
+              .trim()
+              .to_string(),
+          );
+        }
+      }
+      NatSpecTag::Return => {
+        if let Some((_name, desc, topic)) =
+          resolve_return_target(&section.text, return_params)
+        {
+          return_docs.entry(topic).or_default().push(desc.to_string());
+        } else {
+          // Failed resolve — fall back to signature as DevTechnical
+          dev_parts
+            .push(format!("@return {}", section.text).trim().to_string());
+        }
+      }
+      NatSpecTag::Ignored => {
+        // Deferred tag (@title, @author, @inheritdoc) — already excluded
+        // from sections by parse_natspec, but handle defensively.
+      }
+    }
+  }
+
+  let mut result = Vec::new();
+
+  // @notice → DevDocumentation on signature
+  if !notice_parts.is_empty() {
+    result.push(ResolvedDoc {
+      target_topic: signature_topic.clone(),
+      text: notice_parts.join("\n"),
+      comment_type: CommentType::DevDocumentation,
+      author_id: models::AUTHOR_DEV_DOCUMENTATION,
+    });
+  }
+
+  // @dev + untagged + failed resolves → DevTechnical on signature
+  if !dev_parts.is_empty() {
+    result.push(ResolvedDoc {
+      target_topic: signature_topic.clone(),
+      text: dev_parts.join("\n"),
+      comment_type: CommentType::DevTechnical,
+      author_id: models::AUTHOR_DEV_TECHNICAL,
+    });
+  }
+
+  // Resolved @param → DevDocumentation on parameter topic
+  for (name, texts) in &param_docs {
+    if let Some(param_topic) = param_map.get(name) {
+      result.push(ResolvedDoc {
+        target_topic: param_topic.clone(),
+        text: texts.join("\n"),
+        comment_type: CommentType::DevDocumentation,
+        author_id: models::AUTHOR_DEV_DOCUMENTATION,
+      });
+    }
+  }
+
+  // Resolved @return → DevDocumentation on return param topic
+  for (topic, texts) in return_docs {
+    result.push(ResolvedDoc {
+      target_topic: topic,
+      text: texts.join("\n"),
+      comment_type: CommentType::DevDocumentation,
+      author_id: models::AUTHOR_DEV_DOCUMENTATION,
+    });
+  }
+
+  result
+}
+
+/// Try to resolve @return text against the return parameter list.
+/// Returns Some((param_name, description_text, param_topic)) if resolved.
+/// Handles named returns (@return amount ...) and single unnamed returns.
+fn resolve_return_target<'a>(
+  text: &'a str,
+  return_params: &[(String, topic::Topic)],
+) -> Option<(String, &'a str, topic::Topic)> {
+  if return_params.is_empty() {
+    return None;
+  }
+
+  // Try to match first word against a return param name
+  let first_word = text.split_whitespace().next().unwrap_or("");
+  for (name, ret_topic) in return_params {
+    if !name.is_empty() && name == first_word {
+      let rest = text[first_word.len()..].trim_start();
+      return Some((name.clone(), rest, ret_topic.clone()));
+    }
+  }
+
+  // No name match — if single return param, target it with full text
+  if return_params.len() == 1 {
+    return Some((
+      return_params[0].0.clone(),
+      text,
+      return_params[0].1.clone(),
+    ));
+  }
+
+  // Multiple unnamed returns, no name match — can't resolve
+  None
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -3977,4 +4429,246 @@ mod tests {
     assert!(!ElementaryType::Uint { bits: 256 }.is_address());
     assert!(!ElementaryType::Bool.is_address());
   }
+
+  // =========================================================================
+  // NatSpec Resolution Tests
+  // =========================================================================
+
+  fn sig_topic() -> topic::Topic {
+    topic::new_node_topic(&100)
+  }
+
+  fn param_topic(name: &str, id: i32) -> (String, topic::Topic) {
+    (name.to_string(), topic::new_node_topic(&id))
+  }
+
+  #[test]
+  fn test_resolve_natspec_notice_only() {
+    let sections = parser::parse_natspec("@notice Rescues tokens");
+    let result = resolve_natspec(&sections, &sig_topic(), &HashMap::new(), &[]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].comment_type, CommentType::DevDocumentation);
+    assert_eq!(result[0].target_topic, sig_topic());
+    assert_eq!(result[0].text, "Rescues tokens");
+    assert_eq!(result[0].author_id, models::AUTHOR_DEV_DOCUMENTATION);
+  }
+
+  #[test]
+  fn test_resolve_natspec_dev_only() {
+    let sections = parser::parse_natspec("@dev Only admin");
+    let result = resolve_natspec(&sections, &sig_topic(), &HashMap::new(), &[]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].comment_type, CommentType::DevTechnical);
+    assert_eq!(result[0].target_topic, sig_topic());
+    assert_eq!(result[0].text, "Only admin");
+    assert_eq!(result[0].author_id, models::AUTHOR_DEV_TECHNICAL);
+  }
+
+  #[test]
+  fn test_resolve_natspec_untagged_becomes_dev_technical() {
+    let sections = parser::parse_natspec("This is untagged");
+    let result = resolve_natspec(&sections, &sig_topic(), &HashMap::new(), &[]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].comment_type, CommentType::DevTechnical);
+    assert_eq!(result[0].text, "This is untagged");
+  }
+
+  #[test]
+  fn test_resolve_natspec_param_resolved() {
+    let sections = parser::parse_natspec("@param token Address of token");
+    let token_topic = topic::new_node_topic(&200);
+    let mut param_map = HashMap::new();
+    param_map.insert("token".to_string(), token_topic.clone());
+
+    let result = resolve_natspec(&sections, &sig_topic(), &param_map, &[]);
+    // Should produce a DevDocumentation on the parameter topic
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].comment_type, CommentType::DevDocumentation);
+    assert_eq!(result[0].target_topic, token_topic);
+    assert_eq!(result[0].text, "Address of token");
+  }
+
+  #[test]
+  fn test_resolve_natspec_param_unresolved_falls_back() {
+    let sections = parser::parse_natspec("@param unknown some desc");
+    let result = resolve_natspec(&sections, &sig_topic(), &HashMap::new(), &[]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].comment_type, CommentType::DevTechnical);
+    assert_eq!(result[0].target_topic, sig_topic());
+    assert!(result[0].text.contains("@param unknown"));
+  }
+
+  #[test]
+  fn test_resolve_natspec_return_named_match() {
+    let sections = parser::parse_natspec("@return amount Amount rescued");
+    let ret_topic = topic::new_node_topic(&300);
+    let return_params = vec![param_topic("amount", 300)];
+
+    let result =
+      resolve_natspec(&sections, &sig_topic(), &HashMap::new(), &return_params);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].comment_type, CommentType::DevDocumentation);
+    assert_eq!(result[0].target_topic, ret_topic);
+    assert_eq!(result[0].text, "Amount rescued");
+  }
+
+  #[test]
+  fn test_resolve_natspec_return_single_unnamed() {
+    let sections = parser::parse_natspec("@return the total amount");
+    let ret_topic = topic::new_node_topic(&301);
+    let return_params = vec![("".to_string(), ret_topic.clone())];
+
+    let result =
+      resolve_natspec(&sections, &sig_topic(), &HashMap::new(), &return_params);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].comment_type, CommentType::DevDocumentation);
+    assert_eq!(result[0].text, "the total amount");
+  }
+
+  #[test]
+  fn test_resolve_natspec_return_multiple_unresolved_falls_back() {
+    let sections = parser::parse_natspec("@return some value");
+    let return_params = vec![
+      ("".to_string(), topic::new_node_topic(&302)),
+      ("".to_string(), topic::new_node_topic(&303)),
+    ];
+
+    let result =
+      resolve_natspec(&sections, &sig_topic(), &HashMap::new(), &return_params);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].comment_type, CommentType::DevTechnical);
+    assert!(result[0].text.contains("@return"));
+  }
+
+  #[test]
+  fn test_resolve_natspec_notice_and_dev_combined() {
+    let doc = "@notice Does a thing\n@dev Only callable by admin";
+    let sections = parser::parse_natspec(doc);
+    let result = resolve_natspec(&sections, &sig_topic(), &HashMap::new(), &[]);
+    assert_eq!(result.len(), 2);
+    // notice first
+    assert_eq!(result[0].comment_type, CommentType::DevDocumentation);
+    assert_eq!(result[0].text, "Does a thing");
+    // dev second
+    assert_eq!(result[1].comment_type, CommentType::DevTechnical);
+    assert_eq!(result[1].text, "Only callable by admin");
+  }
+
+  #[test]
+  fn test_resolve_natspec_multiple_notices_combined() {
+    let doc = "@notice First part\n@notice Second part";
+    let sections = parser::parse_natspec(doc);
+    let result = resolve_natspec(&sections, &sig_topic(), &HashMap::new(), &[]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].text, "First part\nSecond part");
+  }
+
+  #[test]
+  fn test_resolve_natspec_full_function() {
+    let doc = "\
+@notice Rescues tokens that were mistakenly sent
+@param token Address of token to rescue
+@dev Only callable by admin
+@return amount Amount of tokens rescued";
+    let sections = parser::parse_natspec(doc);
+    let token_topic = topic::new_node_topic(&200);
+    let amount_topic = topic::new_node_topic(&300);
+    let mut param_map = HashMap::new();
+    param_map.insert("token".to_string(), token_topic.clone());
+    let return_params = vec![param_topic("amount", 300)];
+
+    let result = resolve_natspec(
+      &sections,
+      &sig_topic(),
+      &param_map,
+      &return_params,
+    );
+
+    // 4 results: notice(sig), dev(sig), param(token), return(amount)
+    assert_eq!(result.len(), 4);
+    assert_eq!(result[0].comment_type, CommentType::DevDocumentation);
+    assert_eq!(result[0].target_topic, sig_topic());
+    assert_eq!(result[1].comment_type, CommentType::DevTechnical);
+    assert_eq!(result[1].target_topic, sig_topic());
+    assert_eq!(result[2].comment_type, CommentType::DevDocumentation);
+    assert_eq!(result[2].target_topic, token_topic);
+    assert_eq!(result[3].comment_type, CommentType::DevDocumentation);
+    assert_eq!(result[3].target_topic, amount_topic);
+  }
+
+  #[test]
+  fn test_resolve_natspec_deferred_tags_ignored() {
+    let doc = "@notice Hello\n@title MyContract\n@author Bob\n@dev World";
+    let sections = parser::parse_natspec(doc);
+    let result = resolve_natspec(&sections, &sig_topic(), &HashMap::new(), &[]);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].text, "Hello");
+    assert_eq!(result[1].text, "World");
+  }
+
+  #[test]
+  fn test_resolve_natspec_empty_sections_no_output() {
+    let sections = parser::parse_natspec("");
+    let result = resolve_natspec(&sections, &sig_topic(), &HashMap::new(), &[]);
+    assert!(result.is_empty());
+  }
+
+  // =========================================================================
+  // Return Target Resolution Tests
+  // =========================================================================
+
+  #[test]
+  fn test_resolve_return_target_empty_params() {
+    assert!(resolve_return_target("some text", &[]).is_none());
+  }
+
+  #[test]
+  fn test_resolve_return_target_named_match() {
+    let params = vec![param_topic("amount", 300)];
+    let (name, desc, t) = resolve_return_target("amount the rescued", &params).unwrap();
+    assert_eq!(name, "amount");
+    assert_eq!(desc, "the rescued");
+    assert_eq!(t, topic::new_node_topic(&300));
+  }
+
+  #[test]
+  fn test_resolve_return_target_single_unnamed() {
+    let params = vec![("".to_string(), topic::new_node_topic(&301))];
+    let (name, desc, t) = resolve_return_target("some value", &params).unwrap();
+    assert_eq!(name, "");
+    assert_eq!(desc, "some value");
+    assert_eq!(t, topic::new_node_topic(&301));
+  }
+
+  #[test]
+  fn test_resolve_return_target_multiple_no_match() {
+    let params = vec![
+      ("".to_string(), topic::new_node_topic(&302)),
+      ("".to_string(), topic::new_node_topic(&303)),
+    ];
+    assert!(resolve_return_target("some value", &params).is_none());
+  }
+
+  #[test]
+  fn test_resolve_return_target_named_no_match_single_falls_back() {
+    let params = vec![param_topic("amount", 300)];
+    // "total" doesn't match "amount", but single return param auto-targets
+    let (_, desc, _) = resolve_return_target("total the value", &params).unwrap();
+    assert_eq!(desc, "total the value");
+  }
+
+  #[test]
+  fn test_resolve_return_target_named_no_match_multiple() {
+    let params = vec![param_topic("amount", 300), param_topic("total", 301)];
+    // "foo" doesn't match either, and multiple params → can't resolve
+    assert!(resolve_return_target("foo the value", &params).is_none());
+  }
+
+  #[test]
+  fn test_resolve_return_target_named_match_name_only() {
+    let params = vec![param_topic("amount", 300)];
+    let (_, desc, _) = resolve_return_target("amount", &params).unwrap();
+    assert_eq!(desc, "");
+  }
 }
+

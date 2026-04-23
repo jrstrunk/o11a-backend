@@ -5463,3 +5463,331 @@ fn node_from_json(
     }
   }
 }
+
+// ============================================================================
+// NatSpec Parsing
+// ============================================================================
+
+/// A parsed NatSpec tag from StructuredDocumentation text.
+#[derive(Debug, Clone)]
+pub enum NatSpecTag {
+  /// @notice — informational, targets the declaration
+  Notice,
+  /// @dev — technical, targets the declaration
+  Dev,
+  /// @param <name> — targets a specific parameter VariableDeclaration
+  Param(String),
+  /// @return — targets a return parameter (text may contain optional name prefix)
+  Return,
+  /// Untagged text — technical, targets the declaration
+  Untagged,
+  /// Known but deferred tag (@title, @author, @inheritdoc, etc.) — ignored
+  Ignored,
+}
+
+/// A section of NatSpec documentation corresponding to one tag.
+pub struct NatSpecSection {
+  pub tag: NatSpecTag,
+  pub text: String,
+}
+
+/// Parse StructuredDocumentation text into NatSpec sections.
+/// Lines following a tag line that don't start with @ are treated as
+/// continuations of that tag. Untagged text before any tag becomes Untagged.
+pub fn parse_natspec(text: &str) -> Vec<NatSpecSection> {
+  let mut sections: Vec<NatSpecSection> = Vec::new();
+  let mut current_tag: Option<NatSpecTag> = None;
+  let mut current_text = String::new();
+
+  for line in text.lines() {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+      continue;
+    }
+
+    if let Some((tag, rest)) = try_parse_natspec_tag(trimmed) {
+      if matches!(tag, NatSpecTag::Ignored) {
+        // Flush current section but don't start a new one for deferred tags
+        flush_natspec_section(&mut current_tag, &mut current_text, &mut sections);
+      } else {
+        flush_natspec_section(&mut current_tag, &mut current_text, &mut sections);
+        current_tag = Some(tag);
+        current_text = rest.to_string();
+      }
+    } else if current_tag.is_some() {
+      // Continuation of current tag
+      if !current_text.is_empty() {
+        current_text.push(' ');
+      }
+      current_text.push_str(trimmed);
+    } else {
+      // Untagged line before any tag
+      flush_natspec_section(
+        &mut current_tag,
+        &mut current_text,
+        &mut sections,
+      );
+      current_tag = Some(NatSpecTag::Untagged);
+      current_text = trimmed.to_string();
+    }
+  }
+
+  flush_natspec_section(&mut current_tag, &mut current_text, &mut sections);
+  sections
+}
+
+fn flush_natspec_section(
+  current_tag: &mut Option<NatSpecTag>,
+  current_text: &mut String,
+  sections: &mut Vec<NatSpecSection>,
+) {
+  if let Some(tag) = current_tag.take() {
+    let text = current_text.trim().to_string();
+    if !text.is_empty() {
+      sections.push(NatSpecSection { tag, text });
+    }
+  }
+  current_text.clear();
+}
+
+/// Try to parse a line as a NatSpec tag.
+/// Returns Some((tag, remaining_text)) if the line starts with a known tag.
+fn try_parse_natspec_tag(line: &str) -> Option<(NatSpecTag, &str)> {
+  if !line.starts_with('@') {
+    return None;
+  }
+  let after_at = &line[1..];
+
+  // @notice [<text>]
+  if let Some(rest) = after_at.strip_prefix("notice") {
+    if rest.is_empty() || rest.starts_with(' ') {
+      return Some((
+        NatSpecTag::Notice,
+        rest.strip_prefix(' ').unwrap_or(rest),
+      ));
+    }
+  }
+
+  // @dev [<text>]
+  if let Some(rest) = after_at.strip_prefix("dev") {
+    if rest.is_empty() || rest.starts_with(' ') {
+      return Some((
+        NatSpecTag::Dev,
+        rest.strip_prefix(' ').unwrap_or(rest),
+      ));
+    }
+  }
+
+  // @param <name> [<description>]
+  if let Some(rest) = after_at.strip_prefix("param ") {
+    if rest.is_empty() {
+      return None;
+    }
+    let (name, desc) = rest.split_once(' ').unwrap_or((rest, ""));
+    return Some((NatSpecTag::Param(name.to_string()), desc));
+  }
+
+  // @return [<text>]
+  if let Some(rest) = after_at.strip_prefix("return") {
+    // Avoid matching @returns or other longer tags
+    if rest.is_empty() || rest.starts_with(' ') {
+      return Some((
+        NatSpecTag::Return,
+        rest.strip_prefix(' ').unwrap_or(rest),
+      ));
+    }
+  }
+
+  // Known deferred tags — flush current section but don't collect text
+  if let Some(rest) = after_at.strip_prefix("title") {
+    if rest.is_empty() || rest.starts_with(' ') {
+      return Some((NatSpecTag::Ignored, ""));
+    }
+  }
+  if let Some(rest) = after_at.strip_prefix("author") {
+    if rest.is_empty() || rest.starts_with(' ') {
+      return Some((NatSpecTag::Ignored, ""));
+    }
+  }
+  if let Some(rest) = after_at.strip_prefix("inheritdoc") {
+    if rest.is_empty() || rest.starts_with(' ') {
+      return Some((NatSpecTag::Ignored, ""));
+    }
+  }
+
+  // Unknown tag — ignore (line will be treated as untagged or continuation)
+  None
+}
+
+#[cfg(test)]
+mod natspec_tests {
+  use super::*;
+
+  fn tag_kind(tag: &NatSpecTag) -> &'static str {
+    match tag {
+      NatSpecTag::Notice => "notice",
+      NatSpecTag::Dev => "dev",
+      NatSpecTag::Param(_) => "param",
+      NatSpecTag::Return => "return",
+      NatSpecTag::Untagged => "untagged",
+      NatSpecTag::Ignored => "ignored",
+    }
+  }
+
+  #[test]
+  fn test_parse_natspec_notice() {
+    let sections = parse_natspec("@notice Rescues tokens");
+    assert_eq!(sections.len(), 1);
+    assert_eq!(tag_kind(&sections[0].tag), "notice");
+    assert_eq!(sections[0].text, "Rescues tokens");
+  }
+
+  #[test]
+  fn test_parse_natspec_dev() {
+    let sections = parse_natspec("@dev Only callable by admin");
+    assert_eq!(sections.len(), 1);
+    assert_eq!(tag_kind(&sections[0].tag), "dev");
+    assert_eq!(sections[0].text, "Only callable by admin");
+  }
+
+  #[test]
+  fn test_parse_natspec_param_with_description() {
+    let sections = parse_natspec("@param token Address of token");
+    assert_eq!(sections.len(), 1);
+    assert!(matches!(&sections[0].tag, NatSpecTag::Param(n) if n == "token"));
+    assert_eq!(sections[0].text, "Address of token");
+  }
+
+  #[test]
+  fn test_parse_natspec_param_name_no_description_filtered() {
+    // @param token (no description) → name parsed but empty text filtered out
+    let sections = parse_natspec("@param token");
+    assert!(sections.is_empty());
+  }
+
+  #[test]
+  fn test_parse_natspec_return_with_text() {
+    let sections = parse_natspec("@return amount Amount rescued");
+    assert_eq!(sections.len(), 1);
+    assert_eq!(tag_kind(&sections[0].tag), "return");
+    assert_eq!(sections[0].text, "amount Amount rescued");
+  }
+
+  #[test]
+  fn test_parse_natspec_return_no_text() {
+    let sections = parse_natspec("@return");
+    // Empty text is trimmed and filtered out by flush_natspec_section
+    assert!(sections.is_empty());
+  }
+
+  #[test]
+  fn test_parse_natspec_untagged_before_tags() {
+    let sections = parse_natspec("This is untagged\n@notice A notice");
+    assert_eq!(sections.len(), 2);
+    assert_eq!(tag_kind(&sections[0].tag), "untagged");
+    assert_eq!(sections[0].text, "This is untagged");
+    assert_eq!(tag_kind(&sections[1].tag), "notice");
+    assert_eq!(sections[1].text, "A notice");
+  }
+
+  #[test]
+  fn test_parse_natspec_continuation_lines() {
+    let sections = parse_natspec(
+      "@notice Rescues tokens\nthat were mistakenly sent\n@dev Only admin",
+    );
+    assert_eq!(sections.len(), 2);
+    assert_eq!(sections[0].text, "Rescues tokens that were mistakenly sent");
+    assert_eq!(sections[1].text, "Only admin");
+  }
+
+  #[test]
+  fn test_parse_natspec_empty_lines_skipped() {
+    let sections = parse_natspec("@notice Hello\n\n\nWorld");
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0].text, "Hello World");
+  }
+
+  #[test]
+  fn test_parse_natspec_deferred_tags_flush_preceding() {
+    // @title should flush the @notice section without absorbing its text
+    let sections = parse_natspec(
+      "@notice Rescues tokens\n@title TokenRescuer\n@author Alice\n@dev Only admin",
+    );
+    assert_eq!(sections.len(), 2);
+    assert_eq!(tag_kind(&sections[0].tag), "notice");
+    assert_eq!(sections[0].text, "Rescues tokens");
+    assert_eq!(tag_kind(&sections[1].tag), "dev");
+    assert_eq!(sections[1].text, "Only admin");
+  }
+
+  #[test]
+  fn test_parse_natspec_inheritdoc_ignored() {
+    let sections = parse_natspec("@inheritdoc IERC20");
+    assert!(sections.is_empty());
+  }
+
+  #[test]
+  fn test_parse_natspec_multiple_params() {
+    let sections = parse_natspec(
+      "@param token Address of token\n@param amount Amount to rescue",
+    );
+    assert_eq!(sections.len(), 2);
+    assert!(matches!(&sections[0].tag, NatSpecTag::Param(n) if n == "token"));
+    assert!(matches!(&sections[1].tag, NatSpecTag::Param(n) if n == "amount"));
+  }
+
+  #[test]
+  fn test_parse_natspec_full_function_doc() {
+    let doc = "\
+@notice Rescues tokens that were mistakenly sent to the contract
+@param token Address of token to rescue
+@dev Only callable by NUDGE_ADMIN_ROLE
+@return amount Amount of tokens rescued";
+    let sections = parse_natspec(doc);
+    assert_eq!(sections.len(), 4);
+    assert_eq!(tag_kind(&sections[0].tag), "notice");
+    assert_eq!(tag_kind(&sections[1].tag), "param");
+    assert_eq!(tag_kind(&sections[2].tag), "dev");
+    assert_eq!(tag_kind(&sections[3].tag), "return");
+  }
+
+  #[test]
+  fn test_parse_natspec_empty_text_skipped() {
+    let sections = parse_natspec("@notice");
+    // @notice with no text → trimmed to empty → not emitted
+    assert!(sections.is_empty());
+  }
+
+  #[test]
+  fn test_parse_natspec_unknown_tag_not_matched() {
+    // Unknown @custom tag returns None from try_parse, treated as untagged
+    let sections = parse_natspec("@custom some custom tag");
+    assert_eq!(sections.len(), 1);
+    assert_eq!(tag_kind(&sections[0].tag), "untagged");
+    assert_eq!(sections[0].text, "@custom some custom tag");
+  }
+
+  #[test]
+  fn test_try_parse_tag_word_boundary_notice() {
+    // @noticeable should NOT match @notice
+    let sections = parse_natspec("@noticeable thing");
+    assert_eq!(sections.len(), 1);
+    assert_eq!(tag_kind(&sections[0].tag), "untagged");
+  }
+
+  #[test]
+  fn test_try_parse_tag_word_boundary_dev() {
+    // @device should NOT match @dev
+    let sections = parse_natspec("@device thing");
+    assert_eq!(sections.len(), 1);
+    assert_eq!(tag_kind(&sections[0].tag), "untagged");
+  }
+
+  #[test]
+  fn test_try_parse_tag_word_boundary_return() {
+    // @returnable should NOT match @return
+    let sections = parse_natspec("@returnable thing");
+    assert_eq!(sections.len(), 1);
+    assert_eq!(tag_kind(&sections[0].tag), "untagged");
+  }
+}
