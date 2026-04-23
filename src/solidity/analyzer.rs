@@ -3887,8 +3887,16 @@ fn inject_developer_documentation(audit_data: &mut AuditData) {
 
   // SemanticBlock inline comments → one DevTechnical each
   for (target_topic, doc_text) in semantic_block_docs {
-    create_synthetic_dev_comment(
+    // Resolve through transitive chain so comments land on the canonical
+    // topic. A SemanticBlock with one child statement is transitive to
+    // that child, and comments should appear on whichever topic the user
+    // actually views.
+    let resolved_topic = core::resolve_transitive_topic(
       &target_topic,
+      &audit_data.topic_metadata,
+    );
+    create_synthetic_dev_comment(
+      &resolved_topic,
       &doc_text,
       CommentType::DevTechnical,
       models::AUTHOR_DEV_TECHNICAL,
@@ -3898,10 +3906,18 @@ fn inject_developer_documentation(audit_data: &mut AuditData) {
 
   // Signature NatSpec → parsed into tagged sections and resolved
   for sig_doc in signature_docs {
+    // Resolve through transitive chain so comments land on the canonical
+    // definition topic (e.g., FunctionDefinition) rather than the signature
+    // topic (e.g., FunctionSignature). Users view the definition, and the
+    // transitive chain only goes signature → definition, not the reverse.
+    let resolved_topic = core::resolve_transitive_topic(
+      &sig_doc.signature_topic,
+      &audit_data.topic_metadata,
+    );
     let sections = parser::parse_natspec(&sig_doc.doc_text);
     let resolved = resolve_natspec(
       &sections,
-      &sig_doc.signature_topic,
+      &resolved_topic,
       &sig_doc.param_map,
       &sig_doc.return_params,
     );
