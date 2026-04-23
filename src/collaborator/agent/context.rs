@@ -223,13 +223,17 @@ fn build_scope_title(
 }
 
 /// Look up info and dev documentation comments targeting a topic from the CommentIndex.
+/// Resolves through the transitive chain so that looking up a signature topic
+/// finds comments stored on its canonical definition topic.
 fn lookup_topic_comments(
   topic: &topic::Topic,
   audit_data: &AuditData,
 ) -> Vec<String> {
+  let resolved =
+    core::resolve_transitive_topic(topic, &audit_data.topic_metadata);
   let comment_topics = audit_data
     .comment_index
-    .get(topic)
+    .get(&resolved)
     .map(|v| v.as_slice())
     .unwrap_or(&[]);
   comment_topics
@@ -2015,11 +2019,19 @@ pub fn build_agent_topic_context(
   let topic = topic::new_topic(topic_id);
   let metadata = audit_data.topic_metadata.get(&topic)?;
 
+  // Resolve through transitive chain so signature topics find their
+  // definition's comments and mentions.
+  let resolved_topic =
+    core::resolve_transitive_topic(&topic, &audit_data.topic_metadata);
+
   let topic_id_string = topic_id.to_string();
   let name = resolve_topic_name(&topic, audit_data);
 
   let empty_ctx: Vec<crate::core::SourceContext> = vec![];
-  let topic_ctx = audit_data.topic_context.get(&topic).unwrap_or(&empty_ctx);
+  let topic_ctx = audit_data
+    .topic_context
+    .get(&resolved_topic)
+    .unwrap_or(&empty_ctx);
   let context = convert_source_groups(
     topic_ctx,
     &topic,
@@ -2035,7 +2047,7 @@ pub fn build_agent_topic_context(
   };
   let mentions: Vec<String> = audit_data
     .mentions_index
-    .get(&topic)
+    .get(&resolved_topic)
     .map(|topics| topics.iter().map(|t| t.id.clone()).collect())
     .unwrap_or_default();
 

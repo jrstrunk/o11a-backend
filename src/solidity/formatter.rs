@@ -1547,7 +1547,7 @@ fn do_node_to_source_text(
       node_id,
       contract_kind,
       name,
-      referenced_id,
+      declaration_id,
       base_contracts,
       abstract_,
       directives,
@@ -1645,7 +1645,7 @@ fn do_node_to_source_text(
         format_identifier(
           &new_node_topic(node_id),
           &name,
-          &new_node_topic(referenced_id),
+          &new_node_topic(declaration_id),
           topic_metadata
         ),
         bases,
@@ -1707,7 +1707,7 @@ fn do_node_to_source_text(
       node_id,
       kind,
       name,
-      referenced_id,
+      declaration_id,
       parameters,
       return_parameters,
       modifiers,
@@ -1749,14 +1749,14 @@ fn do_node_to_source_text(
           formatting::format_topic_keyword(
             &new_node_topic(node_id),
             &function_kind_to_string(kind),
-            &new_node_topic(referenced_id)
+            &new_node_topic(declaration_id)
           )
         )
       } else {
-        let referenced_id = if let Some(impl_id) = implementation_declaration {
+        let definition_id = if let Some(impl_id) = implementation_declaration {
           impl_id
         } else {
-          referenced_id
+          declaration_id
         };
         format!(
           " {} {}",
@@ -1764,7 +1764,7 @@ fn do_node_to_source_text(
           formatting::format_topic_function_name(
             &new_node_topic(node_id),
             name,
-            &new_node_topic(referenced_id)
+            &new_node_topic(definition_id)
           )
         )
       };
@@ -1902,7 +1902,7 @@ fn do_node_to_source_text(
     ASTNode::ModifierSignature {
       node_id,
       name,
-      referenced_id,
+      declaration_id,
       parameters,
       virtual_,
       visibility,
@@ -1931,7 +1931,7 @@ fn do_node_to_source_text(
         formatting::format_topic_function_name(
           &new_node_topic(node_id),
           name,
-          &new_node_topic(referenced_id)
+          &new_node_topic(declaration_id)
         ),
         params,
       )

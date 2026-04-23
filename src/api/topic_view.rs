@@ -1490,16 +1490,24 @@ pub fn build_conversation(
   // Verify the topic exists
   audit_data.topic_metadata.get(&topic)?;
 
+  // Resolve through transitive chain so that looking up comments on a
+  // signature topic (e.g. FunctionSignature) finds the comments stored on
+  // the canonical definition topic (e.g. FunctionDefinition).
+  let resolved_topic =
+    core::resolve_transitive_topic(&topic, &audit_data.topic_metadata);
+
   let mut entries: Vec<ConversationEntry> = Vec::new();
 
   // Functional semantics, behaviors, and requirements all render via the
   // same generated-topic helper, looked up via their respective reverse indexes.
+  // Resolve through transitive chain so signature topics find their
+  // definition's semantics/behaviors/requirements.
   let related_iter = audit_data
     .declaration_semantics
-    .get(&topic)
+    .get(&resolved_topic)
     .into_iter()
-    .chain(audit_data.member_behaviors.get(&topic))
-    .chain(audit_data.section_requirements.get(&topic))
+    .chain(audit_data.member_behaviors.get(&resolved_topic))
+    .chain(audit_data.section_requirements.get(&resolved_topic))
     .flatten();
   for rt in related_iter {
     let Some(metadata) = audit_data.topic_metadata.get(rt) else {
@@ -1508,7 +1516,7 @@ pub fn build_conversation(
     // Semantics use the parent declaration as the description container;
     // behaviors and requirements use their own topic.
     let container = match metadata {
-      TopicMetadata::FunctionalSemanticTopic { .. } => &topic,
+      TopicMetadata::FunctionalSemanticTopic { .. } => &resolved_topic,
       _ => rt,
     };
     if let Some(entry) = build_generated_conversation_entry(
@@ -1518,8 +1526,11 @@ pub fn build_conversation(
     }
   }
 
-  // Direct comments on this topic
-  if let Some(comment_topics) = audit_data.comment_index.get(&topic) {
+  // Direct comments on this topic (resolve through transitive chain)
+  let comment_lookup_topic = &resolved_topic;
+  if let Some(comment_topics) =
+    audit_data.comment_index.get(comment_lookup_topic)
+  {
     for comment_topic in comment_topics {
       if let Some(entry) = build_conversation_entry(
         comment_topic,
@@ -1532,10 +1543,13 @@ pub fn build_conversation(
     }
   }
 
-  // Comments that mention this topic. Documentation-sourced references are
-  // rendered in the documentation panel instead, where they can be
-  // deduplicated with other linked documentation sections.
-  if let Some(mentioning_topics) = audit_data.mentions_index.get(&topic) {
+  // Comments that mention this topic (resolve through transitive chain).
+  // Documentation-sourced references are rendered in the documentation
+  // panel instead, where they can be deduplicated with other linked
+  // documentation sections.
+  if let Some(mentioning_topics) =
+    audit_data.mentions_index.get(comment_lookup_topic)
+  {
     for mentioning_topic in mentioning_topics {
       if let Some(entry) = build_conversation_entry(
         mentioning_topic,

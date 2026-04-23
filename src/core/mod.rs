@@ -1838,6 +1838,31 @@ impl TopicMetadata {
   }
 }
 
+/// Resolve a topic through its transitive chain to the canonical target.
+/// Returns the original topic if it has no transitive relationship.
+/// Follows the chain until a non-transitive topic is found.
+///
+/// Use this whenever looking up comments or other per-topic data to ensure
+/// signature nodes, single-statement semantic blocks, and other transitive
+/// proxies redirect to their canonical declaration.
+pub fn resolve_transitive_topic<'a>(
+  topic: &topic::Topic,
+  topic_metadata: &'a BTreeMap<topic::Topic, TopicMetadata>,
+) -> topic::Topic {
+  let mut current = topic.clone();
+  let mut visited = HashSet::new();
+  while let Some(meta) = topic_metadata.get(&current) {
+    if !visited.insert(current.clone()) {
+      break; // cycle guard
+    }
+    match meta.transitive_topic() {
+      Some(next) => current = next.clone(),
+      None => break,
+    }
+  }
+  current
+}
+
 pub enum FunctionModProperties {
   FunctionProperties {
     reverts: Vec<RevertInfo>,
