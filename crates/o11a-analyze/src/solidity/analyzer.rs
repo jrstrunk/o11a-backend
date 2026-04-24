@@ -1,32 +1,22 @@
 use foundry_compilers_artifacts::Visibility;
 
-use crate::collaborator::models;
-use crate::collaborator::parser as comment_parser;
-use crate::core::topic;
-use crate::core::{self, AuditData, UnnamedTopicKind};
-use crate::core::{
+use crate::solidity::parser;
+use crate::solidity::transform;
+use o11a_core::collaborator::models;
+use o11a_core::collaborator::synthetic::create_synthetic_dev_comment;
+use o11a_core::core::topic;
+use o11a_core::core::{self, AuditData, UnnamedTopicKind};
+use o11a_core::core::{
   AST, CommentType, DataContext, ElementaryType, FunctionModProperties,
   NamedTopicKind, Node, RevertConstraintKind, Scope, SolidityType,
   SourceContext, TopicMetadata, insert_into_context,
 };
-use crate::solidity::parser::{
+use o11a_core::solidity::ast::{
   self, ASTNode, FunctionVisibility, NatSpecSection, NatSpecTag, SolidityAST,
   VariableVisibility, contract_members,
 };
-use crate::solidity::transform;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicI32, Ordering};
-
-/// Global counter for synthetic developer documentation comment IDs.
-/// Uses negative IDs starting from -10 to avoid collision with
-/// real DB comments (positive auto-increment). The topic prefix system
-/// (C vs N) prevents collision with generated AST node IDs.
-static NEXT_DEV_DOC_COMMENT_ID: AtomicI32 = AtomicI32::new(-10);
-
-fn next_dev_doc_comment_id() -> i32 {
-  NEXT_DEV_DOC_COMMENT_ID.fetch_sub(1, Ordering::SeqCst)
-}
 
 pub fn analyze(
   project_root: &Path,
@@ -94,7 +84,7 @@ pub fn analyze(
   // Insert ASTs with stubbed nodes
   for (path, ast_list) in ast_map {
     for ast in ast_list {
-      let stubbed_ast = crate::solidity::parser::SolidityAST {
+      let stubbed_ast = SolidityAST {
         node_id: ast.node_id,
         nodes: ast
           .nodes
@@ -1648,29 +1638,29 @@ fn process_second_pass_nodes(
         let kind = match node {
           ASTNode::Assignment { .. } => UnnamedTopicKind::VariableMutation,
           ASTNode::BinaryOperation { operator, .. } => match operator {
-            parser::BinaryOperator::Add => UnnamedTopicKind::Arithmetic,
-            parser::BinaryOperator::Subtract => UnnamedTopicKind::Arithmetic,
-            parser::BinaryOperator::Multiply => UnnamedTopicKind::Arithmetic,
-            parser::BinaryOperator::Divide => UnnamedTopicKind::Arithmetic,
-            parser::BinaryOperator::Modulo => UnnamedTopicKind::Arithmetic,
-            parser::BinaryOperator::Power => UnnamedTopicKind::Arithmetic,
-            parser::BinaryOperator::Equal => UnnamedTopicKind::Comparison,
-            parser::BinaryOperator::NotEqual => UnnamedTopicKind::Comparison,
-            parser::BinaryOperator::LessThan => UnnamedTopicKind::Comparison,
-            parser::BinaryOperator::LessThanOrEqual => {
+            ast::BinaryOperator::Add => UnnamedTopicKind::Arithmetic,
+            ast::BinaryOperator::Subtract => UnnamedTopicKind::Arithmetic,
+            ast::BinaryOperator::Multiply => UnnamedTopicKind::Arithmetic,
+            ast::BinaryOperator::Divide => UnnamedTopicKind::Arithmetic,
+            ast::BinaryOperator::Modulo => UnnamedTopicKind::Arithmetic,
+            ast::BinaryOperator::Power => UnnamedTopicKind::Arithmetic,
+            ast::BinaryOperator::Equal => UnnamedTopicKind::Comparison,
+            ast::BinaryOperator::NotEqual => UnnamedTopicKind::Comparison,
+            ast::BinaryOperator::LessThan => UnnamedTopicKind::Comparison,
+            ast::BinaryOperator::LessThanOrEqual => {
               UnnamedTopicKind::Comparison
             }
-            parser::BinaryOperator::GreaterThan => UnnamedTopicKind::Comparison,
-            parser::BinaryOperator::GreaterThanOrEqual => {
+            ast::BinaryOperator::GreaterThan => UnnamedTopicKind::Comparison,
+            ast::BinaryOperator::GreaterThanOrEqual => {
               UnnamedTopicKind::Comparison
             }
-            parser::BinaryOperator::And => UnnamedTopicKind::Logical,
-            parser::BinaryOperator::Or => UnnamedTopicKind::Logical,
-            parser::BinaryOperator::BitwiseAnd => UnnamedTopicKind::Bitwise,
-            parser::BinaryOperator::BitwiseOr => UnnamedTopicKind::Bitwise,
-            parser::BinaryOperator::BitwiseXor => UnnamedTopicKind::Bitwise,
-            parser::BinaryOperator::LeftShift => UnnamedTopicKind::Bitwise,
-            parser::BinaryOperator::RightShift => UnnamedTopicKind::Bitwise,
+            ast::BinaryOperator::And => UnnamedTopicKind::Logical,
+            ast::BinaryOperator::Or => UnnamedTopicKind::Logical,
+            ast::BinaryOperator::BitwiseAnd => UnnamedTopicKind::Bitwise,
+            ast::BinaryOperator::BitwiseOr => UnnamedTopicKind::Bitwise,
+            ast::BinaryOperator::BitwiseXor => UnnamedTopicKind::Bitwise,
+            ast::BinaryOperator::LeftShift => UnnamedTopicKind::Bitwise,
+            ast::BinaryOperator::RightShift => UnnamedTopicKind::Bitwise,
           },
           ASTNode::Conditional { .. } => UnnamedTopicKind::Conditional,
           ASTNode::FunctionCall { .. } => UnnamedTopicKind::FunctionCall,
@@ -2325,9 +2315,9 @@ fn collect_references_and_statements(
     } => {
       if matches!(
         operator,
-        parser::UnaryOperator::Increment
-          | parser::UnaryOperator::Decrement
-          | parser::UnaryOperator::Delete
+        ast::UnaryOperator::Increment
+          | ast::UnaryOperator::Decrement
+          | ast::UnaryOperator::Delete
       ) && let Some(referenced_declaration) =
         extract_base_variable_reference(sub_expression)
       {
@@ -2443,26 +2433,26 @@ impl FirstPassDeclaration {
   }
 }
 
-/// Convert parser::FunctionVisibility to foundry_compilers_artifacts::Visibility
+/// Convert ast::FunctionVisibility to foundry_compilers_artifacts::Visibility
 fn function_visibility_to_visibility(
-  vis: &parser::FunctionVisibility,
+  vis: &ast::FunctionVisibility,
 ) -> Visibility {
   match vis {
-    parser::FunctionVisibility::Public => Visibility::Public,
-    parser::FunctionVisibility::Private => Visibility::Private,
-    parser::FunctionVisibility::Internal => Visibility::Internal,
-    parser::FunctionVisibility::External => Visibility::External,
+    ast::FunctionVisibility::Public => Visibility::Public,
+    ast::FunctionVisibility::Private => Visibility::Private,
+    ast::FunctionVisibility::Internal => Visibility::Internal,
+    ast::FunctionVisibility::External => Visibility::External,
   }
 }
 
-/// Convert parser::VariableVisibility to foundry_compilers_artifacts::Visibility
+/// Convert ast::VariableVisibility to foundry_compilers_artifacts::Visibility
 fn variable_visibility_to_visibility(
-  vis: &parser::VariableVisibility,
+  vis: &ast::VariableVisibility,
 ) -> Visibility {
   match vis {
-    parser::VariableVisibility::Public => Visibility::Public,
-    parser::VariableVisibility::Private => Visibility::Private,
-    parser::VariableVisibility::Internal => Visibility::Internal,
+    ast::VariableVisibility::Public => Visibility::Public,
+    ast::VariableVisibility::Private => Visibility::Private,
+    ast::VariableVisibility::Internal => Visibility::Internal,
   }
 }
 
@@ -3945,69 +3935,6 @@ fn inject_developer_documentation(audit_data: &mut AuditData) {
 }
 
 // ============================================================================
-// Synthetic Comment Creation
-// ============================================================================
-
-/// Create a synthetic developer CommentTopic targeting the given topic.
-/// Parses the text through the comment parser to resolve code references.
-pub(crate) fn create_synthetic_dev_comment(
-  target_topic: &topic::Topic,
-  doc_text: &str,
-  comment_type: CommentType,
-  author_id: i64,
-  audit_data: &mut AuditData,
-) {
-  let comment_id = next_dev_doc_comment_id();
-  let comment_topic = topic::new_comment_topic(comment_id);
-
-  // Parse the documentation text through the comment parser to resolve
-  // code references (mentions) in the developer's prose.
-  let (mentions, comment_nodes) =
-    comment_parser::parse_comment(doc_text, audit_data);
-
-  audit_data
-    .nodes
-    .insert(comment_topic.clone(), Node::Comment(comment_nodes));
-
-  let mut mentioned_topics = mentions;
-  mentioned_topics.sort_unstable();
-  mentioned_topics.dedup();
-
-  let scope = audit_data
-    .topic_metadata
-    .get(target_topic)
-    .map(|m| m.scope().clone())
-    .unwrap_or(Scope::Global);
-
-  audit_data.topic_metadata.insert(
-    comment_topic.clone(),
-    TopicMetadata::CommentTopic {
-      topic: comment_topic.clone(),
-      target_topic: target_topic.clone(),
-      comment_type,
-      author_id,
-      created_at: String::new(), // Synthetic — no real timestamp
-      scope,
-      mentioned_topics: mentioned_topics.clone(),
-    },
-  );
-
-  audit_data
-    .comment_index
-    .entry(target_topic.clone())
-    .or_default()
-    .push(comment_topic.clone());
-
-  for mention in &mentioned_topics {
-    audit_data
-      .mentions_index
-      .entry(mention.clone())
-      .or_default()
-      .push(comment_topic.clone());
-  }
-}
-
-// ============================================================================
 // Signature Documentation Extraction
 // ============================================================================
 
@@ -4220,7 +4147,7 @@ fn resolve_return_target<'a>(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::solidity::parser::SourceLocation;
+  use o11a_core::solidity::ast::SourceLocation;
 
   fn dummy_src_location() -> SourceLocation {
     SourceLocation {
@@ -4766,7 +4693,7 @@ mod tests {
     match audit_data.nodes.get(comment_topic) {
       Some(Node::Comment(comment_nodes)) => {
         let text =
-          crate::collaborator::parser::render_comment_plain_text(comment_nodes);
+          o11a_core::collaborator::parser::render_comment_plain_text(comment_nodes);
         assert!(
           text.contains("Group docs for single member"),
           "comment text missing: {:?}",

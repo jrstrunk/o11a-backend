@@ -1,15 +1,12 @@
-pub use parser::{ASTNode, SolidityAST};
-
-pub mod analyzer;
+pub mod ast;
 pub mod delimiter;
-pub mod parser;
-pub mod transform;
+
+// Re-export AST types at the solidity root so `o11a_core::solidity::ASTNode`
+// keeps working.
+pub use ast::*;
 
 // Re-export core types
 pub use crate::core::{
   ContractKind, DataContext, FunctionKind, FunctionModProperties,
   NamedTopicKind, Scope, TopicMetadata, UnnamedTopicKind,
 };
-
-// Re-export analyzer function
-pub use analyzer::analyze;

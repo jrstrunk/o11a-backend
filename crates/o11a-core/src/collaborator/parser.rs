@@ -1,10 +1,11 @@
+use crate::code_refs as doc_parser;
 use crate::core;
 use crate::core::topic::Topic;
-use crate::documentation::parser as doc_parser;
+use serde::{Deserialize, Serialize};
 
 /// Inline-only AST node for comment content.
 /// Only supports: text, inline code (with tokenization), emphasis, strong, links.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CommentNode {
   Text {
     value: String,

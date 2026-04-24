@@ -1,11 +1,16 @@
-use crate::core;
-use crate::core::DataContext;
+//! End-to-end entry point for the o11a-analyze binary's analysis
+//! workflow: parse the Solidity project's solc output, run the Solidity
+//! analyzer, then run the documentation analyzer. Populates the shared
+//! `DataContext` in place.
+
 use crate::documentation;
 use crate::solidity;
+use o11a_core::core;
+use o11a_core::core::DataContext;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-pub fn load_project(
+pub fn run_analysis(
   project_root: &Path,
   audit_id: &str,
   data_context: &Arc<Mutex<DataContext>>,
@@ -51,7 +56,7 @@ pub fn load_project(
     let mut ctx = data_context.lock().map_err(|e| {
       format!("Mutex poisoned while analyzing Solidity project: {}", e)
     })?;
-    solidity::analyze(project_root, audit_id, &mut ctx)
+    solidity::analyzer::analyze(project_root, audit_id, &mut ctx)
       .map_err(|e| format!("Failed to analyze Solidity project: {}", e))?;
   }
 
@@ -62,8 +67,13 @@ pub fn load_project(
     let mut ctx = data_context.lock().map_err(|e| {
       format!("Mutex poisoned while analyzing documentation: {}", e)
     })?;
-    documentation::analyze(project_root, audit_id, &mut ctx, &document_files)
-      .map_err(|e| format!("Failed to analyze documentation files: {}", e))?;
+    documentation::analyzer::analyze(
+      project_root,
+      audit_id,
+      &mut ctx,
+      &document_files,
+    )
+    .map_err(|e| format!("Failed to analyze documentation files: {}", e))?;
   }
 
   println!("Done loading audit: {}", audit_id);

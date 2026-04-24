@@ -3,6 +3,7 @@ pub mod db;
 pub mod models;
 pub mod parser;
 pub mod scope_info;
+pub mod synthetic;
 
 pub use models::{AuditEvent, CommentStatus, CommentType};
 pub use scope_info::{

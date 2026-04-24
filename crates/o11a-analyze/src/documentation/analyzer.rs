@@ -1,10 +1,11 @@
-use crate::core;
-use crate::core::topic;
-use crate::core::{
+use crate::documentation::parser;
+use o11a_core::core;
+use o11a_core::core::topic;
+use o11a_core::core::{
   AST, AuditData, DataContext, Node, Scope, TitledTopicKind, TopicMetadata,
   UnnamedTopicKind, insert_into_context,
 };
-use crate::documentation::parser::{self, DocumentationAST, DocumentationNode};
+use o11a_core::documentation::ast::{DocumentationAST, DocumentationNode};
 use std::collections::BTreeMap;
 use std::path::Path;
 

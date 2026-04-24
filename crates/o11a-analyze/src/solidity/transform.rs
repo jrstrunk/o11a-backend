@@ -10,9 +10,10 @@
 //! IdentifierPath, and MemberAccess nodes, tree shaking naturally follows
 //! implementation references without needing a separate reference transfer phase.
 
-use crate::core::{ContractKind, ProjectPath};
-use crate::solidity::parser::{
-  self, ASTNode, SolidityAST, contract_members, generate_node_id,
+use crate::solidity::parser::generate_node_id;
+use o11a_core::core::{ContractKind, ProjectPath};
+use o11a_core::solidity::ast::{
+  ASTNode, SolidityAST, VariableVisibility, contract_members,
   get_definition_parameters, get_function_return_parameters,
   get_referenced_function_id,
 };
@@ -351,7 +352,7 @@ fn extract_contract_info(
         base_functions,
         ..
       } => {
-        if *state_variable && *visibility == parser::VariableVisibility::Public
+        if *state_variable && *visibility == VariableVisibility::Public
         {
           public_state_variables.push(StateVariableInfo {
             node_id: *var_id,
