@@ -5,9 +5,9 @@
 //! result: running the LLM task and updating in-memory audit data. Pipeline
 //! output lives only in `DataContext` — persistence of the pipeline's output
 //! is handled by the caller (the `o11a-analyze` binary writes `audit.json`;
-//! the server hydrates from the same report). They use `String` errors so
-//! callers (HTTP handlers, background tasks) can map to their own error
-//! types.
+//! the server hydrates from the same report). Errors propagate as
+//! [`PipelineError`] so callers (HTTP handlers, background tasks) can pattern
+//! match on variants instead of parsing formatted strings.
 
 use crate::collaborator::agent::task::{self, TaskError};
 use crate::collaborator::models::Author;

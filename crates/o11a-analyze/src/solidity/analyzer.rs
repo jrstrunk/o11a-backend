@@ -29,7 +29,7 @@ pub fn analyze(
     .ok_or_else(|| format!("Audit '{}' not found", audit_id))?;
 
   // Parse all ASTs
-  let mut ast_map = parser::process(project_root)?;
+  let mut ast_map = parser::process(project_root).map_err(|e| e.to_string())?;
 
   // Transform phase: Apply AST transformations before the first pass
   // This wraps function call arguments with Argument nodes and remaps

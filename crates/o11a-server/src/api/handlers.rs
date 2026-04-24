@@ -513,7 +513,8 @@ pub struct ControlFlowTopicResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct CommentTopicResponse {
   pub topic_id: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
   pub comment_type: String,
   pub target_topic: String,
   pub created_at: String,
@@ -527,7 +528,8 @@ pub struct FeatureTopicResponse {
   pub topic_id: String,
   pub name: String,
   pub description: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub created_at: Option<String>,
 }
@@ -537,7 +539,8 @@ pub struct FeatureTopicResponse {
 pub struct RequirementTopicResponse {
   pub topic_id: String,
   pub description: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub created_at: Option<String>,
 }
@@ -548,7 +551,8 @@ pub struct BehaviorTopicResponse {
   pub topic_id: String,
   pub description: String,
   pub member_topic: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub created_at: Option<String>,
 }
@@ -560,7 +564,8 @@ pub struct SemanticTopicResponse {
   pub description: String,
   pub declaration_topic: String,
   pub documentation_topics: Vec<String>,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub created_at: Option<String>,
 }
@@ -571,7 +576,8 @@ pub struct ThreatTopicResponse {
   pub topic_id: String,
   pub description: String,
   pub subject_topic: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
   pub created_at: String,
   pub severity: Option<String>,
 }
@@ -582,7 +588,8 @@ pub struct InvariantTopicResponse {
   pub topic_id: String,
   pub description: String,
   pub threat_topic: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
   pub created_at: String,
   pub severity: Option<String>,
 }
@@ -712,7 +719,7 @@ fn topic_metadata_to_response(
       ..
     } => TopicMetadataResponse::CommentTopic(CommentTopicResponse {
       topic_id: topic.id(),
-      author_id: *author_id,
+      author: *author_id,
       comment_type: comment_type.as_str().to_string(),
       target_topic: target_topic.id(),
       created_at: created_at.clone(),
@@ -730,7 +737,7 @@ fn topic_metadata_to_response(
       topic_id: topic.id(),
       name: name.clone(),
       description: description.clone(),
-      author_id: *author_id,
+      author: *author_id,
       created_at: created_at.clone(),
     }),
 
@@ -742,7 +749,7 @@ fn topic_metadata_to_response(
     } => TopicMetadataResponse::Requirement(RequirementTopicResponse {
       topic_id: topic.id(),
       description: description.clone(),
-      author_id: *author_id,
+      author: *author_id,
       created_at: created_at.clone(),
     }),
 
@@ -756,7 +763,7 @@ fn topic_metadata_to_response(
       topic_id: topic.id(),
       description: description.clone(),
       member_topic: member_topic.id(),
-      author_id: *author_id,
+      author: *author_id,
       created_at: created_at.clone(),
     }),
 
@@ -775,7 +782,7 @@ fn topic_metadata_to_response(
         .iter()
         .map(|t| t.id())
         .collect(),
-      author_id: *author_id,
+      author: *author_id,
       created_at: created_at.clone(),
     }),
 
@@ -790,7 +797,7 @@ fn topic_metadata_to_response(
       topic_id: topic.id(),
       description: description.clone(),
       subject_topic: subject_topic.id(),
-      author_id: *author_id,
+      author: *author_id,
       created_at: created_at.clone(),
       severity: severity.map(|s| s.as_str().to_string()),
     }),
@@ -806,7 +813,7 @@ fn topic_metadata_to_response(
       topic_id: topic.id(),
       description: description.clone(),
       threat_topic: threat_topic.id(),
-      author_id: *author_id,
+      author: *author_id,
       created_at: created_at.clone(),
       severity: severity.map(|s| s.as_str().to_string()),
     }),
@@ -1614,7 +1621,8 @@ pub struct SubjectPropertyResponse {
   pub topic_id: String,
   pub property_type: String,
   pub value: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
 }
 /// GET /api/v1/audits/:audit_id/topics/:topic_id/semantics
 /// Returns all functional semantics for a topic from the in-memory state.
@@ -1647,7 +1655,7 @@ pub async fn get_functional_semantics(
               topic_id: topic_id.clone(),
               property_type: "functional_semantics".to_string(),
               value: description.clone(),
-              author_id: *author,
+              author: *author,
             })
           } else {
             None
@@ -1901,7 +1909,8 @@ pub struct CreateConditionRequest {
   pub subject_topic: String,
   pub condition_type: String,
   pub description: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
   #[serde(default)]
   pub evaluations: Vec<ConditionEvaluationInput>,
 }
@@ -1918,7 +1927,8 @@ pub struct ConditionResponse {
   pub subject_topic: String,
   pub condition_type: String,
   pub description: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
   pub created_at: String,
   pub evaluations: Vec<ConditionEvaluationResponse>,
 }
@@ -1948,7 +1958,7 @@ pub async fn create_condition(
     &payload.subject_topic,
     &payload.condition_type,
     &payload.description,
-    payload.author_id,
+    payload.author,
   )
   .await
   .map_err(|e| {
@@ -2011,7 +2021,7 @@ pub async fn create_condition(
     subject_topic: row.subject_topic,
     condition_type: row.condition_type,
     description: row.description,
-    author_id: row.author_id,
+    author: row.author,
     created_at: row.created_at,
     evaluations: eval_responses,
   }))
@@ -2053,7 +2063,7 @@ pub async fn get_subject_conditions(
       subject_topic: row.subject_topic,
       condition_type: row.condition_type,
       description: row.description,
-      author_id: row.author_id,
+      author: row.author,
       created_at: row.created_at,
       evaluations: evals
         .iter()
@@ -2179,7 +2189,8 @@ pub async fn get_behaviors(
 pub struct CreateThreatRequest {
   pub description: String,
   pub subject_topic: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
 }
 
 /// POST /api/v1/audits/:audit_id/threats
@@ -2201,7 +2212,7 @@ pub async fn create_threat(
     &audit_id,
     &payload.subject_topic,
     &payload.description,
-    payload.author_id,
+    payload.author,
     None,
   )
   .await
@@ -2221,7 +2232,7 @@ pub async fn create_threat(
     topic: threat_topic,
     description: row.description,
     subject_topic: subject_topic,
-    author: row.author_id,
+    author: row.author,
     created_at: row.created_at,
     severity: None,
   };
@@ -2321,7 +2332,8 @@ pub async fn get_threat(
 #[derive(Debug, Deserialize)]
 pub struct CreateInvariantRequest {
   pub description: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
 }
 
 /// POST /api/v1/audits/:audit_id/threats/:threat_id/invariants
@@ -2359,7 +2371,7 @@ pub async fn create_invariant(
     &state.db,
     threat_id,
     &payload.description,
-    payload.author_id,
+    payload.author,
     severity.map(|s| s.as_str()),
   )
   .await
@@ -2378,7 +2390,7 @@ pub async fn create_invariant(
     topic: inv_topic,
     description: row.description,
     threat_topic: threat_topic,
-    author: row.author_id,
+    author: row.author,
     created_at: row.created_at,
     severity,
   };
@@ -2592,7 +2604,8 @@ pub struct CreatedResponse {
 pub struct CreateUserFeatureRequest {
   pub name: String,
   pub description: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
   #[serde(default)]
   pub requirement_topics: Vec<String>,
   #[serde(default)]
@@ -2602,7 +2615,8 @@ pub struct CreateUserFeatureRequest {
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequirementRequest {
   pub description: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
   #[serde(default)]
   pub section_topic: Option<String>,
   #[serde(default)]
@@ -2613,14 +2627,16 @@ pub struct CreateUserRequirementRequest {
 pub struct CreateUserBehaviorRequest {
   pub description: String,
   pub member_topic: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateUserFunctionalSemanticRequest {
   pub description: String,
   pub declaration_topic: String,
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
   #[serde(default)]
   pub documentation_topics: Vec<String>,
 }
@@ -2642,7 +2658,7 @@ pub async fn create_user_feature(
     &audit_id,
     &payload.name,
     &payload.description,
-    payload.author_id,
+    payload.author,
     &created_at,
   )
   .await
@@ -2694,7 +2710,7 @@ pub async fn create_user_feature(
         topic: feature_topic,
         name: payload.name.clone(),
         description: payload.description.clone(),
-        author: payload.author_id,
+        author: payload.author,
         created_at: Some(created_at),
       },
     );
@@ -2739,7 +2755,7 @@ pub async fn create_user_requirement(
     &audit_id,
     &payload.description,
     payload.section_topic.as_deref(),
-    payload.author_id,
+    payload.author,
     &created_at,
   )
   .await
@@ -2789,7 +2805,7 @@ pub async fn create_user_requirement(
         topic: req_topic,
         description: payload.description.clone(),
         section_topic,
-        author: payload.author_id,
+        author: payload.author,
         created_at: Some(created_at),
       },
     );
@@ -2819,7 +2835,7 @@ pub async fn create_user_behavior(
     &audit_id,
     &payload.description,
     &payload.member_topic,
-    payload.author_id,
+    payload.author,
     &created_at,
   )
   .await
@@ -2845,7 +2861,7 @@ pub async fn create_user_behavior(
         topic: beh_topic,
         description: payload.description.clone(),
         member_topic,
-        author: payload.author_id,
+        author: payload.author,
         created_at: Some(created_at),
       },
     );
@@ -2875,7 +2891,7 @@ pub async fn create_user_functional_semantic(
     &audit_id,
     &payload.description,
     &payload.declaration_topic,
-    payload.author_id,
+    payload.author,
     &created_at,
   )
   .await
@@ -2924,7 +2940,7 @@ pub async fn create_user_functional_semantic(
         description: payload.description.clone(),
         declaration_topic,
         documentation_topics,
-        author: payload.author_id,
+        author: payload.author,
         created_at: Some(created_at),
       },
     );

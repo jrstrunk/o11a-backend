@@ -21,7 +21,8 @@ pub struct UserFeatureRow {
   pub audit_id: String,
   pub name: String,
   pub description: String,
-  pub author_id: Author,
+  #[sqlx(rename = "author_id")]
+  pub author: Author,
   pub created_at: String,
 }
 
@@ -31,7 +32,8 @@ pub struct UserRequirementRow {
   pub audit_id: String,
   pub description: String,
   pub section_topic: Option<String>,
-  pub author_id: Author,
+  #[sqlx(rename = "author_id")]
+  pub author: Author,
   pub created_at: String,
 }
 
@@ -41,7 +43,8 @@ pub struct UserBehaviorRow {
   pub audit_id: String,
   pub description: String,
   pub member_topic: String,
-  pub author_id: Author,
+  #[sqlx(rename = "author_id")]
+  pub author: Author,
   pub created_at: String,
 }
 
@@ -51,7 +54,8 @@ pub struct UserFunctionalSemanticRow {
   pub audit_id: String,
   pub description: String,
   pub declaration_topic: String,
-  pub author_id: Author,
+  #[sqlx(rename = "author_id")]
+  pub author: Author,
   pub created_at: String,
 }
 
@@ -461,7 +465,7 @@ pub fn apply_user_entities_snapshot(
         topic,
         name: f.name.clone(),
         description: f.description.clone(),
-        author: f.author_id,
+        author: f.author,
         created_at: Some(f.created_at.clone()),
       },
     );
@@ -488,7 +492,7 @@ pub fn apply_user_entities_snapshot(
         topic,
         description: r.description.clone(),
         section_topic,
-        author: r.author_id,
+        author: r.author,
         created_at: Some(r.created_at.clone()),
       },
     );
@@ -503,7 +507,7 @@ pub fn apply_user_entities_snapshot(
         topic,
         description: b.description.clone(),
         member_topic,
-        author: b.author_id,
+        author: b.author,
         created_at: Some(b.created_at.clone()),
       },
     );
@@ -521,7 +525,7 @@ pub fn apply_user_entities_snapshot(
         description: s.description.clone(),
         declaration_topic,
         documentation_topics,
-        author: s.author_id,
+        author: s.author,
         created_at: Some(s.created_at.clone()),
       },
     );

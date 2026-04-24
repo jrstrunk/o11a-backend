@@ -13,17 +13,41 @@
 //! Both output files are written atomically (tmp + rename). The output
 //! directory is created if it does not exist.
 
-use o11a_analyze::analysis;
+use o11a_analyze::analysis::{self, AnalysisError};
 use o11a_core::analysis_artifact::{
-  self, ARTIFACT_SCHEMA_VERSION, AnalysisArtifact,
+  self, ARTIFACT_SCHEMA_VERSION, AnalysisArtifact, ArtifactError,
 };
-use o11a_core::collaborator::agent::pipeline::{self, PipelineState};
+use o11a_core::collaborator::agent::pipeline::{
+  self, PipelineError, PipelineState,
+};
 use o11a_core::domain;
 use o11a_core::report;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
+/// Errors produced by the top-level `run` wrapper. Each variant corresponds
+/// to a phase of the binary's execution.
+#[derive(Debug, thiserror::Error)]
+enum RunError {
+  #[error("analysis failed: {0}")]
+  Analysis(#[from] AnalysisError),
+  #[error("pipeline failed: {0}")]
+  Pipeline(#[from] PipelineError),
+  #[error("failed to write analysis artifact: {0}")]
+  Artifact(#[from] ArtifactError),
+  #[error("I/O error: {0}")]
+  Io(#[from] std::io::Error),
+  #[error("failed to serialize report: {0}")]
+  ReportSerialization(#[from] serde_json::Error),
+  #[error("DataContext mutex poisoned: {0}")]
+  LockPoisoned(String),
+  #[error("audit '{0}' not present after pipeline run")]
+  AuditMissing(String),
+  #[error("report path {0} has no file name")]
+  ReportPathInvalid(PathBuf),
+}
 
 const OUTPUT_DIR_NAME: &str = "o11a";
 const REPORT_FILE_NAME: &str = "audit.json";
@@ -71,21 +95,18 @@ async fn main() -> ExitCode {
   }
 }
 
-async fn run(project_root: &Path, audit_id: &str) -> Result<(), String> {
+async fn run(project_root: &Path, audit_id: &str) -> Result<(), RunError> {
   tracing::info!("Loading project from {}", project_root.display());
   let data_context = domain::new_data_context();
   let data_context = Arc::new(Mutex::new(data_context));
 
-  analysis::run_analysis(project_root, audit_id, &data_context)
-    .map_err(|e| e.to_string())?;
+  analysis::run_analysis(project_root, audit_id, &data_context)?;
 
   let pipeline_state = PipelineState {
     data_context: data_context.clone(),
   };
 
-  pipeline::run_full_pipeline(&pipeline_state, audit_id)
-    .await
-    .map_err(|e| format!("Pipeline failed: {}", e))?;
+  pipeline::run_full_pipeline(&pipeline_state, audit_id).await?;
 
   let generated_at = o11a_core::ids::now_iso8601();
 
@@ -93,27 +114,21 @@ async fn run(project_root: &Path, audit_id: &str) -> Result<(), String> {
   {
     let mut ctx = data_context
       .lock()
-      .map_err(|e| format!("DataContext mutex poisoned: {}", e))?;
+      .map_err(|e| RunError::LockPoisoned(e.to_string()))?;
     if let Some(audit_data) = ctx.get_audit_mut(audit_id) {
       domain::rebuild_feature_context(audit_data);
     }
   }
 
   let output_dir = project_root.join(OUTPUT_DIR_NAME);
-  std::fs::create_dir_all(&output_dir).map_err(|e| {
-    format!(
-      "Failed to create output directory {}: {}",
-      output_dir.display(),
-      e
-    )
-  })?;
+  std::fs::create_dir_all(&output_dir)?;
 
   let ctx = data_context
     .lock()
-    .map_err(|e| format!("DataContext mutex poisoned: {}", e))?;
-  let audit_data = ctx.get_audit(audit_id).ok_or_else(|| {
-    format!("Audit '{}' not present after pipeline run", audit_id)
-  })?;
+    .map_err(|e| RunError::LockPoisoned(e.to_string()))?;
+  let audit_data = ctx
+    .get_audit(audit_id)
+    .ok_or_else(|| RunError::AuditMissing(audit_id.to_string()))?;
 
   let report = report::build_report(audit_id, audit_data, generated_at.clone());
   let report_path = output_dir.join(REPORT_FILE_NAME);
@@ -129,8 +144,7 @@ async fn run(project_root: &Path, audit_id: &str) -> Result<(), String> {
     payload: analysis_artifact::snapshot_from_audit_data(audit_data),
   };
   let artifact_path = output_dir.join(ARTIFACT_FILE_NAME);
-  analysis_artifact::write_artifact(&artifact_path, &artifact)
-    .map_err(|e| format!("Failed to write analysis artifact: {}", e))?;
+  analysis_artifact::write_artifact(&artifact_path, &artifact)?;
   tracing::info!("Wrote artifact to {}", artifact_path.display());
 
   Ok(())
@@ -140,9 +154,8 @@ async fn run(project_root: &Path, audit_id: &str) -> Result<(), String> {
 fn write_json_atomic<T: serde::Serialize>(
   path: &Path,
   value: &T,
-) -> Result<(), String> {
-  let json = serde_json::to_string_pretty(value)
-    .map_err(|e| format!("Failed to serialize report: {}", e))?;
+) -> Result<(), RunError> {
+  let json = serde_json::to_string_pretty(value)?;
 
   let tmp_path = match path.file_name() {
     Some(name) => {
@@ -151,19 +164,11 @@ fn write_json_atomic<T: serde::Serialize>(
       path.with_file_name(tmp_name)
     }
     None => {
-      return Err(format!("report path {} has no file name", path.display()));
+      return Err(RunError::ReportPathInvalid(path.to_path_buf()));
     }
   };
 
-  std::fs::write(&tmp_path, json)
-    .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
-  std::fs::rename(&tmp_path, path).map_err(|e| {
-    format!(
-      "Failed to rename {} to {}: {}",
-      tmp_path.display(),
-      path.display(),
-      e
-    )
-  })?;
+  std::fs::write(&tmp_path, json)?;
+  std::fs::rename(&tmp_path, path)?;
   Ok(())
 }

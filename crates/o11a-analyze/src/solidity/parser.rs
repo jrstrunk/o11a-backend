@@ -19,13 +19,33 @@ struct ParserContext {
   pub signature_parent_node: Cell<Option<i32>>,
 }
 
+/// Errors produced by the Solidity parser entry point.
+///
+/// Internal parsing helpers continue to return `Result<_, String>`; the
+/// boundary crossing into this typed error happens in [`process`] so that
+/// the analyzer can pattern-match on the failure kind without string
+/// introspection.
+#[derive(Debug, thiserror::Error)]
+pub enum ParserError {
+  #[error("'out' directory not found at {path}")]
+  MissingOutDirectory { path: std::path::PathBuf },
+  #[error("I/O error reading {path}: {source}")]
+  Io {
+    path: std::path::PathBuf,
+    #[source]
+    source: std::io::Error,
+  },
+  #[error("failed to parse Solidity AST: {0}")]
+  Parse(String),
+}
+
 pub fn process(
   project_root: &Path,
-) -> Result<BTreeMap<domain::ProjectPath, Vec<SolidityAST>>, String> {
+) -> Result<BTreeMap<domain::ProjectPath, Vec<SolidityAST>>, ParserError> {
   // Look for the "out" directory in the project root
   let out_dir = project_root.join("out");
   if !out_dir.exists() || !out_dir.is_dir() {
-    return Err(format!("'out' directory not found at {:?}", out_dir));
+    return Err(ParserError::MissingOutDirectory { path: out_dir });
   }
 
   tracing::info!("Processing JSON files in directory: {:?}", out_dir);
@@ -37,7 +57,8 @@ pub fn process(
   };
 
   // Recursively traverse the out directory to find all JSON files
-  traverse_and_parse_asts(&out_dir, project_root, &mut context)?;
+  traverse_and_parse_asts(&out_dir, project_root, &mut context)
+    .map_err(ParserError::Parse)?;
 
   let total_asts: usize = context.ast_map.values().map(|v| v.len()).sum();
   tracing::info!(

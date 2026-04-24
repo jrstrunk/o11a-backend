@@ -1949,16 +1949,35 @@ fn normalize_path(path: &Path) -> PathBuf {
   components.iter().collect()
 }
 
+/// Errors produced by the project configuration loaders (`scope.txt`,
+/// `documents.txt`, `name.txt`, `security.md`).
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+  #[error("{file} not found in project root")]
+  MissingFile { file: &'static str },
+  #[error("failed to read {file}: {source}")]
+  Io {
+    file: &'static str,
+    #[source]
+    source: std::io::Error,
+  },
+  #[error("{file}: {reason}")]
+  Invalid { file: &'static str, reason: String },
+}
+
 pub fn load_in_scope_files(
   project_root: &Path,
-) -> Result<HashSet<ProjectPath>, String> {
+) -> Result<HashSet<ProjectPath>, ConfigError> {
   let scope_file = project_root.join("scope.txt");
   if !scope_file.exists() {
-    return Err("scope.txt file not found in project root".to_string());
+    return Err(ConfigError::MissingFile { file: "scope.txt" });
   }
 
-  let content = std::fs::read_to_string(&scope_file)
-    .map_err(|e| format!("Failed to read scope.txt: {}", e))?;
+  let content =
+    std::fs::read_to_string(&scope_file).map_err(|e| ConfigError::Io {
+      file: "scope.txt",
+      source: e,
+    })?;
 
   let mut in_scope_files = HashSet::new();
   for line in content.lines() {
@@ -1988,14 +2007,19 @@ pub struct DocumentFileEntry {
 /// Plain lines are project documentation.
 pub fn load_document_files(
   project_root: &Path,
-) -> Result<Vec<DocumentFileEntry>, String> {
+) -> Result<Vec<DocumentFileEntry>, ConfigError> {
   let doc_file = project_root.join("documents.txt");
   if !doc_file.exists() {
-    return Err("documents.txt file not found in project root".to_string());
+    return Err(ConfigError::MissingFile {
+      file: "documents.txt",
+    });
   }
 
-  let content = std::fs::read_to_string(&doc_file)
-    .map_err(|e| format!("Failed to read documents.txt: {}", e))?;
+  let content =
+    std::fs::read_to_string(&doc_file).map_err(|e| ConfigError::Io {
+      file: "documents.txt",
+      source: e,
+    })?;
 
   let mut document_files = Vec::new();
   for line in content.lines() {
@@ -2019,25 +2043,33 @@ pub fn load_document_files(
 }
 
 /// Reads the first line of the "name.txt" file in the project root
-pub fn load_audit_name(project_root: &Path) -> Result<String, String> {
+pub fn load_audit_name(project_root: &Path) -> Result<String, ConfigError> {
   let name_file = project_root.join("name.txt");
   if !name_file.exists() {
-    return Err("name.txt file not found in project root".to_string());
+    return Err(ConfigError::MissingFile { file: "name.txt" });
   }
 
-  let content = std::fs::read_to_string(&name_file)
-    .map_err(|e| format!("Failed to read name.txt: {}", e))?;
+  let content =
+    std::fs::read_to_string(&name_file).map_err(|e| ConfigError::Io {
+      file: "name.txt",
+      source: e,
+    })?;
 
   let audit_name = content
     .lines()
     .next()
-    .ok_or_else(|| "name.txt is empty".to_string())
-    .map_err(|_| "Failed to parse name.txt".to_string())?
+    .ok_or_else(|| ConfigError::Invalid {
+      file: "name.txt",
+      reason: "file is empty".to_string(),
+    })?
     .trim()
     .to_string();
 
   if audit_name.is_empty() {
-    return Err("First line of name.txt is empty".to_string());
+    return Err(ConfigError::Invalid {
+      file: "name.txt",
+      reason: "first line is empty".to_string(),
+    });
   }
 
   Ok(audit_name)
@@ -2049,14 +2081,19 @@ pub fn load_audit_name(project_root: &Path) -> Result<String, String> {
 /// Returns `None` if the file does not exist (security notes are optional).
 pub fn load_security_notes(
   project_root: &Path,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, ConfigError> {
   let security_file = project_root.join("security.md");
   if !security_file.exists() {
-    return Err("security.md file not found in project root".to_string());
+    return Err(ConfigError::MissingFile {
+      file: "security.md",
+    });
   }
 
-  let content = std::fs::read_to_string(&security_file)
-    .map_err(|e| format!("Failed to read security.md: {}", e))?;
+  let content =
+    std::fs::read_to_string(&security_file).map_err(|e| ConfigError::Io {
+      file: "security.md",
+      source: e,
+    })?;
 
   let trimmed = content.trim();
   if trimmed.is_empty() {

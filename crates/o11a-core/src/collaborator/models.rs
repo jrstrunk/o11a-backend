@@ -5,15 +5,15 @@ pub use crate::collaborator::scope_info::ScopeInfo;
 pub use crate::domain::CommentType;
 use crate::domain::topic;
 
-/// Reserved author IDs — retained for DB migrations and direct integer
-/// comparisons against stored rows. New code should prefer `Author` variants.
-pub const AUTHOR_SYSTEM: i64 = 1;
-pub const AUTHOR_DEV_TECHNICAL: i64 = 2;
-pub const AUTHOR_DEV_DOCUMENTATION: i64 = 3;
-pub const AUTHOR_AGENT_MICRO: i64 = 4;
-pub const AUTHOR_AGENT_SMALL: i64 = 5;
-pub const AUTHOR_AGENT_MEDIUM: i64 = 6;
-pub const AUTHOR_AGENT_LARGE: i64 = 7;
+/// Reserved author IDs — retained only for the enum conversion table below.
+/// All domain/API/handler code should use `Author` variants.
+pub(crate) const AUTHOR_SYSTEM: i64 = 1;
+pub(crate) const AUTHOR_DEV_TECHNICAL: i64 = 2;
+pub(crate) const AUTHOR_DEV_DOCUMENTATION: i64 = 3;
+pub(crate) const AUTHOR_AGENT_MICRO: i64 = 4;
+pub(crate) const AUTHOR_AGENT_SMALL: i64 = 5;
+pub(crate) const AUTHOR_AGENT_MEDIUM: i64 = 6;
+pub(crate) const AUTHOR_AGENT_LARGE: i64 = 7;
 
 /// Typed authorship marker.
 ///
@@ -223,7 +223,9 @@ pub struct Comment {
 
   // Immutable fields
   pub content_markdown: String, // Raw markdown content
-  pub author_id: Author,        // Reserved variants = 1..=7, users >= 8.
+  #[sqlx(rename = "author_id")]
+  #[serde(rename = "author_id")]
+  pub author: Author, // Reserved variants = 1..=7, users >= 8.
   pub comment_type: String,     // Stored as string, convert to CommentType
   pub created_at: String,
 
@@ -286,7 +288,8 @@ fn default_comment_type() -> CommentType {
 pub struct CreateCommentRequest {
   pub topic_id: String, // Topic to comment on (N123, D45, or C99 for replies)
   pub content: String,  // Markdown content
-  pub author_id: Author,
+  #[serde(rename = "author_id")]
+  pub author: Author,
   #[serde(default = "default_comment_type")]
   pub comment_type: CommentType, // Defaults to Note when omitted
 }

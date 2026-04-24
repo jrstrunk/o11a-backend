@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, thiserror::Error)]
 pub enum AnalysisError {
   #[error("failed to load project configuration: {0}")]
-  Config(String),
+  Config(#[from] domain::ConfigError),
   #[error("DataContext mutex poisoned: {0}")]
   LockPoisoned(String),
   #[error("audit '{0}' already exists")]
@@ -31,19 +31,15 @@ pub fn run_analysis(
   data_context: &Arc<Mutex<DataContext>>,
 ) -> Result<(), AnalysisError> {
   // Load in-scope files from scope.txt
-  let in_scope_files = domain::load_in_scope_files(project_root)
-    .map_err(|e| AnalysisError::Config(format!("scope.txt: {}", e)))?;
+  let in_scope_files = domain::load_in_scope_files(project_root)?;
 
-  let audit_name = domain::load_audit_name(project_root)
-    .map_err(|e| AnalysisError::Config(format!("name.txt: {}", e)))?;
+  let audit_name = domain::load_audit_name(project_root)?;
 
   // Load ordered document file list from documents.txt
-  let document_files = domain::load_document_files(project_root)
-    .map_err(|e| AnalysisError::Config(format!("documents.txt: {}", e)))?;
+  let document_files = domain::load_document_files(project_root)?;
 
   // Load security notes from security.md (optional)
-  let security_notes = domain::load_security_notes(project_root)
-    .map_err(|e| AnalysisError::Config(format!("security.md: {}", e)))?;
+  let security_notes = domain::load_security_notes(project_root)?;
 
   // Create the audit if it doesn't exist
   {
