@@ -404,23 +404,23 @@ fn get_breadcrumb_parts<'a>(
   }
 
   // Threats: parent feature then "Threat" label
-  if matches!(metadata, TopicMetadata::ThreatTopic { .. }) {
-    if let Some(feature_topic) = metadata.target_topic() {
-      return vec![
-        BreadcrumbPart::Topic(feature_topic),
-        BreadcrumbPart::Text("Threat"),
-      ];
-    }
+  if matches!(metadata, TopicMetadata::ThreatTopic { .. })
+    && let Some(feature_topic) = metadata.target_topic()
+  {
+    return vec![
+      BreadcrumbPart::Topic(feature_topic),
+      BreadcrumbPart::Text("Threat"),
+    ];
   }
 
   // Invariants: parent threat then "Invariant" label
-  if matches!(metadata, TopicMetadata::InvariantTopic { .. }) {
-    if let Some(threat_topic) = metadata.target_topic() {
-      return vec![
-        BreadcrumbPart::Topic(threat_topic),
-        BreadcrumbPart::Text("Invariant"),
-      ];
-    }
+  if matches!(metadata, TopicMetadata::InvariantTopic { .. })
+    && let Some(threat_topic) = metadata.target_topic()
+  {
+    return vec![
+      BreadcrumbPart::Topic(threat_topic),
+      BreadcrumbPart::Text("Invariant"),
+    ];
   }
 
   match metadata.scope() {
@@ -620,23 +620,22 @@ pub fn render_source_text(
   audit_data: &AuditData,
 ) -> Option<String> {
   // Authored topics: header + description, wrapped in a styled topic block.
-  if let Some(metadata) = audit_data.topic_metadata.get(topic) {
-    if let Some((keyword, css_class)) = authored_topic_label(metadata) {
-      let description = metadata.description().unwrap_or("");
-      let author_id = metadata.author_id().unwrap_or(0);
-      let created_at = metadata.created_at().unwrap_or("");
-      let header = render_authored_header(&keyword, author_id, created_at);
-      let desc_html = crate::comment_formatter::render_description_html(
-        description,
-        topic,
-        audit_data,
-      );
-      let content =
-        format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
-      return Some(formatting::format_topic_block(
-        topic, &content, css_class, topic,
-      ));
-    }
+  if let Some(metadata) = audit_data.topic_metadata.get(topic)
+    && let Some((keyword, css_class)) = authored_topic_label(metadata)
+  {
+    let description = metadata.description().unwrap_or("");
+    let author_id = metadata.author_id().unwrap_or(0);
+    let created_at = metadata.created_at().unwrap_or("");
+    let header = render_authored_header(&keyword, author_id, created_at);
+    let desc_html = crate::comment_formatter::render_description_html(
+      description,
+      topic,
+      audit_data,
+    );
+    let content = format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
+    return Some(formatting::format_topic_block(
+      topic, &content, css_class, topic,
+    ));
   }
 
   // Global builtins
@@ -913,6 +912,7 @@ fn render_control_flow_syntax_block(
 
 /// Render a list of SourceChild items in source order.
 /// Returns (html, next_index).
+#[allow(clippy::too_many_arguments)]
 fn render_source_children(
   children: &[SourceChild],
   scope: &topic::Topic,
@@ -993,6 +993,7 @@ fn render_source_children(
 
 /// Render an annotated block group with opening/closing syntax and indented children.
 /// Returns (html, next_index).
+#[allow(clippy::too_many_arguments)]
 fn render_annotated_block_group(
   annotation: &core::BlockAnnotation,
   children: &[SourceChild],
@@ -1870,7 +1871,7 @@ pub fn build_documentation_panel(
   for ft in feature_topics {
     if show_features_as_headers {
       // Render the feature as a navigable section header
-      if audit_data.topic_metadata.get(ft).is_some() {
+      if audit_data.topic_metadata.contains_key(ft) {
         all_contexts.push(SourceContext::new_with_scope_references(
           ft.clone(),
           None,

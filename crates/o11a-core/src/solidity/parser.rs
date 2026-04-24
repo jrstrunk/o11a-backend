@@ -36,7 +36,7 @@ pub fn process(
   };
 
   // Recursively traverse the out directory to find all JSON files
-  traverse_and_parse_asts(&out_dir, &project_root, &mut context)?;
+  traverse_and_parse_asts(&out_dir, project_root, &mut context)?;
 
   let total_asts: usize = context.ast_map.values().map(|v| v.len()).sum();
   println!(
@@ -63,30 +63,29 @@ fn traverse_and_parse_asts(
 
     if path.is_dir() {
       // Skip the build-info directory
-      if let Some(dir_name) = path.file_name() {
-        if dir_name == "build-info" {
-          continue;
-        }
+      if let Some(dir_name) = path.file_name()
+        && dir_name == "build-info"
+      {
+        continue;
       }
       // Recursively traverse subdirectories
-      traverse_and_parse_asts(&path, &project_root, context)?;
-    } else if path.is_file() {
-      if let Some(extension) = path.extension() {
-        if extension == "json" {
-          println!("Processing JSON file: {:?}", path);
-          let ast =
-            ast_from_json_file(&path.to_string_lossy(), &project_root, context)
-              .map_err(|e| {
-                format!("Failed to parse JSON file {:?}: {}", path, e)
-              })?;
+      traverse_and_parse_asts(&path, project_root, context)?;
+    } else if path.is_file()
+      && let Some(extension) = path.extension()
+      && extension == "json"
+    {
+      println!("Processing JSON file: {:?}", path);
+      let ast =
+        ast_from_json_file(&path.to_string_lossy(), project_root, context)
+          .map_err(|e| {
+            format!("Failed to parse JSON file {:?}: {}", path, e)
+          })?;
 
-          context
-            .ast_map
-            .entry(ast.project_path.clone())
-            .or_insert_with(Vec::new)
-            .push(ast);
-        }
-      }
+      context
+        .ast_map
+        .entry(ast.project_path.clone())
+        .or_default()
+        .push(ast);
     }
   }
 
@@ -127,7 +126,7 @@ fn ast_from_json_file(
   let project_path = core::new_project_path(&absolute_path, project_root);
 
   // Read the original source file content
-  let source_content = read_source_file(&project_path, &project_root)?;
+  let source_content = read_source_file(&project_path, project_root)?;
   context.source_content = source_content;
 
   let nodes_array = ast_obj
@@ -140,7 +139,7 @@ fn ast_from_json_file(
   // Parse each node in the nodes array
   let nodes: Result<Vec<ASTNode>, String> = nodes_array
     .iter()
-    .map(|node_val| node_from_json(node_val, &context))
+    .map(|node_val| node_from_json(node_val, context))
     .collect();
 
   let nodes = nodes?;
@@ -1633,9 +1632,8 @@ impl ASTNode {
         for item in declarations {
           result.push(item);
         }
-        match initial_value {
-          Some(value) => result.push(value),
-          None => {}
+        if let Some(value) = initial_value {
+          result.push(value)
         }
         result
       }
@@ -1769,10 +1767,7 @@ impl ASTNode {
         return_parameter_types,
         ..
       } => {
-        let mut result = vec![];
-        result.push(&**parameter_types);
-        result.push(&**return_parameter_types);
-        result
+        vec![&**parameter_types, &**return_parameter_types]
       }
       ASTNode::ParameterList { parameters, .. } => {
         let mut result = vec![];
@@ -1794,13 +1789,10 @@ impl ASTNode {
         ..
       } => {
         let mut result = vec![&**modifier_name];
-        match arguments {
-          Some(args) => {
-            for item in args {
-              result.push(item);
-            }
+        if let Some(args) = arguments {
+          for item in args {
+            result.push(item);
           }
-          None => {}
         }
         result
       }
@@ -1818,9 +1810,8 @@ impl ASTNode {
         for item in nodes {
           result.push(item);
         }
-        match body {
-          Some(body_node) => result.push(body_node),
-          None => {}
+        if let Some(body_node) = body {
+          result.push(body_node)
         }
         result
       }
@@ -2385,9 +2376,9 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       right_hand_side,
       left_hand_side,
     } => ASTNode::Assignment {
-      node_id: node_id,
-      src_location: src_location,
-      operator: operator,
+      node_id,
+      src_location,
+      operator,
       right_hand_side: Box::new(node_to_stub(&right_hand_side)),
       left_hand_side: Box::new(node_to_stub(&left_hand_side)),
     },
@@ -2399,12 +2390,12 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       right_expression,
       type_descriptions,
     } => ASTNode::BinaryOperation {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       left_expression: Box::new(node_to_stub(&left_expression)),
-      operator: operator,
+      operator,
       right_expression: Box::new(node_to_stub(&right_expression)),
-      type_descriptions: type_descriptions,
+      type_descriptions,
     },
     ASTNode::Conditional {
       node_id,
@@ -2413,14 +2404,12 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       true_expression,
       false_expression,
     } => ASTNode::Conditional {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       condition: Box::new(node_to_stub(&condition)),
       true_expression: Box::new(node_to_stub(&true_expression)),
-      false_expression: match false_expression {
-        Some(expr) => Some(Box::new(node_to_stub(&expr))),
-        None => None,
-      },
+      false_expression: false_expression
+        .map(|expr| Box::new(node_to_stub(&expr))),
     },
     ASTNode::ElementaryTypeNameExpression {
       node_id,
@@ -2428,9 +2417,9 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       type_descriptions,
       type_name,
     } => ASTNode::ElementaryTypeNameExpression {
-      node_id: node_id,
-      src_location: src_location,
-      type_descriptions: type_descriptions,
+      node_id,
+      src_location,
+      type_descriptions,
       type_name: Box::new(node_to_stub(&type_name)),
     },
     ASTNode::FunctionCall {
@@ -2444,15 +2433,15 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       type_descriptions,
       referenced_return_declarations,
     } => ASTNode::FunctionCall {
-      node_id: node_id,
-      src_location: src_location,
-      arguments: arguments.iter().map(|n| node_to_stub(n)).collect(),
+      node_id,
+      src_location,
+      arguments: arguments.iter().map(node_to_stub).collect(),
       expression: Box::new(node_to_stub(&expression)),
-      name_locations: name_locations,
-      names: names,
-      try_call: try_call,
-      type_descriptions: type_descriptions,
-      referenced_return_declarations: referenced_return_declarations,
+      name_locations,
+      names,
+      try_call,
+      type_descriptions,
+      referenced_return_declarations,
     },
     ASTNode::TypeConversion {
       node_id,
@@ -2464,14 +2453,14 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       try_call,
       type_descriptions,
     } => ASTNode::TypeConversion {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       argument: Box::new(node_to_stub(&argument)),
       expression: Box::new(node_to_stub(&expression)),
-      name_locations: name_locations,
-      names: names,
-      try_call: try_call,
-      type_descriptions: type_descriptions,
+      name_locations,
+      names,
+      try_call,
+      type_descriptions,
     },
     ASTNode::StructConstructor {
       node_id,
@@ -2483,14 +2472,14 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       try_call,
       type_descriptions,
     } => ASTNode::StructConstructor {
-      node_id: node_id,
-      src_location: src_location,
-      arguments: arguments.iter().map(|n| node_to_stub(n)).collect(),
+      node_id,
+      src_location,
+      arguments: arguments.iter().map(node_to_stub).collect(),
       expression: Box::new(node_to_stub(&expression)),
-      name_locations: name_locations,
-      names: names,
-      try_call: try_call,
-      type_descriptions: type_descriptions,
+      name_locations,
+      names,
+      try_call,
+      type_descriptions,
     },
     ASTNode::FunctionCallOptions {
       node_id,
@@ -2498,10 +2487,10 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       expression,
       options,
     } => ASTNode::FunctionCallOptions {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       expression: Box::new(node_to_stub(&expression)),
-      options: options.iter().map(|n| node_to_stub(n)).collect(),
+      options: options.iter().map(node_to_stub).collect(),
     },
     ASTNode::Identifier {
       node_id,
@@ -2510,11 +2499,11 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       overloaded_declarations,
       referenced_declaration,
     } => ASTNode::Identifier {
-      node_id: node_id,
-      src_location: src_location,
-      name: name,
-      overloaded_declarations: overloaded_declarations,
-      referenced_declaration: referenced_declaration,
+      node_id,
+      src_location,
+      name,
+      overloaded_declarations,
+      referenced_declaration,
     },
     ASTNode::IdentifierPath {
       node_id,
@@ -2523,11 +2512,11 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       name_locations,
       referenced_declaration,
     } => ASTNode::IdentifierPath {
-      node_id: node_id,
-      src_location: src_location,
-      name: name,
-      name_locations: name_locations,
-      referenced_declaration: referenced_declaration,
+      node_id,
+      src_location,
+      name,
+      name_locations,
+      referenced_declaration,
     },
     ASTNode::IndexAccess {
       node_id,
@@ -2535,13 +2524,11 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       base_expression,
       index_expression,
     } => ASTNode::IndexAccess {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       base_expression: Box::new(node_to_stub(&base_expression)),
-      index_expression: match index_expression {
-        Some(expr) => Some(Box::new(node_to_stub(&expr))),
-        None => None,
-      },
+      index_expression: index_expression
+        .map(|expr| Box::new(node_to_stub(&expr))),
     },
     ASTNode::IndexRangeAccess {
       node_id,
@@ -2549,13 +2536,10 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       nodes,
       body,
     } => ASTNode::IndexRangeAccess {
-      node_id: node_id,
-      src_location: src_location,
-      nodes: nodes.iter().map(|n| node_to_stub(n)).collect(),
-      body: match body {
-        Some(b) => Some(Box::new(node_to_stub(&b))),
-        None => None,
-      },
+      node_id,
+      src_location,
+      nodes: nodes.iter().map(node_to_stub).collect(),
+      body: body.map(|b| Box::new(node_to_stub(&b))),
     },
     ASTNode::Literal {
       node_id,
@@ -2565,12 +2549,12 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       type_descriptions,
       value,
     } => ASTNode::Literal {
-      node_id: node_id,
-      src_location: src_location,
-      hex_value: hex_value,
-      kind: kind,
-      type_descriptions: type_descriptions,
-      value: value,
+      node_id,
+      src_location,
+      hex_value,
+      kind,
+      type_descriptions,
+      value,
     },
     ASTNode::MemberAccess {
       node_id,
@@ -2581,21 +2565,21 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       referenced_declaration,
       type_descriptions,
     } => ASTNode::MemberAccess {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       expression: Box::new(node_to_stub(&expression)),
-      member_location: member_location,
-      member_name: member_name,
-      referenced_declaration: referenced_declaration,
-      type_descriptions: type_descriptions,
+      member_location,
+      member_name,
+      referenced_declaration,
+      type_descriptions,
     },
     ASTNode::NewExpression {
       node_id,
       src_location,
       type_name,
     } => ASTNode::NewExpression {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       type_name: Box::new(node_to_stub(&type_name)),
     },
     ASTNode::TupleExpression {
@@ -2603,9 +2587,9 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       src_location,
       components,
     } => ASTNode::TupleExpression {
-      node_id: node_id,
-      src_location: src_location,
-      components: components.iter().map(|n| node_to_stub(n)).collect(),
+      node_id,
+      src_location,
+      components: components.iter().map(node_to_stub).collect(),
     },
     ASTNode::UnaryOperation {
       node_id,
@@ -2614,10 +2598,10 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       operator,
       sub_expression,
     } => ASTNode::UnaryOperation {
-      node_id: node_id,
-      src_location: src_location,
-      prefix: prefix,
-      operator: operator,
+      node_id,
+      src_location,
+      prefix,
+      operator,
       sub_expression: Box::new(node_to_stub(&sub_expression)),
     },
     ASTNode::EnumValue {
@@ -2626,19 +2610,19 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       name,
       name_location,
     } => ASTNode::EnumValue {
-      node_id: node_id,
-      src_location: src_location,
-      name: name,
-      name_location: name_location,
+      node_id,
+      src_location,
+      name,
+      name_location,
     },
     ASTNode::Block {
       node_id,
       src_location,
       statements,
     } => ASTNode::Block {
-      node_id: node_id,
-      src_location: src_location,
-      statements: statements.iter().map(|n| node_to_stub(n)).collect(),
+      node_id,
+      src_location,
+      statements: statements.iter().map(node_to_stub).collect(),
     },
     ASTNode::SemanticBlock {
       node_id,
@@ -2646,10 +2630,10 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       documentation,
       statements,
     } => ASTNode::SemanticBlock {
-      node_id: node_id,
-      src_location: src_location,
-      documentation: documentation,
-      statements: statements.iter().map(|n| node_to_stub(n)).collect(),
+      node_id,
+      src_location,
+      documentation,
+      statements: statements.iter().map(node_to_stub).collect(),
     },
     ASTNode::ContractMemberGroup {
       node_id,
@@ -2657,24 +2641,24 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       documentation,
       members,
     } => ASTNode::ContractMemberGroup {
-      node_id: node_id,
-      src_location: src_location,
-      documentation: documentation,
-      members: members.iter().map(|n| node_to_stub(n)).collect(),
+      node_id,
+      src_location,
+      documentation,
+      members: members.iter().map(node_to_stub).collect(),
     },
     ASTNode::Break {
       node_id,
       src_location,
     } => ASTNode::Break {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
     },
     ASTNode::Continue {
       node_id,
       src_location,
     } => ASTNode::Continue {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
     },
     ASTNode::DoWhileStatement {
       node_id,
@@ -2682,21 +2666,18 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       condition,
       body,
     } => ASTNode::DoWhileStatement {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       condition: Box::new(node_to_stub(&condition)),
-      body: match body {
-        Some(b) => Some(Box::new(node_to_stub(&b))),
-        None => None,
-      },
+      body: body.map(|b| Box::new(node_to_stub(&b))),
     },
     ASTNode::EmitStatement {
       node_id,
       src_location,
       event_call,
     } => ASTNode::EmitStatement {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       event_call: Box::new(node_to_stub(&event_call)),
     },
     ASTNode::ExpressionStatement {
@@ -2704,8 +2685,8 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       src_location,
       expression,
     } => ASTNode::ExpressionStatement {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       expression: Box::new(node_to_stub(&expression)),
     },
     ASTNode::ForStatement {
@@ -2714,8 +2695,8 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       condition,
       body,
     } => ASTNode::ForStatement {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       condition: Box::new(node_to_stub(&condition)),
       body: Box::new(node_to_stub(&body)),
     },
@@ -2727,21 +2708,13 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       loop_expression,
       is_simple_counter_loop,
     } => ASTNode::LoopExpression {
-      node_id: node_id,
-      src_location: src_location,
-      initialization_expression: match initialization_expression {
-        Some(ie) => Some(Box::new(node_to_stub(&ie))),
-        None => None,
-      },
-      condition: match condition {
-        Some(c) => Some(Box::new(node_to_stub(&c))),
-        None => None,
-      },
-      loop_expression: match loop_expression {
-        Some(le) => Some(Box::new(node_to_stub(&le))),
-        None => None,
-      },
-      is_simple_counter_loop: is_simple_counter_loop,
+      node_id,
+      src_location,
+      initialization_expression: initialization_expression
+        .map(|ie| Box::new(node_to_stub(&ie))),
+      condition: condition.map(|c| Box::new(node_to_stub(&c))),
+      loop_expression: loop_expression.map(|le| Box::new(node_to_stub(&le))),
+      is_simple_counter_loop,
     },
     ASTNode::IfStatement {
       node_id,
@@ -2750,28 +2723,25 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       true_body,
       false_body,
     } => ASTNode::IfStatement {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       condition: Box::new(node_to_stub(&condition)),
       true_body: Box::new(node_to_stub(&true_body)),
-      false_body: match false_body {
-        Some(fb) => Some(Box::new(node_to_stub(&fb))),
-        None => None,
-      },
+      false_body: false_body.map(|fb| Box::new(node_to_stub(&fb))),
     },
     ASTNode::InlineAssembly {
       node_id,
       src_location,
     } => ASTNode::InlineAssembly {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
     },
     ASTNode::PlaceholderStatement {
       node_id,
       src_location,
     } => ASTNode::PlaceholderStatement {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
     },
     ASTNode::Return {
       node_id,
@@ -2779,21 +2749,18 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       expression,
       function_return_parameters,
     } => ASTNode::Return {
-      node_id: node_id,
-      src_location: src_location,
-      expression: match expression {
-        Some(e) => Some(Box::new(node_to_stub(&e))),
-        None => None,
-      },
-      function_return_parameters: function_return_parameters,
+      node_id,
+      src_location,
+      expression: expression.map(|e| Box::new(node_to_stub(&e))),
+      function_return_parameters,
     },
     ASTNode::RevertStatement {
       node_id,
       src_location,
       error_call,
     } => ASTNode::RevertStatement {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       error_call: Box::new(node_to_stub(&error_call)),
     },
     ASTNode::TryStatement {
@@ -2802,9 +2769,9 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       clauses,
       external_call,
     } => ASTNode::TryStatement {
-      node_id: node_id,
-      src_location: src_location,
-      clauses: clauses.iter().map(|n| node_to_stub(n)).collect(),
+      node_id,
+      src_location,
+      clauses: clauses.iter().map(node_to_stub).collect(),
       external_call: Box::new(node_to_stub(&external_call)),
     },
     ASTNode::UncheckedBlock {
@@ -2812,9 +2779,9 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       src_location,
       statements,
     } => ASTNode::UncheckedBlock {
-      node_id: node_id,
-      src_location: src_location,
-      statements: statements.iter().map(|n| node_to_stub(n)).collect(),
+      node_id,
+      src_location,
+      statements: statements.iter().map(node_to_stub).collect(),
     },
     ASTNode::VariableDeclarationStatement {
       node_id,
@@ -2822,13 +2789,10 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       declarations,
       initial_value,
     } => ASTNode::VariableDeclarationStatement {
-      node_id: node_id,
-      src_location: src_location,
-      declarations: declarations.iter().map(|n| node_to_stub(n)).collect(),
-      initial_value: match initial_value {
-        Some(iv) => Some(Box::new(node_to_stub(&iv))),
-        None => None,
-      },
+      node_id,
+      src_location,
+      declarations: declarations.iter().map(node_to_stub).collect(),
+      initial_value: initial_value.map(|iv| Box::new(node_to_stub(&iv))),
     },
     ASTNode::VariableDeclaration {
       node_id,
@@ -2849,26 +2813,23 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       base_functions,
       struct_field,
     } => ASTNode::VariableDeclaration {
-      node_id: node_id,
-      src_location: src_location,
-      constant: constant,
-      function_selector: function_selector,
-      mutability: mutability,
-      name: name,
-      name_location: name_location,
-      scope: scope,
-      state_variable: state_variable,
-      storage_location: storage_location,
+      node_id,
+      src_location,
+      constant,
+      function_selector,
+      mutability,
+      name,
+      name_location,
+      scope,
+      state_variable,
+      storage_location,
       type_name: Box::new(node_to_stub(&type_name)),
-      value: match value {
-        Some(v) => Some(Box::new(node_to_stub(&v))),
-        None => None,
-      },
-      visibility: visibility,
-      parameter_variable: parameter_variable,
-      implementation_declaration: implementation_declaration,
-      base_functions: base_functions,
-      struct_field: struct_field,
+      value: value.map(|v| Box::new(node_to_stub(&v))),
+      visibility,
+      parameter_variable,
+      implementation_declaration,
+      base_functions,
+      struct_field,
     },
     ASTNode::WhileStatement {
       node_id,
@@ -2876,13 +2837,10 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       condition,
       body,
     } => ASTNode::WhileStatement {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       condition: Box::new(node_to_stub(&condition)),
-      body: match body {
-        Some(b) => Some(Box::new(node_to_stub(&b))),
-        None => None,
-      },
+      body: body.map(|b| Box::new(node_to_stub(&b))),
     },
     ASTNode::ContractSignature {
       node_id,
@@ -2896,19 +2854,16 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       base_contracts,
       directives,
     } => ASTNode::ContractSignature {
-      node_id: node_id,
-      src_location: src_location,
-      documentation: match documentation {
-        Some(d) => Some(Box::new(node_to_stub(&d))),
-        None => None,
-      },
-      name: name,
-      name_location: name_location,
-      declaration_id: declaration_id,
-      contract_kind: contract_kind,
-      abstract_: abstract_,
-      base_contracts: base_contracts.iter().map(|n| node_to_stub(n)).collect(),
-      directives: directives.iter().map(|n| node_to_stub(n)).collect(),
+      node_id,
+      src_location,
+      documentation: documentation.map(|d| Box::new(node_to_stub(&d))),
+      name,
+      name_location,
+      declaration_id,
+      contract_kind,
+      abstract_,
+      base_contracts: base_contracts.iter().map(node_to_stub).collect(),
+      directives: directives.iter().map(node_to_stub).collect(),
     },
     ASTNode::ContractDefinition {
       node_id,
@@ -2916,10 +2871,10 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       signature,
       nodes,
     } => ASTNode::ContractDefinition {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       signature: Box::new(node_to_stub(&signature)),
-      nodes: nodes.iter().map(|n| node_to_stub(n)).collect(),
+      nodes: nodes.iter().map(node_to_stub).collect(),
     },
     ASTNode::FunctionSignature {
       node_id,
@@ -2938,23 +2893,20 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       visibility,
       implementation_declaration,
     } => ASTNode::FunctionSignature {
-      node_id: node_id,
-      src_location: src_location,
-      documentation: match documentation {
-        Some(d) => Some(Box::new(node_to_stub(&d))),
-        None => None,
-      },
-      kind: kind,
+      node_id,
+      src_location,
+      documentation: documentation.map(|d| Box::new(node_to_stub(&d))),
+      kind,
       modifiers: Box::new(node_to_stub(&modifiers)),
-      name: name,
-      name_location: name_location,
-      declaration_id: declaration_id,
+      name,
+      name_location,
+      declaration_id,
       parameters: Box::new(node_to_stub(&parameters)),
       return_parameters: Box::new(node_to_stub(&return_parameters)),
-      scope: scope,
-      state_mutability: state_mutability,
-      virtual_: virtual_,
-      visibility: visibility,
+      scope,
+      state_mutability,
+      virtual_,
+      visibility,
       implementation_declaration,
     },
     ASTNode::FunctionDefinition {
@@ -2964,14 +2916,11 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       implemented,
       body,
     } => ASTNode::FunctionDefinition {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       signature: Box::new(node_to_stub(&signature)),
-      implemented: implemented,
-      body: match body {
-        Some(b) => Some(Box::new(node_to_stub(&b))),
-        None => None,
-      },
+      implemented,
+      body: body.map(|b| Box::new(node_to_stub(&b))),
     },
     ASTNode::EventDefinition {
       node_id,
@@ -2980,10 +2929,10 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       name_location,
       parameters,
     } => ASTNode::EventDefinition {
-      node_id: node_id,
-      src_location: src_location,
-      name: name,
-      name_location: name_location,
+      node_id,
+      src_location,
+      name,
+      name_location,
       parameters: Box::new(node_to_stub(&parameters)),
     },
     ASTNode::ErrorDefinition {
@@ -2993,10 +2942,10 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       name_location,
       parameters,
     } => ASTNode::ErrorDefinition {
-      node_id: node_id,
-      src_location: src_location,
-      name: name,
-      name_location: name_location,
+      node_id,
+      src_location,
+      name,
+      name_location,
       parameters: Box::new(node_to_stub(&parameters)),
     },
     ASTNode::ModifierSignature {
@@ -3011,18 +2960,15 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       visibility,
       implementation_declaration,
     } => ASTNode::ModifierSignature {
-      node_id: node_id,
-      src_location: src_location,
-      documentation: match documentation {
-        Some(d) => Some(Box::new(node_to_stub(&d))),
-        None => None,
-      },
-      name: name,
-      name_location: name_location,
-      declaration_id: declaration_id,
+      node_id,
+      src_location,
+      documentation: documentation.map(|d| Box::new(node_to_stub(&d))),
+      name,
+      name_location,
+      declaration_id,
       parameters: Box::new(node_to_stub(&parameters)),
-      virtual_: virtual_,
-      visibility: visibility,
+      virtual_,
+      visibility,
       implementation_declaration,
     },
     ASTNode::ModifierDefinition {
@@ -3031,8 +2977,8 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       signature,
       body,
     } => ASTNode::ModifierDefinition {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       signature: Box::new(node_to_stub(&signature)),
       body: Box::new(node_to_stub(&body)),
     },
@@ -3045,13 +2991,13 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       name_location,
       visibility,
     } => ASTNode::StructDefinition {
-      node_id: node_id,
-      src_location: src_location,
-      members: members.iter().map(|n| node_to_stub(n)).collect(),
-      canonical_name: canonical_name,
-      name: name,
-      name_location: name_location,
-      visibility: visibility,
+      node_id,
+      src_location,
+      members: members.iter().map(node_to_stub).collect(),
+      canonical_name,
+      name,
+      name_location,
+      visibility,
     },
     ASTNode::EnumDefinition {
       node_id,
@@ -3061,12 +3007,12 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       name,
       name_location,
     } => ASTNode::EnumDefinition {
-      node_id: node_id,
-      src_location: src_location,
-      members: members.iter().map(|n| node_to_stub(n)).collect(),
-      canonical_name: canonical_name,
-      name: name,
-      name_location: name_location,
+      node_id,
+      src_location,
+      members: members.iter().map(node_to_stub).collect(),
+      canonical_name,
+      name,
+      name_location,
     },
     ASTNode::UserDefinedValueTypeDefinition {
       node_id,
@@ -3074,9 +3020,9 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       name,
       underlying_type,
     } => ASTNode::UserDefinedValueTypeDefinition {
-      node_id: node_id,
-      src_location: src_location,
-      name: name,
+      node_id,
+      src_location,
+      name,
       underlying_type: Box::new(node_to_stub(&underlying_type)),
     },
     ASTNode::PragmaDirective {
@@ -3084,9 +3030,9 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       src_location,
       literals,
     } => ASTNode::PragmaDirective {
-      node_id: node_id,
-      src_location: src_location,
-      literals: literals,
+      node_id,
+      src_location,
+      literals,
     },
     ASTNode::ImportDirective {
       node_id,
@@ -3095,11 +3041,11 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       file,
       source_unit,
     } => ASTNode::ImportDirective {
-      node_id: node_id,
-      src_location: src_location,
-      absolute_path: absolute_path,
-      file: file,
-      source_unit: source_unit,
+      node_id,
+      src_location,
+      absolute_path,
+      file,
+      source_unit,
     },
     ASTNode::UsingForDirective {
       node_id,
@@ -3108,34 +3054,28 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       library_name,
       type_name,
     } => ASTNode::UsingForDirective {
-      node_id: node_id,
-      src_location: src_location,
-      global: global,
-      library_name: match library_name {
-        Some(ln) => Some(Box::new(node_to_stub(&ln))),
-        None => None,
-      },
-      type_name: match type_name {
-        Some(tn) => Some(Box::new(node_to_stub(&tn))),
-        None => None,
-      },
+      node_id,
+      src_location,
+      global,
+      library_name: library_name.map(|ln| Box::new(node_to_stub(&ln))),
+      type_name: type_name.map(|tn| Box::new(node_to_stub(&tn))),
     },
     ASTNode::SourceUnit {
       node_id,
       src_location,
       nodes,
     } => ASTNode::SourceUnit {
-      node_id: node_id,
-      src_location: src_location,
-      nodes: nodes.iter().map(|n| node_to_stub(n)).collect(),
+      node_id,
+      src_location,
+      nodes: nodes.iter().map(node_to_stub).collect(),
     },
     ASTNode::InheritanceSpecifier {
       node_id,
       src_location,
       base_name,
     } => ASTNode::InheritanceSpecifier {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       base_name: Box::new(node_to_stub(&base_name)),
     },
     ASTNode::ElementaryTypeName {
@@ -3143,9 +3083,9 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       src_location,
       name,
     } => ASTNode::ElementaryTypeName {
-      node_id: node_id,
-      src_location: src_location,
-      name: name,
+      node_id,
+      src_location,
+      name,
     },
     ASTNode::FunctionTypeName {
       node_id,
@@ -3155,12 +3095,12 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       state_mutability,
       visibility,
     } => ASTNode::FunctionTypeName {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       parameter_types: Box::new(node_to_stub(&parameter_types)),
       return_parameter_types: Box::new(node_to_stub(&return_parameter_types)),
-      state_mutability: state_mutability,
-      visibility: visibility,
+      state_mutability,
+      visibility,
     },
     ASTNode::ParameterList {
       node_id,
@@ -3168,19 +3108,19 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       parameters,
       is_return_parameters,
     } => ASTNode::ParameterList {
-      node_id: node_id,
-      src_location: src_location,
-      parameters: parameters.iter().map(|n| node_to_stub(n)).collect(),
-      is_return_parameters: is_return_parameters,
+      node_id,
+      src_location,
+      parameters: parameters.iter().map(node_to_stub).collect(),
+      is_return_parameters,
     },
     ASTNode::ModifierList {
       node_id,
       src_location,
       modifiers,
     } => ASTNode::ModifierList {
-      node_id: node_id,
-      src_location: src_location,
-      modifiers: modifiers.iter().map(|n| node_to_stub(n)).collect(),
+      node_id,
+      src_location,
+      modifiers: modifiers.iter().map(node_to_stub).collect(),
     },
     ASTNode::TryCatchClause {
       node_id,
@@ -3189,14 +3129,11 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       block,
       parameters,
     } => ASTNode::TryCatchClause {
-      node_id: node_id,
-      src_location: src_location,
-      error_name: error_name,
+      node_id,
+      src_location,
+      error_name,
       block: Box::new(node_to_stub(&block)),
-      parameters: match parameters {
-        Some(p) => Some(Box::new(node_to_stub(&p))),
-        None => None,
-      },
+      parameters: parameters.map(|p| Box::new(node_to_stub(&p))),
     },
     ASTNode::ModifierInvocation {
       node_id,
@@ -3204,13 +3141,10 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       modifier_name,
       arguments,
     } => ASTNode::ModifierInvocation {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       modifier_name: Box::new(node_to_stub(&modifier_name)),
-      arguments: match arguments {
-        Some(args) => Some(args.iter().map(|n| node_to_stub(n)).collect()),
-        None => None,
-      },
+      arguments: arguments.map(|args| args.iter().map(node_to_stub).collect()),
     },
     ASTNode::UserDefinedTypeName {
       node_id,
@@ -3218,18 +3152,18 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       path_node,
       referenced_declaration,
     } => ASTNode::UserDefinedTypeName {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       path_node: Box::new(node_to_stub(&path_node)),
-      referenced_declaration: referenced_declaration,
+      referenced_declaration,
     },
     ASTNode::ArrayTypeName {
       node_id,
       src_location,
       base_type,
     } => ASTNode::ArrayTypeName {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       base_type: Box::new(node_to_stub(&base_type)),
     },
     ASTNode::Mapping {
@@ -3242,13 +3176,13 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       value_name_location,
       value_type,
     } => ASTNode::Mapping {
-      node_id: node_id,
-      src_location: src_location,
-      key_name: key_name,
-      key_name_location: key_name_location,
+      node_id,
+      src_location,
+      key_name,
+      key_name_location,
       key_type: Box::new(node_to_stub(&key_type)),
-      value_name: value_name,
-      value_name_location: value_name_location,
+      value_name,
+      value_name_location,
       value_type: Box::new(node_to_stub(&value_type)),
     },
     ASTNode::StructuredDocumentation {
@@ -3256,9 +3190,9 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       src_location,
       text,
     } => ASTNode::StructuredDocumentation {
-      node_id: node_id,
-      src_location: src_location,
-      text: text,
+      node_id,
+      src_location,
+      text,
     },
     ASTNode::Stub {
       node_id,
@@ -3266,10 +3200,10 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       topic,
       kind,
     } => ASTNode::Stub {
-      node_id: node_id,
-      src_location: src_location,
-      topic: topic,
-      kind: kind,
+      node_id,
+      src_location,
+      topic,
+      kind,
     },
     ASTNode::Other {
       node_id,
@@ -3278,14 +3212,11 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       body,
       node_type,
     } => ASTNode::Other {
-      node_id: node_id,
-      src_location: src_location,
-      nodes: nodes.iter().map(|n| node_to_stub(n)).collect(),
-      body: match body {
-        Some(b) => Some(Box::new(node_to_stub(&b))),
-        None => None,
-      },
-      node_type: node_type,
+      node_id,
+      src_location,
+      nodes: nodes.iter().map(node_to_stub).collect(),
+      body: body.map(|b| Box::new(node_to_stub(&b))),
+      node_type,
     },
     ASTNode::Argument {
       node_id,
@@ -3293,8 +3224,8 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       parameter: referenced_parameter,
       argument,
     } => ASTNode::Argument {
-      node_id: node_id,
-      src_location: src_location,
+      node_id,
+      src_location,
       parameter: referenced_parameter,
       argument: Box::new(node_to_stub(&argument)),
     },
@@ -3670,7 +3601,7 @@ fn get_required_source_location(
     .get(field_name)
     .and_then(|v| v.as_str())
     .ok_or_else(|| format!("Missing {} field: {:?}", field_name, val))
-    .and_then(|v| SourceLocation::from_str(v))
+    .and_then(SourceLocation::from_str)
 }
 
 fn get_required_enum<T: FromStr>(
@@ -3856,7 +3787,7 @@ fn get_required_source_location_vec(
                 field_name, item
               )
             })
-            .and_then(|s| SourceLocation::from_str(s))
+            .and_then(SourceLocation::from_str)
         })
         .collect::<Result<Vec<SourceLocation>, String>>()
     })
@@ -3869,7 +3800,7 @@ fn get_required_type_descriptions(
   val
     .get(field_name)
     .ok_or_else(|| format!("Missing {} field: {:?}", field_name, val))
-    .and_then(|v| TypeDescriptions::from_json(v))
+    .and_then(TypeDescriptions::from_json)
 }
 
 fn find_semantic_breaks(source: &str, statements: &[ASTNode]) -> Vec<usize> {
@@ -4228,7 +4159,7 @@ fn node_from_json(
     .ok_or_else(|| {
       format!("Missing src field in {} node: {:?}", node_type_str, val)
     })
-    .and_then(|v| SourceLocation::from_str(v))
+    .and_then(SourceLocation::from_str)
     .map_err(|e| format!("Error parsing {} node: {}", node_type_str, e))?;
 
   match node_type_str {
@@ -5704,20 +5635,17 @@ fn try_parse_natspec_tag(line: &str) -> Option<(NatSpecTag, &str)> {
   let after_at = &line[1..];
 
   // @notice [<text>]
-  if let Some(rest) = after_at.strip_prefix("notice") {
-    if rest.is_empty() || rest.starts_with(' ') {
-      return Some((
-        NatSpecTag::Notice,
-        rest.strip_prefix(' ').unwrap_or(rest),
-      ));
-    }
+  if let Some(rest) = after_at.strip_prefix("notice")
+    && (rest.is_empty() || rest.starts_with(' '))
+  {
+    return Some((NatSpecTag::Notice, rest.strip_prefix(' ').unwrap_or(rest)));
   }
 
   // @dev [<text>]
-  if let Some(rest) = after_at.strip_prefix("dev") {
-    if rest.is_empty() || rest.starts_with(' ') {
-      return Some((NatSpecTag::Dev, rest.strip_prefix(' ').unwrap_or(rest)));
-    }
+  if let Some(rest) = after_at.strip_prefix("dev")
+    && (rest.is_empty() || rest.starts_with(' '))
+  {
+    return Some((NatSpecTag::Dev, rest.strip_prefix(' ').unwrap_or(rest)));
   }
 
   // @param <name> [<description>]
@@ -5741,20 +5669,20 @@ fn try_parse_natspec_tag(line: &str) -> Option<(NatSpecTag, &str)> {
   }
 
   // Known deferred tags — flush current section but don't collect text
-  if let Some(rest) = after_at.strip_prefix("title") {
-    if rest.is_empty() || rest.starts_with(' ') {
-      return Some((NatSpecTag::Ignored, ""));
-    }
+  if let Some(rest) = after_at.strip_prefix("title")
+    && (rest.is_empty() || rest.starts_with(' '))
+  {
+    return Some((NatSpecTag::Ignored, ""));
   }
-  if let Some(rest) = after_at.strip_prefix("author") {
-    if rest.is_empty() || rest.starts_with(' ') {
-      return Some((NatSpecTag::Ignored, ""));
-    }
+  if let Some(rest) = after_at.strip_prefix("author")
+    && (rest.is_empty() || rest.starts_with(' '))
+  {
+    return Some((NatSpecTag::Ignored, ""));
   }
-  if let Some(rest) = after_at.strip_prefix("inheritdoc") {
-    if rest.is_empty() || rest.starts_with(' ') {
-      return Some((NatSpecTag::Ignored, ""));
-    }
+  if let Some(rest) = after_at.strip_prefix("inheritdoc")
+    && (rest.is_empty() || rest.starts_with(' '))
+  {
+    return Some((NatSpecTag::Ignored, ""));
   }
 
   // Unknown tag — ignore (line will be treated as untagged or continuation)

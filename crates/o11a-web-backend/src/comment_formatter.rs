@@ -24,6 +24,7 @@ pub fn render_comment_html(
   )
 }
 
+#[allow(clippy::only_used_in_recursion)]
 fn node_to_html(
   node: &CommentNode,
   comment_topic: &topic::Topic,

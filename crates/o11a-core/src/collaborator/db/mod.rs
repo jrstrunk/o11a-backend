@@ -5,7 +5,9 @@ use sqlx::SqlitePool;
 
 pub mod user_entities;
 
-pub use user_entities::apply_user_entities;
+pub use user_entities::{
+  apply_user_entities_snapshot, load_user_entities_snapshot,
+};
 
 // ============================================================================
 // Startup loading
@@ -43,12 +45,13 @@ pub fn ingest_comment(
     core::TopicMetadata::CommentTopic {
       topic: comment_topic.clone(),
       author_id: comment.author_id,
-      comment_type: core::CommentType::from_str(&comment.comment_type).expect(
-        &format!(
-          "Unknown comment type '{}' in comment {}",
-          comment.comment_type, comment.id
-        ),
-      ),
+      comment_type: core::CommentType::parse_str(&comment.comment_type)
+        .unwrap_or_else(|| {
+          panic!(
+            "Unknown comment type '{}' in comment {}",
+            comment.comment_type, comment.id
+          )
+        }),
       target_topic: target_topic.clone(),
       created_at: comment.created_at.clone(),
       scope: scope.to_scope(),
@@ -74,26 +77,31 @@ pub fn ingest_comment(
   mentions
 }
 
-/// Load and parse all comments on server startup. Returns the number loaded.
-pub async fn load_and_parse_all_comments(
+/// Load all visible comments for ingestion. Pure I/O; pair with
+/// `ingest_loaded_comments` so callers can hold a sync mutex around the
+/// mutation without crossing an `.await`.
+pub async fn load_visible_comments(
   pool: &SqlitePool,
-  data_context: &mut DataContext,
-) -> Result<usize, sqlx::Error> {
-  let comments = sqlx::query_as::<_, Comment>(
+) -> Result<Vec<Comment>, sqlx::Error> {
+  sqlx::query_as::<_, Comment>(
     "SELECT * FROM comments WHERE status != 'hidden'",
   )
   .fetch_all(pool)
-  .await?;
+  .await
+}
 
-  let count = comments.len();
-
-  for comment in &comments {
+/// Ingest a batch of pre-loaded comments. Synchronous so it composes with
+/// `std::sync::Mutex` guards. Returns the number ingested.
+pub fn ingest_loaded_comments(
+  data_context: &mut DataContext,
+  comments: &[Comment],
+) -> usize {
+  for comment in comments {
     let scope: ScopeInfo =
       serde_json::from_str(&comment.scope).unwrap_or_default();
     ingest_comment(data_context, comment, &scope);
   }
-
-  Ok(count)
+  comments.len()
 }
 
 // ============================================================================

@@ -399,57 +399,7 @@ pub async fn get_delimiter(
 
 // Topic metadata response
 
-pub use o11a_core::collaborator::scope_info::{
-  BlockAnnotationKindInfo, BlockAnnotationResponse, ContainingBlockLayerInfo,
-  ScopeInfo,
-};
-
-/// Response type for a single reference
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type")]
-pub enum ReferenceResponse {
-  #[serde(rename = "project")]
-  Project { reference_topic: String },
-  #[serde(rename = "project_with_mentions")]
-  ProjectWithMentions {
-    reference_topic: String,
-    mention_topics: Vec<String>,
-  },
-  #[serde(rename = "comment")]
-  Comment {
-    reference_topic: String,
-    mention_topics: Vec<String>,
-  },
-}
-
-/// A child element in a source context — either a direct reference or an annotated block group.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "child_type")]
-pub enum SourceChildResponse {
-  #[serde(rename = "reference")]
-  Reference { reference: ReferenceResponse },
-  #[serde(rename = "annotated_block")]
-  AnnotatedBlock {
-    annotation: BlockAnnotationResponse,
-    children: Vec<SourceChildResponse>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    has_sibling_branch: bool,
-  },
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct NestedSourceContextResponse {
-  pub subscope: String,
-  pub children: Vec<SourceChildResponse>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SourceContextResponse {
-  pub scope: String,
-  pub is_in_scope: bool,
-  pub scope_references: Vec<ReferenceResponse>,
-  pub nested_references: Vec<NestedSourceContextResponse>,
-}
+pub use o11a_core::collaborator::scope_info::ScopeInfo;
 
 /// Response for NamedTopic metadata
 #[derive(Debug, Serialize)]
@@ -609,8 +559,6 @@ pub enum TopicMetadataResponse {
   #[serde(rename = "documentation")]
   Documentation(DocumentationTopicResponse),
 }
-
-// Helper function to convert SourceChild to SourceChildResponse
 
 // Helper function to convert TopicMetadata to TopicMetadataResponse
 fn topic_metadata_to_response(
@@ -858,8 +806,6 @@ pub struct OptionalUserIdQuery {
 // Comment handlers
 // ============================================================================
 
-/// GET /api/v1/audits/:audit_id/topics/:topic_id/comments
-
 /// GET /api/v1/audits/:audit_id/comments/:comment_type/:status
 /// Returns topic IDs of comments matching both the specified type and status.
 pub async fn list_comments_by_type_and_status(
@@ -872,11 +818,11 @@ pub async fn list_comments_by_type_and_status(
   );
 
   // Validate comment_type
-  if CommentType::from_str(&comment_type).is_none() {
+  if CommentType::parse_str(&comment_type).is_none() {
     return Err(StatusCode::BAD_REQUEST);
   }
 
-  // Validate status (CommentStatus::from_str has a catch-all fallback, so check explicitly)
+  // Validate status (CommentStatus::parse_str has a catch-all fallback, so check explicitly)
   match status.as_str() {
     "active" | "hidden" | "resolved" | "unanswered" | "answered"
     | "unconfirmed" | "confirmed" | "rejected" => {}
@@ -1109,25 +1055,23 @@ pub async fn update_comment_status(
       eprintln!("Mutex poisoned in update_comment_status: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    if let Some(audit_data) = ctx.get_audit_mut(&audit_id) {
-      if let Some(target_topic) = audit_data
+    if let Some(audit_data) = ctx.get_audit_mut(&audit_id)
+      && let Some(target_topic) = audit_data
         .topic_metadata
         .get(&comment_topic)
         .and_then(|m| m.target_topic())
         .cloned()
-      {
-        if payload.status == CommentStatus::Hidden {
-          if let Some(comments) =
-            audit_data.comment_index.get_mut(&target_topic)
-          {
-            comments.retain(|t| t != &comment_topic);
-          }
-        } else {
-          let comments =
-            audit_data.comment_index.entry(target_topic).or_default();
-          if !comments.contains(&comment_topic) {
-            comments.push(comment_topic);
-          }
+    {
+      if payload.status == CommentStatus::Hidden {
+        if let Some(comments) = audit_data.comment_index.get_mut(&target_topic)
+        {
+          comments.retain(|t| t != &comment_topic);
+        }
+      } else {
+        let comments =
+          audit_data.comment_index.entry(target_topic).or_default();
+        if !comments.contains(&comment_topic) {
+          comments.push(comment_topic);
         }
       }
     }
@@ -1795,9 +1739,9 @@ pub async fn create_threat_feature_link(
     .numeric_id()
     .expect("verified by parse_topic_id");
 
-  let relation = core::ThreatFeatureRelation::from_str(&payload.relation)
+  let relation = core::ThreatFeatureRelation::parse_str(&payload.relation)
     .ok_or(StatusCode::BAD_REQUEST)?;
-  let severity = core::ThreatSeverity::from_str(&payload.severity)
+  let severity = core::ThreatSeverity::parse_str(&payload.severity)
     .ok_or(StatusCode::BAD_REQUEST)?;
 
   let _row = db::create_threat_feature_link(
@@ -1844,12 +1788,11 @@ pub async fn create_threat_feature_link(
       .filter(|l| l.threat_topic == threat_topic)
       .map(|l| l.severity)
       .max();
-    if let Some(max_sev) = max_severity {
-      if let Some(core::TopicMetadata::ThreatTopic { severity: s, .. }) =
+    if let Some(max_sev) = max_severity
+      && let Some(core::TopicMetadata::ThreatTopic { severity: s, .. }) =
         audit_data.topic_metadata.get_mut(&threat_topic)
-      {
-        *s = Some(max_sev);
-      }
+    {
+      *s = Some(max_sev);
     }
   }
 

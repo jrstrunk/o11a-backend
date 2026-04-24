@@ -105,7 +105,15 @@ async fn main() {
 
   // Hydrate user-created entities from the collaboration DB. This runs after
   // `apply_report` has reseeded the ID counters, so user IDs and pipeline IDs
-  // share the same `i32` space without collision.
+  // share the same `i32` space without collision. Loading happens outside the
+  // mutex so we never hold a `std::sync::Mutex` guard across an `.await`.
+  let user_entities_snapshot =
+    collab_db::load_user_entities_snapshot(&pool, &audit_id)
+      .await
+      .unwrap_or_else(|e| {
+        eprintln!("error: failed to load user-created entities: {}", e);
+        std::process::exit(1);
+      });
   {
     let mut ctx = data_context.lock().unwrap();
     let audit_data = ctx.get_audit_mut(&audit_id).unwrap_or_else(|| {
@@ -115,25 +123,21 @@ async fn main() {
       );
       std::process::exit(1);
     });
-    if let Err(e) =
-      collab_db::apply_user_entities(&pool, &audit_id, audit_data).await
-    {
-      eprintln!("error: failed to load user-created entities: {}", e);
-      std::process::exit(1);
-    }
+    collab_db::apply_user_entities_snapshot(audit_data, user_entities_snapshot);
   }
 
   // Load and parse all comments (collaboration state, unaffected by the
-  // JSON handoff).
+  // JSON handoff). Same split-load/sync-apply pattern as above.
   println!("Loading comments...");
+  let comments = collab_db::load_visible_comments(&pool)
+    .await
+    .unwrap_or_else(|e| {
+      eprintln!("Warning: Failed to load comments: {}", e);
+      Vec::new()
+    });
   let comment_count = {
     let mut ctx = data_context.lock().unwrap();
-    collab_db::load_and_parse_all_comments(&pool, &mut ctx)
-      .await
-      .unwrap_or_else(|e| {
-        eprintln!("Warning: Failed to load comments: {}", e);
-        0
-      })
+    collab_db::ingest_loaded_comments(&mut ctx, &comments)
   };
 
   println!("Loaded {} comments", comment_count);

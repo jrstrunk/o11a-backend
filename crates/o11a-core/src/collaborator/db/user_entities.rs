@@ -380,24 +380,77 @@ async fn load_user_feature_behavior_links(
 // Apply
 // ============================================================================
 
-/// Hydrate `audit_data` with all user-created entities (features, requirements,
-/// behaviors, functional semantics) for `audit_id`. Must be called *after*
-/// `report::apply_report` so that pipeline IDs have already reseeded the
-/// counters; user-entity IDs loaded here share the same `i32` space as
-/// pipeline IDs (pipeline IDs own 1..=N, user IDs continue from N+1).
+/// All rows for an audit's user-created entities, loaded in one go so the
+/// caller can apply them under a synchronous mutex without holding the lock
+/// across `.await` points.
+pub struct UserEntitiesSnapshot {
+  pub features: Vec<UserFeatureRow>,
+  pub requirements: Vec<(UserRequirementRow, Vec<String>)>,
+  pub behaviors: Vec<UserBehaviorRow>,
+  pub functional_semantics: Vec<(UserFunctionalSemanticRow, Vec<String>)>,
+  pub feature_requirement_links: Vec<(i64, String)>,
+  pub feature_behavior_links: Vec<(i64, String)>,
+}
+
+/// Load every user-entity row for `audit_id` in one pass. Pure I/O; no
+/// mutation of `AuditData`. Pair with `apply_user_entities_snapshot`.
+pub async fn load_user_entities_snapshot(
+  pool: &SqlitePool,
+  audit_id: &str,
+) -> Result<UserEntitiesSnapshot, sqlx::Error> {
+  let features = load_user_features(pool, audit_id).await?;
+  let requirement_rows = load_user_requirements(pool, audit_id).await?;
+  let behaviors = load_user_behaviors(pool, audit_id).await?;
+  let semantic_rows = load_user_functional_semantics(pool, audit_id).await?;
+
+  let mut requirements = Vec::with_capacity(requirement_rows.len());
+  for r in requirement_rows {
+    let docs = load_user_requirement_documentation_topics(pool, r.id).await?;
+    requirements.push((r, docs));
+  }
+
+  let mut functional_semantics = Vec::with_capacity(semantic_rows.len());
+  for s in semantic_rows {
+    let docs =
+      load_user_functional_semantic_documentation_topics(pool, s.id).await?;
+    functional_semantics.push((s, docs));
+  }
+
+  let feature_requirement_links =
+    load_user_feature_requirement_links(pool, audit_id).await?;
+  let feature_behavior_links =
+    load_user_feature_behavior_links(pool, audit_id).await?;
+
+  Ok(UserEntitiesSnapshot {
+    features,
+    requirements,
+    behaviors,
+    functional_semantics,
+    feature_requirement_links,
+    feature_behavior_links,
+  })
+}
+
+/// Hydrate `audit_data` from a snapshot. Synchronous so callers can hold a
+/// `std::sync::Mutex` guard while calling without crossing an await point.
+/// Must be called *after* `report::apply_report` so pipeline IDs have already
+/// reseeded the counters; user-entity IDs loaded here share the same `i32`
+/// space as pipeline IDs (pipeline IDs own 1..=N, user IDs continue from N+1).
 ///
 /// Callers should invoke `crate::core::rebuild_feature_context` after this
 /// so reverse indexes pick up the new topic metadata.
-pub async fn apply_user_entities(
-  pool: &SqlitePool,
-  audit_id: &str,
+pub fn apply_user_entities_snapshot(
   audit_data: &mut AuditData,
-) -> Result<(), sqlx::Error> {
-  let features = load_user_features(pool, audit_id).await?;
-  let requirements = load_user_requirements(pool, audit_id).await?;
-  let behaviors = load_user_behaviors(pool, audit_id).await?;
-  let functional_semantics =
-    load_user_functional_semantics(pool, audit_id).await?;
+  snapshot: UserEntitiesSnapshot,
+) {
+  let UserEntitiesSnapshot {
+    features,
+    requirements,
+    behaviors,
+    functional_semantics,
+    feature_requirement_links,
+    feature_behavior_links,
+  } = snapshot;
 
   for f in &features {
     let topic = topic::new_feature_topic(f.id as i32);
@@ -413,17 +466,13 @@ pub async fn apply_user_entities(
     );
   }
 
-  for r in &requirements {
+  for (r, doc_ids) in &requirements {
     let topic = topic::new_requirement_topic(r.id as i32);
     let section_topic =
       topic::new_topic(r.section_topic.as_deref().unwrap_or(""));
 
     let documentation_topics: Vec<topic::Topic> =
-      load_user_requirement_documentation_topics(pool, r.id)
-        .await?
-        .into_iter()
-        .map(|id| topic::new_topic(&id))
-        .collect();
+      doc_ids.iter().map(|id| topic::new_topic(id)).collect();
 
     audit_data.requirements.insert(
       topic.clone(),
@@ -459,15 +508,11 @@ pub async fn apply_user_entities(
     );
   }
 
-  for s in &functional_semantics {
+  for (s, doc_ids) in &functional_semantics {
     let topic = topic::new_functional_property_topic(s.id as i32);
     let declaration_topic = topic::new_topic(&s.declaration_topic);
     let documentation_topics: Vec<topic::Topic> =
-      load_user_functional_semantic_documentation_topics(pool, s.id)
-        .await?
-        .into_iter()
-        .map(|id| topic::new_topic(&id))
-        .collect();
+      doc_ids.iter().map(|id| topic::new_topic(id)).collect();
     audit_data.topic_metadata.insert(
       topic.clone(),
       TopicMetadata::FunctionalSemanticTopic {
@@ -481,9 +526,7 @@ pub async fn apply_user_entities(
     );
   }
 
-  for (user_feature_id, requirement_topic) in
-    load_user_feature_requirement_links(pool, audit_id).await?
-  {
+  for (user_feature_id, requirement_topic) in feature_requirement_links {
     let feature_topic = topic::new_feature_topic(user_feature_id as i32);
     audit_data
       .feature_requirement_links
@@ -492,9 +535,7 @@ pub async fn apply_user_entities(
       .push(topic::new_topic(&requirement_topic));
   }
 
-  for (user_feature_id, behavior_topic) in
-    load_user_feature_behavior_links(pool, audit_id).await?
-  {
+  for (user_feature_id, behavior_topic) in feature_behavior_links {
     let feature_topic = topic::new_feature_topic(user_feature_id as i32);
     audit_data
       .feature_behavior_links
@@ -502,6 +543,4 @@ pub async fn apply_user_entities(
       .or_default()
       .push(topic::new_topic(&behavior_topic));
   }
-
-  Ok(())
 }

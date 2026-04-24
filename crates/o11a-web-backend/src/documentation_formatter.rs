@@ -26,6 +26,7 @@ pub fn node_to_html_with_semantics(
   do_node_to_html(node, 0, nodes_map, Some(semantics))
 }
 
+#[allow(clippy::only_used_in_recursion)]
 fn do_node_to_html(
   node: &DocumentationNode,
   indent_level: usize,
@@ -130,19 +131,18 @@ fn do_node_to_html(
             referenced_topic: Some(t),
             ..
           } = child.resolve(nodes_map)
+            && let Some(sems) = sem_map.get(t)
           {
-            if let Some(sems) = sem_map.get(t) {
-              let joined: String = sems
-                .iter()
-                .map(|s| formatting::html_escape(s))
-                .collect::<Vec<_>>()
-                .join("; ");
-              if !joined.is_empty() {
-                return format!(
-                  "{} <span class=\"semantic\" style=\"opacity: 0.7; font-style: italic;\">({})</span>",
-                  code_html, joined
-                );
-              }
+            let joined: String = sems
+              .iter()
+              .map(|s| formatting::html_escape(s))
+              .collect::<Vec<_>>()
+              .join("; ");
+            if !joined.is_empty() {
+              return format!(
+                "{} <span class=\"semantic\" style=\"opacity: 0.7; font-style: italic;\">({})</span>",
+                code_html, joined
+              );
             }
           }
         }

@@ -110,58 +110,59 @@ fn scan_inline_nodes(
     let b = bytes[i];
 
     // Backtick: inline code
-    if b == b'`' {
-      if let Some((code, end)) = scan_backtick(input, i) {
-        flush_text(&mut text_buf, &mut nodes);
-        let children = tokenize_comment_code(code, audit_data);
-        nodes.push(CommentNode::InlineCode {
-          value: code.to_string(),
-          children,
-        });
-        i = end;
-        continue;
-      }
+    if b == b'`'
+      && let Some((code, end)) = scan_backtick(input, i)
+    {
+      flush_text(&mut text_buf, &mut nodes);
+      let children = tokenize_comment_code(code, audit_data);
+      nodes.push(CommentNode::InlineCode {
+        value: code.to_string(),
+        children,
+      });
+      i = end;
+      continue;
     }
 
     // `**`: strong
-    if b == b'*' && i + 1 < len && bytes[i + 1] == b'*' {
-      if let Some((inner, end)) = scan_double_star(input, i) {
-        if !inner.is_empty() {
-          flush_text(&mut text_buf, &mut nodes);
-          nodes.push(CommentNode::Strong {
-            text: inner.to_string(),
-          });
-          i = end;
-          continue;
-        }
-      }
+    if b == b'*'
+      && i + 1 < len
+      && bytes[i + 1] == b'*'
+      && let Some((inner, end)) = scan_double_star(input, i)
+      && !inner.is_empty()
+    {
+      flush_text(&mut text_buf, &mut nodes);
+      nodes.push(CommentNode::Strong {
+        text: inner.to_string(),
+      });
+      i = end;
+      continue;
     }
 
     // `*`: emphasis (single, not `**`)
-    if b == b'*' && !(i + 1 < len && bytes[i + 1] == b'*') {
-      if let Some((inner, end)) = scan_single_star(input, i) {
-        if !inner.is_empty() {
-          flush_text(&mut text_buf, &mut nodes);
-          nodes.push(CommentNode::Emphasis {
-            text: inner.to_string(),
-          });
-          i = end;
-          continue;
-        }
-      }
+    if b == b'*'
+      && !(i + 1 < len && bytes[i + 1] == b'*')
+      && let Some((inner, end)) = scan_single_star(input, i)
+      && !inner.is_empty()
+    {
+      flush_text(&mut text_buf, &mut nodes);
+      nodes.push(CommentNode::Emphasis {
+        text: inner.to_string(),
+      });
+      i = end;
+      continue;
     }
 
     // `[text](url)`: link
-    if b == b'[' {
-      if let Some((text, url, end)) = scan_link(input, i) {
-        flush_text(&mut text_buf, &mut nodes);
-        nodes.push(CommentNode::Link {
-          text: text.to_string(),
-          url: url.to_string(),
-        });
-        i = end;
-        continue;
-      }
+    if b == b'['
+      && let Some((text, url, end)) = scan_link(input, i)
+    {
+      flush_text(&mut text_buf, &mut nodes);
+      nodes.push(CommentNode::Link {
+        text: text.to_string(),
+        url: url.to_string(),
+      });
+      i = end;
+      continue;
     }
 
     // Default: accumulate text

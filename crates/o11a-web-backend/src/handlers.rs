@@ -37,10 +37,10 @@ pub async fn get_source_text(
       eprintln!("Source text cache poisoned: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    if let Some(inner) = cache.get(&audit_id) {
-      if let Some(html) = inner.get(&topic_id) {
-        return Ok(Html(html.clone()));
-      }
+    if let Some(inner) = cache.get(&audit_id)
+      && let Some(html) = inner.get(&topic_id)
+    {
+      return Ok(Html(html.clone()));
     }
   }
 
@@ -284,26 +284,25 @@ pub async fn get_documentation_panel(
     let t = new_topic(id);
     related_topics.push(t.clone());
 
-    if t.kind() == Some(TopicKind::Requirement) {
-      if let Some(req) = audit_data.requirements.get(&t) {
-        for dt in &req.documentation_topics {
-          if !mention_topics.contains(dt) {
-            mention_topics.push(dt.clone());
-          }
+    if t.kind() == Some(TopicKind::Requirement)
+      && let Some(req) = audit_data.requirements.get(&t)
+    {
+      for dt in &req.documentation_topics {
+        if !mention_topics.contains(dt) {
+          mention_topics.push(dt.clone());
         }
       }
     }
 
-    if t.kind() == Some(TopicKind::FunctionalProperty) {
-      if let Some(core::TopicMetadata::FunctionalSemanticTopic {
+    if t.kind() == Some(TopicKind::FunctionalProperty)
+      && let Some(core::TopicMetadata::FunctionalSemanticTopic {
         documentation_topics,
         ..
       }) = audit_data.topic_metadata.get(&t)
-      {
-        for dt in documentation_topics {
-          if !mention_topics.contains(dt) {
-            mention_topics.push(dt.clone());
-          }
+    {
+      for dt in documentation_topics {
+        if !mention_topics.contains(dt) {
+          mention_topics.push(dt.clone());
         }
       }
     }
@@ -314,10 +313,10 @@ pub async fn get_documentation_panel(
         | core::Scope::ContainingBlock { member, .. } => Some(member.clone()),
         _ => None,
       };
-      if let Some(mt) = member {
-        if !related_topics.contains(&mt) {
-          related_topics.push(mt);
-        }
+      if let Some(mt) = member
+        && !related_topics.contains(&mt)
+      {
+        related_topics.push(mt);
       }
     }
   }

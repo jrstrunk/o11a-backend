@@ -47,7 +47,7 @@ impl CommentStatus {
     }
   }
 
-  pub fn from_str(s: &str) -> Self {
+  pub fn parse_str(s: &str) -> Self {
     match s {
       "hidden" => CommentStatus::Hidden,
       "resolved" => CommentStatus::Resolved,
@@ -132,7 +132,7 @@ impl Comment {
   /// Panics if the stored type string is not a known variant. This indicates
   /// a data integrity issue in the database.
   pub fn get_comment_type(&self) -> CommentType {
-    CommentType::from_str(&self.comment_type).unwrap_or_else(|| {
+    CommentType::parse_str(&self.comment_type).unwrap_or_else(|| {
       panic!(
         "Unknown comment type '{}' in comment {}",
         self.comment_type, self.id
@@ -142,7 +142,7 @@ impl Comment {
 
   /// Returns the parsed comment status
   pub fn get_status(&self) -> CommentStatus {
-    CommentStatus::from_str(&self.status)
+    CommentStatus::parse_str(&self.status)
   }
 }
 

@@ -214,19 +214,17 @@ fn collect_definitions_from_node(
       node_id, signature, ..
     } => {
       if let ASTNode::ModifierSignature { parameters, .. } = signature.as_ref()
-      {
-        if let ASTNode::ParameterList {
+        && let ASTNode::ParameterList {
           parameters: params, ..
         } = parameters.as_ref()
-        {
-          callables.insert(
-            *node_id,
-            CallableDefinition {
-              parameters: params.clone(),
-              return_parameters: Vec::new(),
-            },
-          );
-        }
+      {
+        callables.insert(
+          *node_id,
+          CallableDefinition {
+            parameters: params.clone(),
+            return_parameters: Vec::new(),
+          },
+        );
       }
     }
 
@@ -316,14 +314,13 @@ fn extract_contract_info(
   let base_contract_ids: Vec<i32> = base_contracts
     .iter()
     .filter_map(|spec| {
-      if let ASTNode::InheritanceSpecifier { base_name, .. } = spec {
-        if let ASTNode::IdentifierPath {
+      if let ASTNode::InheritanceSpecifier { base_name, .. } = spec
+        && let ASTNode::IdentifierPath {
           referenced_declaration,
           ..
         } = base_name.as_ref()
-        {
-          return Some(*referenced_declaration);
-        }
+      {
+        return Some(*referenced_declaration);
       }
       None
     })
@@ -482,7 +479,7 @@ fn build_interface_member_map(
     for &base_id in &contract.base_contract_ids {
       interface_implementations
         .entry(base_id)
-        .or_insert_with(Vec::new)
+        .or_default()
         .push(contract.node_id);
     }
   }
@@ -548,14 +545,13 @@ fn build_interface_member_map(
         member_map.insert(iface_func.node_id, state_var.node_id);
       }
       // Fall back to name matching for state variables with no parameters
-      else if iface_func.parameter_types.is_empty() {
-        if let Some(state_var) = implementation
+      else if iface_func.parameter_types.is_empty()
+        && let Some(state_var) = implementation
           .public_state_variables
           .iter()
           .find(|sv| sv.name == iface_func.name)
-        {
-          member_map.insert(iface_func.node_id, state_var.node_id);
-        }
+      {
+        member_map.insert(iface_func.node_id, state_var.node_id);
       }
     }
   }
@@ -720,12 +716,11 @@ fn transform_node(node: &mut ASTNode, context: &TransformContext) {
       expression,
       ..
     } => {
-      if let Some(ref_decl) = referenced_declaration {
-        if let Some(&impl_id) =
+      if let Some(ref_decl) = referenced_declaration
+        && let Some(&impl_id) =
           context.interface_to_implementation.get(ref_decl)
-        {
-          *referenced_declaration = Some(impl_id);
-        }
+      {
+        *referenced_declaration = Some(impl_id);
       }
 
       // Recurse into expression
@@ -880,8 +875,7 @@ fn extract_attached_type(type_identifier: &str) -> Option<String> {
   let type_str = &after_marker[..end];
 
   // Handle contract types: "contract$_ContractName_$12345" -> "ContractName"
-  if type_str.starts_with("contract$_") {
-    let after_contract = &type_str["contract$_".len()..];
+  if let Some(after_contract) = type_str.strip_prefix("contract$_") {
     // Find the next "_$" which separates the name from the ID
     if let Some(name_end) = after_contract.find("_$") {
       return Some(after_contract[..name_end].to_string());

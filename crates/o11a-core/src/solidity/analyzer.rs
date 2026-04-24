@@ -112,7 +112,7 @@ pub fn analyze(
   // Build name index for fast topic lookup. Required by dev doc injection
   // (which resolves code references in developer prose) and by the
   // documentation analyzer (which resolves inline code tokens).
-  audit_data.name_index = core::TopicNameIndex::build(&audit_data);
+  audit_data.name_index = core::TopicNameIndex::build(audit_data);
 
   // Inject developer documentation from source code as synthetic in-memory
   // CommentTopics. Inline comments on SemanticBlocks become DevTechnical
@@ -303,12 +303,11 @@ fn parse_elementary_type_name(name: &str) -> Option<ElementaryType> {
     "bytes" => Some(ElementaryType::Bytes),
     _ => {
       // Try to parse bytesN (bytes1 to bytes32)
-      if let Some(suffix) = name.strip_prefix("bytes") {
-        if let Ok(n) = suffix.parse::<u8>() {
-          if n >= 1 && n <= 32 {
-            return Some(ElementaryType::FixedBytes(n));
-          }
-        }
+      if let Some(suffix) = name.strip_prefix("bytes")
+        && let Ok(n) = suffix.parse::<u8>()
+        && (1..=32).contains(&n)
+      {
+        return Some(ElementaryType::FixedBytes(n));
       }
       // Try to parse uintN (uint8 to uint256)
       if let Some(suffix) = name.strip_prefix("uint") {
@@ -316,10 +315,11 @@ fn parse_elementary_type_name(name: &str) -> Option<ElementaryType> {
           // "uint" defaults to uint256
           return Some(ElementaryType::Uint { bits: 256 });
         }
-        if let Ok(bits) = suffix.parse::<u16>() {
-          if bits >= 8 && bits <= 256 && bits % 8 == 0 {
-            return Some(ElementaryType::Uint { bits });
-          }
+        if let Ok(bits) = suffix.parse::<u16>()
+          && (8..=256).contains(&bits)
+          && bits % 8 == 0
+        {
+          return Some(ElementaryType::Uint { bits });
         }
       }
       // Try to parse intN (int8 to int256)
@@ -328,10 +328,11 @@ fn parse_elementary_type_name(name: &str) -> Option<ElementaryType> {
           // "int" defaults to int256
           return Some(ElementaryType::Int { bits: 256 });
         }
-        if let Ok(bits) = suffix.parse::<u16>() {
-          if bits >= 8 && bits <= 256 && bits % 8 == 0 {
-            return Some(ElementaryType::Int { bits });
-          }
+        if let Ok(bits) = suffix.parse::<u16>()
+          && (8..=256).contains(&bits)
+          && bits % 8 == 0
+        {
+          return Some(ElementaryType::Int { bits });
         }
       }
       None
@@ -457,7 +458,7 @@ fn ancestry_pass(
   let mut ancestors_map = AncestorsMap::new();
   let mut relatives_map = RelativesMap::new();
 
-  for (_path, asts) in ast_map {
+  for asts in ast_map.values() {
     for ast in asts {
       for node in &ast.nodes {
         collect_ancestry_from_node(
@@ -827,7 +828,7 @@ fn process_first_pass_ast_nodes(
         ..
       } => {
         let declaration_kind = if *state_variable {
-          NamedTopicKind::StateVariable(mutability.clone())
+          NamedTopicKind::StateVariable(*mutability)
         } else {
           NamedTopicKind::LocalVariable
         };
@@ -982,7 +983,7 @@ fn populate_nodes_pass(
   in_scope_source_topics: &BTreeMap<i32, InScopeDeclaration>,
   nodes: &mut BTreeMap<topic::Topic, Node>,
 ) {
-  for (_file_path, asts) in ast_map {
+  for asts in ast_map.values() {
     for ast in asts {
       for node in &ast.nodes {
         populate_nodes_recursive(node, false, in_scope_source_topics, nodes);
@@ -1198,6 +1199,7 @@ fn build_source_context(
 
 /// Builds reference groups for expanded_context, sorted by ancestor/descendant counts.
 /// Groups are post-sorted: in-scope first, then by ancestry counts.
+#[allow(clippy::too_many_arguments)]
 fn build_expanded_source_context(
   scoped_refs: &[ScopedReference],
   ancestors: &HashSet<i32>,
@@ -1224,16 +1226,16 @@ fn build_expanded_source_context(
   };
 
   for &var_id in ancestors.iter().chain(descendants.iter()) {
-    if let Some(scope) = declaration_scopes.get(&var_id) {
-      if let Some(contract_id) = get_component_id(scope) {
-        let (ancestor_count, descendant_count) =
-          contract_ancestry_counts.entry(contract_id).or_default();
-        if ancestors.contains(&var_id) {
-          *ancestor_count += 1;
-        }
-        if descendants.contains(&var_id) {
-          *descendant_count += 1;
-        }
+    if let Some(scope) = declaration_scopes.get(&var_id)
+      && let Some(contract_id) = get_component_id(scope)
+    {
+      let (ancestor_count, descendant_count) =
+        contract_ancestry_counts.entry(contract_id).or_default();
+      if ancestors.contains(&var_id) {
+        *ancestor_count += 1;
+      }
+      if descendants.contains(&var_id) {
+        *descendant_count += 1;
       }
     }
   }
@@ -1352,10 +1354,10 @@ fn get_scope_name(
   scope_topic: &topic::Topic,
   in_scope_source_topics: &BTreeMap<i32, InScopeDeclaration>,
 ) -> String {
-  if let Ok(node_id) = scope_topic.underlying_id() {
-    if let Some(decl) = in_scope_source_topics.get(&node_id) {
-      return decl.name().clone();
-    }
+  if let Ok(node_id) = scope_topic.underlying_id()
+    && let Some(decl) = in_scope_source_topics.get(&node_id)
+  {
+    return decl.name().clone();
   }
   scope_topic.id().to_string()
 }
@@ -1364,6 +1366,7 @@ fn get_scope_name(
 /// This processes each AST one at a time, checking declarations for inclusion in the
 /// in-scope dictionary. When found, adds the node and all child nodes to the accumulating
 /// data structures.
+#[allow(clippy::too_many_arguments)]
 fn second_pass(
   ast_map: &BTreeMap<core::ProjectPath, Vec<SolidityAST>>,
   in_scope_source_topics: &BTreeMap<i32, InScopeDeclaration>,
@@ -1430,6 +1433,7 @@ fn second_pass(
 
 /// Recursively process nodes during the second pass
 /// If parent_in_scope is true, all nodes are assumed to be in scope
+#[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
 fn process_second_pass_nodes(
   ast_nodes: &Vec<&ASTNode>,
   parent_in_scope: bool,
@@ -1603,10 +1607,10 @@ fn process_second_pass_nodes(
       }
 
       // Extract variable types for VariableDeclaration nodes
-      if let ASTNode::VariableDeclaration { type_name, .. } = node {
-        if let Some(solidity_type) = extract_solidity_type(type_name) {
-          variable_types.insert(topic.clone(), solidity_type);
-        }
+      if let ASTNode::VariableDeclaration { type_name, .. } = node
+        && let Some(solidity_type) = extract_solidity_type(type_name)
+      {
+        variable_types.insert(topic.clone(), solidity_type);
       }
     } else {
       // Control flow nodes get their own TopicMetadata variant
@@ -2324,15 +2328,13 @@ fn collect_references_and_statements(
         parser::UnaryOperator::Increment
           | parser::UnaryOperator::Decrement
           | parser::UnaryOperator::Delete
-      ) {
-        if let Some(referenced_declaration) =
-          extract_base_variable_reference(sub_expression)
-        {
-          variable_mutations.push(ReferencedNode {
-            statement_node: *node_id,
-            referenced_node: referenced_declaration,
-          });
-        }
+      ) && let Some(referenced_declaration) =
+        extract_base_variable_reference(sub_expression)
+      {
+        variable_mutations.push(ReferencedNode {
+          statement_node: *node_id,
+          referenced_node: referenced_declaration,
+        });
       }
     }
 
@@ -2480,10 +2482,12 @@ fn visibility_to_named_topic_visibility(
 /// Returns a tuple of:
 /// - A map of node_id to InScopeDeclaration containing all nodes that reference each declaration
 /// - A map of variable node_id to Vec of mutation node_ids (assignment/unary operation nodes)
+type TreeShakeResult =
+  (BTreeMap<i32, InScopeDeclaration>, BTreeMap<i32, Vec<i32>>);
+
 fn tree_shake(
   first_pass_declarations: &BTreeMap<i32, FirstPassDeclaration>,
-) -> Result<(BTreeMap<i32, InScopeDeclaration>, BTreeMap<i32, Vec<i32>>), String>
-{
+) -> Result<TreeShakeResult, String> {
   let mut in_scope_declarations = BTreeMap::new();
   let mut mutations_map: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
   let mut visiting = HashSet::new(); // For cycle detection
@@ -2518,6 +2522,7 @@ fn tree_shake(
 }
 
 /// Recursively process a declaration and all its references
+#[allow(clippy::too_many_arguments)]
 fn process_tree_shake_declarations(
   node_id: i32,
   referencing_info: Option<ScopedReference>, // The reference with its scope context
@@ -2589,7 +2594,7 @@ fn process_tree_shake_declarations(
       for mutation in variable_mutations {
         mutations_map
           .entry(mutation.referenced_node)
-          .or_insert_with(Vec::new)
+          .or_default()
           .push(mutation.statement_node);
       }
 
@@ -2834,39 +2839,37 @@ fn collect_ancestry_from_node(
         referenced_return_declarations,
         ..
       } = init_value.as_ref()
+        && referenced_return_declarations.len() > 1
+        && declarations.len() == referenced_return_declarations.len()
       {
-        if referenced_return_declarations.len() > 1
-          && declarations.len() == referenced_return_declarations.len()
-        {
-          // Multi-return case: pair each declaration with its corresponding return declaration
-          // The return declaration is a relative of this variable (involved in assignment)
-          for (i, decl) in declarations.iter().enumerate() {
-            if let ASTNode::VariableDeclaration { node_id, .. } = decl {
-              add_relatives_unidirectional(
-                relatives_map,
-                *node_id,
-                &[referenced_return_declarations[i]],
-              );
-            }
+        // Multi-return case: pair each declaration with its corresponding return declaration
+        // The return declaration is a relative of this variable (involved in assignment)
+        for (i, decl) in declarations.iter().enumerate() {
+          if let ASTNode::VariableDeclaration { node_id, .. } = decl {
+            add_relatives_unidirectional(
+              relatives_map,
+              *node_id,
+              &[referenced_return_declarations[i]],
+            );
           }
-          // Also recurse into the function call to process its arguments
+        }
+        // Also recurse into the function call to process its arguments
+        collect_ancestry_from_node(
+          init_value,
+          context,
+          ancestors_map,
+          relatives_map,
+        );
+        // Recurse into declarations (they may have nested structures)
+        for decl in declarations {
           collect_ancestry_from_node(
-            init_value,
+            decl,
             context,
             ancestors_map,
             relatives_map,
           );
-          // Recurse into declarations (they may have nested structures)
-          for decl in declarations {
-            collect_ancestry_from_node(
-              decl,
-              context,
-              ancestors_map,
-              relatives_map,
-            );
-          }
-          return;
         }
+        return;
       }
 
       // Single variable or single-return function call case
@@ -3142,21 +3145,19 @@ fn extract_return_parameter_ids(signature: &ASTNode) -> Vec<i32> {
   if let ASTNode::FunctionSignature {
     return_parameters, ..
   } = signature
-  {
-    if let ASTNode::ParameterList { parameters, .. } =
+    && let ASTNode::ParameterList { parameters, .. } =
       return_parameters.as_ref()
-    {
-      return parameters
-        .iter()
-        .filter_map(|p| {
-          if let ASTNode::VariableDeclaration { node_id, .. } = p {
-            Some(*node_id)
-          } else {
-            None
-          }
-        })
-        .collect();
-    }
+  {
+    return parameters
+      .iter()
+      .filter_map(|p| {
+        if let ASTNode::VariableDeclaration { node_id, .. } = p {
+          Some(*node_id)
+        } else {
+          None
+        }
+      })
+      .collect();
   }
   Vec::new()
 }
@@ -3319,7 +3320,7 @@ fn add_ancestors(
     return;
   }
 
-  let entry = ancestors_map.entry(target_id).or_insert_with(Vec::new);
+  let entry = ancestors_map.entry(target_id).or_default();
   for &ancestor_id in ancestor_ids {
     // Don't add self-references
     if ancestor_id != target_id && !entry.contains(&ancestor_id) {
@@ -3340,7 +3341,7 @@ fn add_relatives_unidirectional(
     return;
   }
 
-  let entry = relatives_map.entry(target_id).or_insert_with(Vec::new);
+  let entry = relatives_map.entry(target_id).or_default();
   for &relative_id in relative_ids {
     // Don't add self-references
     if relative_id != target_id && !entry.contains(&relative_id) {
@@ -3358,7 +3359,7 @@ fn add_relatives_bidirectional(
 ) {
   // Add right IDs as relatives of each left ID
   for &left_id in left_ids {
-    let entry = relatives_map.entry(left_id).or_insert_with(Vec::new);
+    let entry = relatives_map.entry(left_id).or_default();
     for &right_id in right_ids {
       if right_id != left_id && !entry.contains(&right_id) {
         entry.push(right_id);
@@ -3368,7 +3369,7 @@ fn add_relatives_bidirectional(
 
   // Add left IDs as relatives of each right ID
   for &right_id in right_ids {
-    let entry = relatives_map.entry(right_id).or_insert_with(Vec::new);
+    let entry = relatives_map.entry(right_id).or_default();
     for &left_id in left_ids {
       if left_id != right_id && !entry.contains(&left_id) {
         entry.push(left_id);
@@ -3508,10 +3509,10 @@ fn populate_context(
 
   // Update each named topic with context
   for (topic, metadata) in topic_metadata.iter() {
-    if let Some(refs) = refs_map.get(topic) {
-      if matches!(metadata, TopicMetadata::NamedTopic { .. }) {
-        topic_context.insert(topic.clone(), refs.clone());
-      }
+    if let Some(refs) = refs_map.get(topic)
+      && matches!(metadata, TopicMetadata::NamedTopic { .. })
+    {
+      topic_context.insert(topic.clone(), refs.clone());
     }
   }
 
@@ -3523,18 +3524,18 @@ fn populate_context(
       | TopicMetadata::ControlFlow { topic, scope, .. }
       | TopicMetadata::TitledTopic { topic, scope, .. }
       | TopicMetadata::CommentTopic { topic, scope, .. } => {
-        if let Some(node_id) = topic.underlying_id().ok() {
-          if let Some(self_ref) = scope_to_self_reference(scope, node_id) {
-            let context = build_source_context(
-              &[],
-              Some(self_ref),
-              &scope_map,
-              nodes,
-              in_scope_source_topics,
-              in_scope_files,
-            );
-            topic_context.insert(topic.clone(), context);
-          }
+        if let Ok(node_id) = topic.underlying_id()
+          && let Some(self_ref) = scope_to_self_reference(scope, node_id)
+        {
+          let context = build_source_context(
+            &[],
+            Some(self_ref),
+            &scope_map,
+            nodes,
+            in_scope_source_topics,
+            in_scope_files,
+          );
+          topic_context.insert(topic.clone(), context);
         }
       }
       TopicMetadata::FeatureTopic { .. }
@@ -3554,6 +3555,7 @@ fn populate_context(
 ///
 /// This was written by Claude Code and I think it is pretty bloated, but
 /// it works.
+#[allow(clippy::too_many_arguments)]
 fn populate_expanded_context(
   topic_metadata: &BTreeMap<topic::Topic, TopicMetadata>,
   expanded_topic_context: &mut BTreeMap<topic::Topic, Vec<SourceContext>>,
@@ -3613,25 +3615,25 @@ fn populate_expanded_context(
           BTreeMap::new();
 
         for &rel_id in &all_related {
-          if let Some(scope) = scope_map.get(&rel_id) {
-            if let Some(self_ref) = scope_to_self_reference(scope, rel_id) {
-              // Check if this declaration is inside a containing block
-              let containing_block_id = match scope {
-                Scope::ContainingBlock {
-                  containing_blocks, ..
-                } => containing_blocks
-                  .last()
-                  .and_then(|layer| layer.block.underlying_id().ok()),
-                _ => None,
-              };
+          if let Some(scope) = scope_map.get(&rel_id)
+            && let Some(self_ref) = scope_to_self_reference(scope, rel_id)
+          {
+            // Check if this declaration is inside a containing block
+            let containing_block_id = match scope {
+              Scope::ContainingBlock {
+                containing_blocks, ..
+              } => containing_blocks
+                .last()
+                .and_then(|layer| layer.block.underlying_id().ok()),
+              _ => None,
+            };
 
-              // Track the mapping from declaration to its containing block
-              if let Some(block_id) = containing_block_id {
-                declaration_to_containing_block.insert(rel_id, block_id);
-              }
-
-              pending_self_refs.push((self_ref, containing_block_id));
+            // Track the mapping from declaration to its containing block
+            if let Some(block_id) = containing_block_id {
+              declaration_to_containing_block.insert(rel_id, block_id);
             }
+
+            pending_self_refs.push((self_ref, containing_block_id));
           }
         }
 
@@ -3674,7 +3676,7 @@ fn populate_expanded_context(
               let dominated_by_containing_block =
                 declaration_to_containing_block
                   .get(&reference.reference_node)
-                  .map_or(false, |block_id| {
+                  .is_some_and(|block_id| {
                     all_reference_nodes.contains(block_id)
                   });
 
@@ -3748,10 +3750,7 @@ fn filter_and_derive_descendants(
 
       // Build descendants: for each ancestor, this variable is a descendant
       for ancestor_id in filtered_ancestor_ids {
-        descendants
-          .entry(ancestor_id)
-          .or_insert_with(Vec::new)
-          .push(var_id);
+        descendants.entry(ancestor_id).or_default().push(var_id);
       }
     }
   }
@@ -3842,7 +3841,7 @@ fn inject_developer_documentation(audit_data: &mut AuditData) {
         ..
       } => {
         if let Some(sig_doc) =
-          extract_signature_doc(node_topic, &documentation, &audit_data.nodes)
+          extract_signature_doc(node_topic, documentation, &audit_data.nodes)
         {
           let param_map =
             build_param_map(parameters.as_ref(), &audit_data.nodes);
@@ -3864,7 +3863,7 @@ fn inject_developer_documentation(audit_data: &mut AuditData) {
         ..
       } => {
         if let Some(sig_doc) =
-          extract_signature_doc(node_topic, &documentation, &audit_data.nodes)
+          extract_signature_doc(node_topic, documentation, &audit_data.nodes)
         {
           let param_map =
             build_param_map(parameters.as_ref(), &audit_data.nodes);
@@ -3880,7 +3879,7 @@ fn inject_developer_documentation(audit_data: &mut AuditData) {
       // Contract NatSpec docstrings
       ASTNode::ContractSignature { documentation, .. } => {
         if let Some(sig_doc) =
-          extract_signature_doc(node_topic, &documentation, &audit_data.nodes)
+          extract_signature_doc(node_topic, documentation, &audit_data.nodes)
         {
           signature_docs.push(SignatureDoc {
             signature_topic: sig_doc.0,
@@ -4044,10 +4043,10 @@ fn build_param_map(
   };
   for param in parameters {
     let resolved_param = param.resolve(nodes_map);
-    if let ASTNode::VariableDeclaration { node_id, name, .. } = resolved_param {
-      if !name.is_empty() {
-        map.insert(name.clone(), topic::new_node_topic(node_id));
-      }
+    if let ASTNode::VariableDeclaration { node_id, name, .. } = resolved_param
+      && !name.is_empty()
+    {
+      map.insert(name.clone(), topic::new_node_topic(node_id));
     }
   }
   map
@@ -4759,7 +4758,7 @@ mod tests {
       audit_data
         .comment_index
         .get(&group_topic)
-        .map_or(true, |v| v.is_empty()),
+        .is_none_or(|v| v.is_empty()),
       "comment should not remain on the group topic when it resolves through"
     );
 
@@ -4836,11 +4835,11 @@ mod tests {
       "expected the comment to land on the group topic"
     );
     assert!(
-      audit_data.comment_index.get(&member_a_topic).is_none(),
+      !audit_data.comment_index.contains_key(&member_a_topic),
       "member A should not receive a duplicate of the group comment"
     );
     assert!(
-      audit_data.comment_index.get(&member_b_topic).is_none(),
+      !audit_data.comment_index.contains_key(&member_b_topic),
       "member B should not receive a duplicate of the group comment"
     );
   }

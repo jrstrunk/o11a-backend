@@ -55,6 +55,7 @@ impl Topic {
 
   /// Extracts the numeric ID as i32. Kept for compatibility with the
   /// many solidity analyzer call sites that expect `Result<i32, ()>`.
+  #[allow(clippy::result_unit_err)]
   pub fn underlying_id(&self) -> Result<i32, ()> {
     self
       .numeric_id()
