@@ -1786,7 +1786,9 @@ fn process_second_pass_nodes(
         // Process true body with True branch control flow added to scope
         let true_cf = domain::BlockAnnotation {
           topic: cf_topic,
-          kind: domain::BlockAnnotationKind::If(domain::ControlFlowBranch::True),
+          kind: domain::BlockAnnotationKind::If(
+            domain::ControlFlowBranch::True,
+          ),
         };
         let true_scope = domain::add_annotation_to_scope(scope, true_cf);
         process_second_pass_nodes(
@@ -1809,7 +1811,9 @@ fn process_second_pass_nodes(
         if let Some(false_body) = false_body {
           let false_cf = domain::BlockAnnotation {
             topic: cf_topic,
-            kind: domain::BlockAnnotationKind::If(domain::ControlFlowBranch::False),
+            kind: domain::BlockAnnotationKind::If(
+              domain::ControlFlowBranch::False,
+            ),
           };
           let false_scope = domain::add_annotation_to_scope(scope, false_cf);
           process_second_pass_nodes(
@@ -1986,7 +1990,8 @@ fn process_second_pass_nodes(
           topic: topic::new_node_topic(node_id),
           kind: domain::BlockAnnotationKind::Unchecked,
         };
-        let annotated_scope = domain::add_annotation_to_scope(&block_scope, ann);
+        let annotated_scope =
+          domain::add_annotation_to_scope(&block_scope, ann);
         let child_nodes: Vec<&ASTNode> = statements.iter().collect();
         process_second_pass_nodes(
           &child_nodes,
@@ -2012,7 +2017,8 @@ fn process_second_pass_nodes(
           topic: topic::new_node_topic(node_id),
           kind: domain::BlockAnnotationKind::InlineAssembly,
         };
-        let _annotated_scope = domain::add_annotation_to_scope(&block_scope, ann);
+        let _annotated_scope =
+          domain::add_annotation_to_scope(&block_scope, ann);
         // InlineAssembly has no parseable children — scope is created but
         // not walked further.
       }
@@ -3890,8 +3896,10 @@ fn inject_developer_documentation(audit_data: &mut AuditData) {
     // topic. A SemanticBlock with one child statement is transitive to
     // that child, and comments should appear on whichever topic the user
     // actually views.
-    let resolved_topic =
-      domain::resolve_transitive_topic(&target_topic, &audit_data.topic_metadata);
+    let resolved_topic = domain::resolve_transitive_topic(
+      &target_topic,
+      &audit_data.topic_metadata,
+    );
     create_synthetic_dev_comment(
       &resolved_topic,
       &doc_text,
@@ -4131,11 +4139,7 @@ fn resolve_return_target<'a>(
 
   // No name match — if single return param, target it with full text
   if return_params.len() == 1 {
-    return Some((
-      return_params[0].0.clone(),
-      text,
-      return_params[0].1,
-    ));
+    return Some((return_params[0].0.clone(), text, return_params[0].1));
   }
 
   // Multiple unnamed returns, no name match — can't resolve

@@ -183,7 +183,9 @@ pub enum ArtifactError {
   Decode(#[from] bincode::error::DecodeError),
   #[error("encode error: {0}")]
   Encode(#[from] bincode::error::EncodeError),
-  #[error("artifact schema version mismatch: found {found}, expected {expected}")]
+  #[error(
+    "artifact schema version mismatch: found {found}, expected {expected}"
+  )]
   VersionMismatch { found: u32, expected: u32 },
   #[error("artifact audit id mismatch: expected '{expected}', found '{found}'")]
   AuditIdMismatch { expected: String, found: String },

@@ -4,9 +4,9 @@ use o11a_core::code_refs::{
   find_declaration_by_name, get_named_topic_kind, is_keyword, match_operator,
   split_text_code_references,
 };
+use o11a_core::documentation::ast::{DocumentationAST, DocumentationNode};
 use o11a_core::domain;
 use o11a_core::domain::topic;
-use o11a_core::documentation::ast::{DocumentationAST, DocumentationNode};
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
 

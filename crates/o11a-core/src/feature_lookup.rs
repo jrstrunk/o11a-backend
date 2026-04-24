@@ -44,7 +44,8 @@ pub fn features_for_topic(
   let member_topic = if let Some(metadata) = audit_data.topic_metadata.get(t) {
     match metadata {
       domain::TopicMetadata::NamedTopic {
-        kind: domain::NamedTopicKind::Function(_) | domain::NamedTopicKind::Modifier,
+        kind:
+          domain::NamedTopicKind::Function(_) | domain::NamedTopicKind::Modifier,
         ..
       } => Some(*t),
       _ => match metadata.scope() {
@@ -66,7 +67,8 @@ pub fn features_for_topic(
   for (ft, beh_topics) in &audit_data.feature_behavior_links {
     for bt in beh_topics {
       if let Some(domain::TopicMetadata::BehaviorTopic {
-        member_topic: bmt, ..
+        member_topic: bmt,
+        ..
       }) = audit_data.topic_metadata.get(bt)
         && *bmt == member_topic
         && !features.contains(ft)

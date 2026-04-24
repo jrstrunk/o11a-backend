@@ -1148,12 +1148,7 @@ pub fn merge_context_groups(
 ) -> Vec<SourceContext> {
   let mut merged: Vec<SourceContext> = Vec::new();
   for ctx in contexts {
-    ensure_context(
-      &mut merged,
-      ctx.scope,
-      ctx.sort_key,
-      ctx.is_in_scope,
-    );
+    ensure_context(&mut merged, ctx.scope, ctx.sort_key, ctx.is_in_scope);
     let group = merged.iter_mut().find(|g| g.scope == ctx.scope).unwrap();
     for r in ctx.scope_references {
       insert_ref_sorted(&mut group.scope_references, r);
@@ -2322,10 +2317,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         if let Some(TopicMetadata::BehaviorTopic { member_topic, .. }) =
           audit_data.topic_metadata.get(bt)
         {
-          member_behaviors
-            .entry(*member_topic)
-            .or_default()
-            .push(*bt);
+          member_behaviors.entry(*member_topic).or_default().push(*bt);
         }
       }
     }
@@ -2379,9 +2371,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         nested_references,
       });
     }
-    audit_data
-      .topic_context
-      .insert(*feature_topic, context);
+    audit_data.topic_context.insert(*feature_topic, context);
   }
 
   // Build reverse index: behavior → [features] from feature_behavior_links
@@ -2463,9 +2453,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         scope_references,
         nested_references,
       }];
-      audit_data
-        .topic_context
-        .insert(*threat_topic, context);
+      audit_data.topic_context.insert(*threat_topic, context);
     }
   }
 

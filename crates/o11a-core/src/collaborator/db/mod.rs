@@ -65,10 +65,7 @@ pub fn ingest_comment(
   }
 
   for mention in &mentions {
-    let entries = audit_data
-      .mentions_index
-      .entry(*mention)
-      .or_default();
+    let entries = audit_data.mentions_index.entry(*mention).or_default();
     if !entries.contains(&comment_topic) {
       entries.push(comment_topic);
     }

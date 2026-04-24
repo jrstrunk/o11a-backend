@@ -207,14 +207,15 @@ pub async fn create_audit(
   let artifact_path = project_root.join("o11a").join("audit.analysis.bin");
   let report_path = project_root.join("o11a").join("audit.json");
 
-  let artifact = analysis_artifact::read_artifact(&artifact_path).map_err(|e| {
-    tracing::error!(
-      "create_audit: failed to read {}: {}",
-      artifact_path.display(),
-      e
-    );
-    artifact_error_response(e).0
-  })?;
+  let artifact =
+    analysis_artifact::read_artifact(&artifact_path).map_err(|e| {
+      tracing::error!(
+        "create_audit: failed to read {}: {}",
+        artifact_path.display(),
+        e
+      );
+      artifact_error_response(e).0
+    })?;
 
   if artifact.audit_id != payload.audit_id {
     let err = ArtifactError::AuditIdMismatch {
@@ -685,7 +686,8 @@ fn topic_metadata_to_response(
     }
 
     o11a_core::domain::TopicMetadata::DocumentationTopic {
-      is_technical, ..
+      is_technical,
+      ..
     } => TopicMetadataResponse::Documentation(DocumentationTopicResponse {
       topic_id: topic.id(),
       scope: scope_info,
@@ -832,7 +834,8 @@ pub async fn get_metadata(
   let metadata = audit_data.topic_metadata.get(&topic).ok_or_else(|| {
     tracing::warn!(
       "Metadata for topic '{}' not found in audit '{}'",
-      topic_id, audit_id
+      topic_id,
+      audit_id
     );
     StatusCode::NOT_FOUND
   })?;
@@ -866,7 +869,9 @@ pub async fn list_comments_by_type_and_status(
 ) -> Result<Json<CommentListResponse>, StatusCode> {
   tracing::debug!(
     "GET /api/v1/audits/{}/comments/{}/{}",
-    audit_id, comment_type, status
+    audit_id,
+    comment_type,
+    status
   );
 
   // Validate comment_type
@@ -905,7 +910,8 @@ pub async fn create_comment(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
   tracing::debug!(
     "POST /api/v1/audits/{}/comments body: {:?}",
-    audit_id, payload
+    audit_id,
+    payload
   );
   // Determine the scope from the target topic
   // If target is a comment (starts with "C"), copy scope from parent comment
@@ -927,7 +933,9 @@ pub async fn create_comment(
     serde_json::from_str(&parent_comment.scope).unwrap_or_default()
   } else {
     // Target is a regular topic - get scope from audit metadata
-    tracing::debug!("create_comment: acquiring first lock for scope resolution...");
+    tracing::debug!(
+      "create_comment: acquiring first lock for scope resolution..."
+    );
     let ctx = state.data_context.lock().map_err(|e| {
       let msg = format!("Failed to lock data context: {}", e);
       tracing::error!("ERROR create_comment: {}", msg);
@@ -1054,7 +1062,8 @@ pub async fn get_comment_status(
   let comment_id_num = comment_topic.numeric_id() as i64;
   tracing::debug!(
     "GET /api/v1/audits/{}/comments/{}/status",
-    audit_id, comment_id
+    audit_id,
+    comment_id
   );
   let response = db::get_comment_status(&state.db, comment_id_num)
     .await
@@ -1077,7 +1086,8 @@ pub async fn update_comment_status(
   let comment_id_num = comment_topic.numeric_id() as i64;
   tracing::debug!(
     "PUT /api/v1/audits/{}/comments/{}/status",
-    audit_id, comment_id
+    audit_id,
+    comment_id
   );
   // Update status in database
   let response = db::update_status(&state.db, comment_id_num, &payload.status)
@@ -1162,7 +1172,8 @@ pub async fn get_unvoted_comment_ids(
 ) -> Result<Json<Vec<String>>, StatusCode> {
   tracing::debug!(
     "GET /api/v1/audits/{}/votes/unvoted?user_id={}",
-    audit_id, params.user_id
+    audit_id,
+    params.user_id
   );
   let comment_ids =
     db::get_unvoted_comment_ids(&state.db, &audit_id, params.user_id)
@@ -1238,7 +1249,9 @@ pub async fn remove_vote(
   let comment_id_num = comment_topic.numeric_id() as i64;
   tracing::debug!(
     "DELETE /api/v1/audits/{}/votes/{}?user_id={}",
-    audit_id, comment_id, params.user_id
+    audit_id,
+    comment_id,
+    params.user_id
   );
   db::delete_vote(&state.db, comment_id_num, params.user_id)
     .await
@@ -1346,7 +1359,8 @@ pub async fn get_feature_requirements(
   })?;
   tracing::debug!(
     "GET /api/v1/audits/{}/features/{}/requirements",
-    audit_id, topic_id
+    audit_id,
+    topic_id
   );
 
   let ctx = state.data_context.lock().map_err(|e| {
@@ -1383,7 +1397,8 @@ pub async fn get_threat_invariants(
     })?;
   tracing::debug!(
     "GET /api/v1/audits/{}/threats/{}/invariants",
-    audit_id, threat_id
+    audit_id,
+    threat_id
   );
 
   let ctx = state.data_context.lock().map_err(|e| {
@@ -1688,7 +1703,8 @@ pub async fn get_functional_semantic(
     })?;
   tracing::debug!(
     "GET /api/v1/audits/{}/functional_semantics/{}",
-    audit_id, topic_id
+    audit_id,
+    topic_id
   );
 
   let ctx = state.data_context.lock().map_err(|e| {
@@ -1734,7 +1750,9 @@ pub async fn create_threat_feature_link(
 ) -> Result<Json<ThreatFeatureLinkResponse>, StatusCode> {
   tracing::debug!(
     "POST /api/v1/audits/{}/impact_analysis T{} -> F{}",
-    audit_id, payload.threat_id, payload.feature_id
+    audit_id,
+    payload.threat_id,
+    payload.feature_id
   );
 
   let threat_topic = topic::parse_attack_vector_topic(&payload.threat_id)
@@ -1833,7 +1851,9 @@ pub async fn delete_threat_feature_link(
   let feature_id = feature_topic.numeric_id() as i64;
   tracing::debug!(
     "DELETE /api/v1/audits/{}/impact_analysis/{}/{}",
-    audit_id, threat_id, feature_id
+    audit_id,
+    threat_id,
+    feature_id
   );
 
   db::delete_threat_feature_link(&state.db, threat_id, feature_id)
@@ -1918,7 +1938,8 @@ pub async fn create_condition(
 ) -> Result<Json<ConditionResponse>, StatusCode> {
   tracing::debug!(
     "POST /api/v1/audits/{}/conditions for {}",
-    audit_id, payload.subject_topic
+    audit_id,
+    payload.subject_topic
   );
 
   let row = db::create_condition(
@@ -2006,7 +2027,8 @@ pub async fn get_subject_conditions(
 ) -> Result<Json<Vec<ConditionResponse>>, StatusCode> {
   tracing::debug!(
     "GET /api/v1/audits/{}/conditions/{}",
-    audit_id, subject_topic
+    audit_id,
+    subject_topic
   );
 
   let rows =
@@ -2053,7 +2075,8 @@ pub async fn delete_condition(
 ) -> Result<StatusCode, StatusCode> {
   tracing::debug!(
     "DELETE /api/v1/audits/{}/conditions/{}",
-    audit_id, condition_id
+    audit_id,
+    condition_id
   );
 
   // Get the condition before deleting so we can update in-memory state
@@ -2169,7 +2192,8 @@ pub async fn create_threat(
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
   tracing::debug!(
     "POST /api/v1/audits/{}/threats on {}",
-    audit_id, payload.subject_topic
+    audit_id,
+    payload.subject_topic
   );
 
   let row = db::create_threat(
@@ -2314,7 +2338,8 @@ pub async fn create_invariant(
   let threat_id = threat_topic.numeric_id() as i64;
   tracing::debug!(
     "POST /api/v1/audits/{}/threats/{}/invariants",
-    audit_id, threat_id
+    audit_id,
+    threat_id
   );
 
   // Invariants inherit severity from their parent threat (may be None)
@@ -2399,7 +2424,9 @@ pub async fn delete_invariant(
   let invariant_id = inv_topic.numeric_id() as i64;
   tracing::debug!(
     "DELETE /api/v1/audits/{}/threats/{}/invariants/{}",
-    audit_id, threat_id, invariant_id
+    audit_id,
+    threat_id,
+    invariant_id
   );
 
   db::delete_invariant(&state.db, invariant_id)
@@ -2442,7 +2469,8 @@ pub async fn get_invariant(
   })?;
   tracing::debug!(
     "GET /api/v1/audits/{}/invariants/{}",
-    audit_id, invariant_id
+    audit_id,
+    invariant_id
   );
 
   let ctx = state.data_context.lock().map_err(|e| {
@@ -2472,7 +2500,8 @@ pub async fn add_invariant_source_topic(
   let invariant_id = inv_topic.numeric_id() as i64;
   tracing::debug!(
     "POST /api/v1/audits/{}/invariants/{}/source_topics",
-    audit_id, invariant_id
+    audit_id,
+    invariant_id
   );
 
   db::add_invariant_source_topic(&state.db, invariant_id, &payload.topic_id)
@@ -2517,7 +2546,9 @@ pub async fn remove_invariant_source_topic(
   let invariant_id = inv_topic.numeric_id() as i64;
   tracing::debug!(
     "DELETE /api/v1/audits/{}/invariants/{}/source_topics/{}",
-    audit_id, invariant_id, topic_id
+    audit_id,
+    invariant_id,
+    topic_id
   );
 
   db::remove_invariant_source_topic(&state.db, invariant_id, &topic_id)
@@ -2877,7 +2908,10 @@ pub async fn create_user_functional_semantic(
 
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
-      tracing::error!("Mutex poisoned in create_user_functional_semantic: {}", e);
+      tracing::error!(
+        "Mutex poisoned in create_user_functional_semantic: {}",
+        e
+      );
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data =

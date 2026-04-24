@@ -1,9 +1,9 @@
 pub mod analysis_artifact;
 pub mod code_refs;
 pub mod collaborator;
-pub mod domain;
 pub mod db;
 pub mod documentation;
+pub mod domain;
 pub mod feature_lookup;
 pub mod ids;
 pub mod report;
