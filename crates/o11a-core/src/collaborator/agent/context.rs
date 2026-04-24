@@ -333,7 +333,7 @@ fn render_condition_ast_snippet(
   match audit_data.nodes.get(&condition_topic) {
     Some(Node::Solidity(node)) => {
       let render_ctx = ASTRenderContext {
-        target_topic: target_topic.clone(),
+        target_topic: *target_topic,
         omit_function_and_modifier_bodies: false,
         include_untrusted_comments: true,
       };
@@ -895,7 +895,7 @@ fn render_solidity_ast_snippet(
       };
 
       let member_ctx = ASTRenderContext {
-        target_topic: render_ctx.target_topic.clone(),
+        target_topic: render_ctx.target_topic,
         omit_function_and_modifier_bodies: true,
         include_untrusted_comments: render_ctx.include_untrusted_comments,
       };
@@ -1844,7 +1844,7 @@ fn convert_reference(
   let mut snippet = match audit_data.nodes.get(ref_topic) {
     Some(Node::Solidity(solidity_node)) => {
       let render_ctx = ASTRenderContext {
-        target_topic: target_topic.clone(),
+        target_topic: *target_topic,
         omit_function_and_modifier_bodies: false,
         include_untrusted_comments: true,
       };
@@ -1909,7 +1909,7 @@ fn build_documentation_section_context(
   // Find the outermost ancestor that is a documentation section.
   // Ancestors are ordered [component, member, ...containing_blocks].
   let root_ancestor = ancestors.iter().find(|t| {
-    matches!(t.kind(), Some(topic::TopicKind::Documentation))
+    matches!(***t, topic::Topic::Documentation(_))
       && matches!(
         audit_data.topic_metadata.get(t),
         Some(TopicMetadata::TitledTopic {
@@ -1949,17 +1949,14 @@ fn build_documentation_section_context(
           ..
         })
       ) {
-        t.underlying_id().ok()
+        Some(t.numeric_id())
       } else {
         None
       }
     })
     .collect();
 
-  let target_node_id = match topic.underlying_id() {
-    Ok(id) => id,
-    Err(_) => return vec![],
-  };
+  let target_node_id = topic.numeric_id();
 
   let render_ctx = DocRenderContext {
     ancestor_node_ids,
@@ -2014,14 +2011,14 @@ pub fn build_agent_topic_context(
   let doc_references: Vec<String> = match audit_data.topic_metadata.get(&topic)
   {
     Some(TopicMetadata::NamedTopic { doc_references, .. }) => {
-      doc_references.iter().map(|t| t.id.clone()).collect()
+      doc_references.iter().map(|t| t.id()).collect()
     }
     _ => Vec::new(),
   };
   let mentions: Vec<String> = audit_data
     .mentions_index
     .get(&resolved_topic)
-    .map(|topics| topics.iter().map(|t| t.id.clone()).collect())
+    .map(|topics| topics.iter().map(|t| t.id()).collect())
     .unwrap_or_default();
 
   match metadata {
@@ -2070,7 +2067,7 @@ pub fn build_agent_topic_context(
       let condition_snippet = match audit_data.nodes.get(condition) {
         Some(Node::Solidity(node)) => {
           let render_ctx = ASTRenderContext {
-            target_topic: topic.clone(),
+            target_topic: topic,
             omit_function_and_modifier_bodies: false,
             include_untrusted_comments: true,
           };
@@ -2308,7 +2305,7 @@ pub fn render_contract_for_behavior_extraction(
   // trusted channel. The developer's own inline comments and NatSpec must
   // not leak into this render.
   let render_ctx = ASTRenderContext {
-    target_topic: contract_topic.clone(),
+    target_topic: contract_topic,
     omit_function_and_modifier_bodies: false,
     include_untrusted_comments: false,
   };
@@ -2543,7 +2540,7 @@ pub fn render_member_source_for_semantics(
           let node_topic = topic::new_node_topic(&resolved_member.node_id());
           if node_topic == *member_topic {
             let render_ctx = ASTRenderContext {
-              target_topic: member_topic.clone(),
+              target_topic: *member_topic,
               omit_function_and_modifier_bodies: false,
               include_untrusted_comments: true,
             };
@@ -2612,7 +2609,7 @@ pub fn render_contract_declaration_signatures(
       }
       if let ASTNode::ContractDefinition { .. } = resolved {
         let render_ctx = ASTRenderContext {
-          target_topic: contract_topic.clone(),
+          target_topic: *contract_topic,
           omit_function_and_modifier_bodies: true,
           include_untrusted_comments: true,
         };
@@ -2656,7 +2653,7 @@ pub fn mechanical_section_to_members(
           member, component, ..
         } if component == contract_topic => {
           if !members.contains(member) {
-            members.push(member.clone());
+            members.push(*member);
           }
         }
         // Declaration is at component level (state variable) — find members that use it
@@ -2678,7 +2675,7 @@ pub fn mechanical_section_to_members(
               } => (mutations, calls),
             };
             if mutations.contains(decl_topic) && !members.contains(fn_topic) {
-              members.push(fn_topic.clone());
+              members.push(*fn_topic);
             }
           }
         }
@@ -2819,10 +2816,10 @@ fn collect_mechanical_links_recursive(
       if let Some(section_topic) = current_section {
         // Record section → declaration
         let decls = section_to_declarations
-          .entry(section_topic.clone())
+          .entry(*section_topic)
           .or_default();
         if !decls.contains(ref_topic) {
-          decls.push(ref_topic.clone());
+          decls.push(*ref_topic);
         }
 
         // Walk up the declaration's scope to find the containing contract.
@@ -2832,24 +2829,24 @@ fn collect_mechanical_links_recursive(
             TopicMetadata::NamedTopic {
               kind: core::NamedTopicKind::Contract(_),
               ..
-            } => Some(ref_topic.clone()),
+            } => Some(*ref_topic),
             _ => match metadata.scope() {
               core::Scope::Component { component, .. } => {
-                Some(component.clone())
+                Some(*component)
               }
-              core::Scope::Member { component, .. } => Some(component.clone()),
+              core::Scope::Member { component, .. } => Some(*component),
               core::Scope::ContainingBlock { component, .. } => {
-                Some(component.clone())
+                Some(*component)
               }
               _ => None,
             },
           };
           if let Some(ct) = contract_topic {
             let contracts = section_to_contracts
-              .entry(section_topic.clone())
+              .entry(*section_topic)
               .or_default();
             if !contracts.contains(&ct) {
-              contracts.push(ct.clone());
+              contracts.push(ct);
             }
           }
         }
@@ -2922,7 +2919,7 @@ pub fn render_section_text(
   section_topic: &topic::Topic,
   audit_data: &AuditData,
 ) -> Option<String> {
-  let node_id = section_topic.numeric_id()? as i32;
+  let node_id = section_topic.numeric_id();
   let doc_topic = topic::new_documentation_topic(node_id);
 
   // Find the section's title from metadata

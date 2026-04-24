@@ -11,28 +11,28 @@ pub fn features_for_topic(
 ) -> Vec<topic::Topic> {
   let mut features = Vec::new();
 
-  match t.kind() {
-    Some(topic::TopicKind::Feature) => {
+  match t {
+    topic::Topic::Feature(_) => {
       if matches!(
         audit_data.topic_metadata.get(t),
         Some(core::TopicMetadata::FeatureTopic { .. })
       ) {
-        features.push(t.clone());
+        features.push(*t);
       }
       return features;
     }
-    Some(topic::TopicKind::Requirement) => {
+    topic::Topic::Requirement(_) => {
       for (ft, req_topics) in &audit_data.feature_requirement_links {
         if req_topics.contains(t) && !features.contains(ft) {
-          features.push(ft.clone());
+          features.push(*ft);
         }
       }
       return features;
     }
-    Some(topic::TopicKind::Behavior) => {
+    topic::Topic::Behavior(_) => {
       for (ft, beh_topics) in &audit_data.feature_behavior_links {
         if beh_topics.contains(t) && !features.contains(ft) {
-          features.push(ft.clone());
+          features.push(*ft);
         }
       }
       return features;
@@ -46,10 +46,10 @@ pub fn features_for_topic(
       core::TopicMetadata::NamedTopic {
         kind: core::NamedTopicKind::Function(_) | core::NamedTopicKind::Modifier,
         ..
-      } => Some(t.clone()),
+      } => Some(*t),
       _ => match metadata.scope() {
         core::Scope::Member { member, .. }
-        | core::Scope::ContainingBlock { member, .. } => Some(member.clone()),
+        | core::Scope::ContainingBlock { member, .. } => Some(*member),
         _ => None,
       },
     }
@@ -71,7 +71,7 @@ pub fn features_for_topic(
         && *bmt == member_topic
         && !features.contains(ft)
       {
-        features.push(ft.clone());
+        features.push(*ft);
       }
     }
   }

@@ -352,8 +352,7 @@ fn extract_contract_info(
         base_functions,
         ..
       } => {
-        if *state_variable && *visibility == VariableVisibility::Public
-        {
+        if *state_variable && *visibility == VariableVisibility::Public {
           public_state_variables.push(StateVariableInfo {
             node_id: *var_id,
             name: name.clone(),

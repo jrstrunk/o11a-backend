@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::state::{CachedTopicView, FrontendState};
 use o11a_core::core::{
   self,
-  topic::{self, TopicKind, new_topic},
+  topic::{self, new_topic},
 };
 use o11a_core::feature_lookup::features_for_topic;
 
@@ -254,8 +254,8 @@ pub async fn get_documentation_panel(
   let mut has_direct_feature_input = false;
   for id in &payload.feature_topics {
     let t = new_topic(id);
-    match t.kind() {
-      Some(TopicKind::Feature) => {
+    match t {
+      topic::Topic::Feature(_) => {
         has_direct_feature_input = true;
         if !feature_topics_resolved.contains(&t) {
           feature_topics_resolved.push(t);
@@ -282,19 +282,19 @@ pub async fn get_documentation_panel(
   let mut related_topics: Vec<topic::Topic> = Vec::new();
   for id in &payload.feature_topics {
     let t = new_topic(id);
-    related_topics.push(t.clone());
+    related_topics.push(t);
 
-    if t.kind() == Some(TopicKind::Requirement)
+    if matches!(t, topic::Topic::Requirement(_))
       && let Some(req) = audit_data.requirements.get(&t)
     {
       for dt in &req.documentation_topics {
         if !mention_topics.contains(dt) {
-          mention_topics.push(dt.clone());
+          mention_topics.push(*dt);
         }
       }
     }
 
-    if t.kind() == Some(TopicKind::FunctionalProperty)
+    if matches!(t, topic::Topic::FunctionalProperty(_))
       && let Some(core::TopicMetadata::FunctionalSemanticTopic {
         documentation_topics,
         ..
@@ -302,7 +302,7 @@ pub async fn get_documentation_panel(
     {
       for dt in documentation_topics {
         if !mention_topics.contains(dt) {
-          mention_topics.push(dt.clone());
+          mention_topics.push(*dt);
         }
       }
     }
@@ -310,7 +310,7 @@ pub async fn get_documentation_panel(
     if let Some(metadata) = audit_data.topic_metadata.get(&t) {
       let member = match metadata.scope() {
         core::Scope::Member { member, .. }
-        | core::Scope::ContainingBlock { member, .. } => Some(member.clone()),
+        | core::Scope::ContainingBlock { member, .. } => Some(*member),
         _ => None,
       };
       if let Some(mt) = member
@@ -327,7 +327,7 @@ pub async fn get_documentation_panel(
     {
       for mt in doc_references {
         if !mention_topics.contains(mt) {
-          mention_topics.push(mt.clone());
+          mention_topics.push(*mt);
         }
       }
     }
@@ -341,7 +341,7 @@ pub async fn get_documentation_panel(
         {
           for dt in documentation_topics {
             if !mention_topics.contains(dt) {
-              mention_topics.push(dt.clone());
+              mention_topics.push(*dt);
             }
           }
         }

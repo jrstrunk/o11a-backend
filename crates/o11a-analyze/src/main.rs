@@ -142,16 +142,12 @@ fn write_json_atomic<T: serde::Serialize>(
       path.with_file_name(tmp_name)
     }
     None => {
-      return Err(format!(
-        "report path {} has no file name",
-        path.display()
-      ));
+      return Err(format!("report path {} has no file name", path.display()));
     }
   };
 
-  std::fs::write(&tmp_path, json).map_err(|e| {
-    format!("Failed to write {}: {}", tmp_path.display(), e)
-  })?;
+  std::fs::write(&tmp_path, json)
+    .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
   std::fs::rename(&tmp_path, path).map_err(|e| {
     format!(
       "Failed to rename {} to {}: {}",

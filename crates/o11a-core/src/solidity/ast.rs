@@ -37,7 +37,9 @@ impl SolidityAST {
       .collect()
   }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(
+  Clone, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize,
+)]
 pub struct SourceLocation {
   pub start: Option<usize>,
   pub length: Option<usize>,

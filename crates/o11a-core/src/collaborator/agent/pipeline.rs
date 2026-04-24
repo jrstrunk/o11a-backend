@@ -113,12 +113,11 @@ pub async fn build_requirements(
   for (section_topic, req_topics) in parsed_section_requirements {
     let mut new_req_topics = Vec::with_capacity(req_topics.len());
     for old_req_topic in req_topics {
-      let new_req_topic = id_remap
-        .entry(old_req_topic.clone())
+      let new_req_topic = *id_remap
+        .entry(old_req_topic)
         .or_insert_with(|| {
           topic::new_requirement_topic(ids::allocate_requirement_id())
-        })
-        .clone();
+        });
       new_req_topics.push(new_req_topic);
     }
     new_section_requirements.insert(section_topic, new_req_topics);
@@ -126,10 +125,10 @@ pub async fn build_requirements(
 
   for (old_req_topic, requirement) in parsed_requirements {
     let new_req_topic = match id_remap.get(&old_req_topic) {
-      Some(t) => t.clone(),
+      Some(t) => *t,
       None => {
         let t = topic::new_requirement_topic(ids::allocate_requirement_id());
-        id_remap.insert(old_req_topic, t.clone());
+        id_remap.insert(old_req_topic, t);
         t
       }
     };
@@ -138,7 +137,7 @@ pub async fn build_requirements(
 
   for (old_req_topic, metadata) in topic_metadata {
     let new_req_topic = match id_remap.get(&old_req_topic) {
-      Some(t) => t.clone(),
+      Some(t) => *t,
       None => continue,
     };
     if let core::TopicMetadata::RequirementTopic {
@@ -148,7 +147,7 @@ pub async fn build_requirements(
     } = metadata
     {
       new_topic_metadata.insert(
-        new_req_topic.clone(),
+        new_req_topic,
         core::TopicMetadata::RequirementTopic {
           topic: new_req_topic,
           description,
@@ -233,16 +232,15 @@ pub async fn synthesize_features(
   > = std::collections::BTreeMap::new();
 
   for (old_feat_topic, metadata) in topic_metadata {
-    let new_feat_topic = id_remap
-      .entry(old_feat_topic.clone())
-      .or_insert_with(|| topic::new_feature_topic(ids::allocate_feature_id()))
-      .clone();
+    let new_feat_topic = *id_remap
+      .entry(old_feat_topic)
+      .or_insert_with(|| topic::new_feature_topic(ids::allocate_feature_id()));
     if let core::TopicMetadata::FeatureTopic {
       name, description, ..
     } = metadata
     {
       new_topic_metadata.insert(
-        new_feat_topic.clone(),
+        new_feat_topic,
         core::TopicMetadata::FeatureTopic {
           topic: new_feat_topic,
           name,
@@ -256,10 +254,10 @@ pub async fn synthesize_features(
 
   for (old_feat_topic, req_topics) in feature_requirement_links {
     let new_feat_topic = match id_remap.get(&old_feat_topic) {
-      Some(t) => t.clone(),
+      Some(t) => *t,
       None => {
         let t = topic::new_feature_topic(ids::allocate_feature_id());
-        id_remap.insert(old_feat_topic, t.clone());
+        id_remap.insert(old_feat_topic, t);
         t
       }
     };
@@ -268,10 +266,10 @@ pub async fn synthesize_features(
 
   for (old_feat_topic, beh_topics) in feature_behavior_links {
     let new_feat_topic = match id_remap.get(&old_feat_topic) {
-      Some(t) => t.clone(),
+      Some(t) => *t,
       None => {
         let t = topic::new_feature_topic(ids::allocate_feature_id());
-        id_remap.insert(old_feat_topic, t.clone());
+        id_remap.insert(old_feat_topic, t);
         t
       }
     };
@@ -357,11 +355,11 @@ pub async fn build_behaviors(
     let beh_topic = topic::new_behavior_topic(ids::allocate_behavior_id());
 
     new_metadata.insert(
-      beh_topic.clone(),
+      beh_topic,
       core::TopicMetadata::BehaviorTopic {
         topic: beh_topic,
         description: description.clone(),
-        member_topic: member_topic.clone(),
+        member_topic: *member_topic,
         author_id: AUTHOR_SYSTEM,
         created_at: None,
       },
@@ -489,7 +487,7 @@ pub async fn build_semantic_links(
       .unwrap_or_default();
 
     sections_with_text += 1;
-    let st = section_topic.clone();
+    let st = *section_topic;
     let clj = contract_list_json.clone();
     pass1_handles.push(tokio::spawn(async move {
       task::semantic_link_pass1(&st, &section_text, &clj, &confirmed).await
@@ -569,7 +567,7 @@ pub async fn build_semantic_links(
         None => continue,
       };
 
-      let st = section_topic.clone();
+      let st = *section_topic;
       let stxt = section_text.clone();
       let confirmed = confirmed_members.clone();
       pass2_handles.push(tokio::spawn(async move {
@@ -590,13 +588,13 @@ pub async fn build_semantic_links(
     match handle.await {
       Ok(Ok(result)) => {
         let doc_members = section_doc_members
-          .entry(result.section_topic.clone())
+          .entry(result.section_topic)
           .or_default();
 
         for mapping in result.member_mappings {
           // If no doc_topics, use the section topic as fallback
           let doc_topics = if mapping.doc_topics.is_empty() {
-            vec![result.section_topic.clone()]
+            vec![result.section_topic]
           } else {
             mapping.doc_topics
           };
@@ -604,7 +602,7 @@ pub async fn build_semantic_links(
           for dt in doc_topics {
             let entry = doc_members.entry(dt).or_default();
             if !entry.contains(&mapping.member_topic) {
-              entry.push(mapping.member_topic.clone());
+              entry.push(mapping.member_topic);
             }
           }
         }
@@ -667,9 +665,9 @@ pub async fn build_semantic_links(
         continue;
       }
 
-      let st = section_topic.clone();
+      let st = *section_topic;
       let stxt = section_text.clone();
-      let fallback_dt = doc_topic.clone();
+      let fallback_dt = *doc_topic;
       pass3_handles.push(tokio::spawn(async move {
         task::semantic_link_pass3(
           &st,
@@ -712,8 +710,8 @@ pub async fn build_semantic_links(
       continue;
     }
 
-    let st = section_topic.clone();
-    let fallback_dt = section_topic.clone();
+    let st = *section_topic;
+    let fallback_dt = *section_topic;
     pass3_handles.push(tokio::spawn(async move {
       task::semantic_link_pass3(
         &st,
@@ -758,7 +756,7 @@ pub async fn build_semantic_links(
         .get(&link.declaration_topic)
         .and_then(|m| m.transitive_topic())
       {
-        link.declaration_topic = base.clone();
+        link.declaration_topic = *base;
       }
     }
   }
@@ -768,7 +766,7 @@ pub async fn build_semantic_links(
   let unique_declarations = {
     let mut decls = std::collections::BTreeSet::new();
     for link in &all_links {
-      decls.insert(link.declaration_topic.clone());
+      decls.insert(link.declaration_topic);
     }
     decls.len()
   };
@@ -784,7 +782,7 @@ pub async fn build_semantic_links(
   > = std::collections::BTreeMap::new();
   for link in all_links {
     by_declaration
-      .entry(link.declaration_topic.clone())
+      .entry(link.declaration_topic)
       .or_default()
       .push(link);
   }
@@ -800,7 +798,7 @@ pub async fn build_semantic_links(
       let texts: Vec<String> =
         links.iter().map(|l| l.description.clone()).collect();
       let original_links = links.clone();
-      let decl_topic = decl_topic.clone();
+      let decl_topic = *decl_topic;
       condense_count += 1;
       condense_handles.push(tokio::spawn(async move {
         let result = task::condense_semantics(&decl_id, &texts).await;
@@ -835,7 +833,7 @@ pub async fn build_semantic_links(
 
           all_links.push(core::SemanticLink {
             documentation_topics: doc_topics,
-            declaration_topic: decl_topic.clone(),
+            declaration_topic: decl_topic,
             description: entry.text,
           });
         }
@@ -880,7 +878,7 @@ pub async fn build_semantic_links(
     );
 
     audit_data.topic_metadata.insert(
-      sem_topic.clone(),
+      sem_topic,
       core::TopicMetadata::FunctionalSemanticTopic {
         topic: sem_topic,
         description: link.description,

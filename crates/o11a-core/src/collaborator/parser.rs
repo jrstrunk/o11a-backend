@@ -85,7 +85,7 @@ fn collect_mentions(node: &CommentNode, out: &mut Vec<Topic>) {
       referenced_topic: Some(t),
       ..
     } => {
-      out.push(t.clone());
+      out.push(*t);
     }
     CommentNode::InlineCode { children, .. } => {
       for child in children {
@@ -314,7 +314,7 @@ fn tokenize_comment_code(
           doc_parser::find_declaration_by_name(audit_data, &ident)
         {
           (
-            Some(metadata.topic().clone()),
+            Some(*metadata.topic()),
             doc_parser::get_named_topic_kind(metadata),
             metadata.name().map(|n| n.to_string()),
           )

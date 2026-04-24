@@ -24,20 +24,20 @@ pub struct Context {
 }
 
 pub fn global_to_source_text(topic: &topic::Topic) -> Option<String> {
-  match topic.id.as_str() {
-    "N-8" => Some(formatting::format_topic_token(
+  match topic {
+    topic::Topic::Node(-8) => Some(formatting::format_topic_token(
       &new_node_topic(&-8),
       "keccak256",
       "global",
       topic,
     )),
-    "N-27" => Some(formatting::format_topic_token(
+    topic::Topic::Node(-27) => Some(formatting::format_topic_token(
       &new_node_topic(&-27),
       "type",
       "global",
       topic,
     )),
-    "N-28" => Some(formatting::format_topic_token(
+    topic::Topic::Node(-28) => Some(formatting::format_topic_token(
       &new_node_topic(&-28),
       "this",
       "global",
@@ -91,7 +91,7 @@ fn placeholder_topic(node: &ASTNode) -> topic::Topic {
       kind
         .placeholder_topic()
         .cloned()
-        .unwrap_or_else(|| topic.clone())
+        .unwrap_or_else(|| *topic)
     }
     ASTNode::Identifier {
       referenced_declaration,
@@ -1347,7 +1347,7 @@ fn do_node_to_source_text(
           // Multiple declarations: use tuple syntax
           // Use a context that omits the "let" keyword for each declaration
           let tuple_ctx = Context {
-            target_topic: ctx.target_topic.clone(),
+            target_topic: ctx.target_topic,
             omit_variable_declaration_let: true,
             format_parameter_variable_as_signature: ctx
               .format_parameter_variable_as_signature,
@@ -1439,7 +1439,7 @@ fn do_node_to_source_text(
         // Set format_parameter_variable_as_signature to false to prevent
         // infinite recursion when the signature contains this variable
         let sig_ctx = Context {
-          target_topic: ctx.target_topic.clone(),
+          target_topic: ctx.target_topic,
           omit_variable_declaration_let: false,
           format_parameter_variable_as_signature: false,
           omit_function_and_modifier_bodies: ctx
@@ -1714,7 +1714,7 @@ fn do_node_to_source_text(
         )
       } else {
         let contract_ctx = Context {
-          target_topic: ctx.target_topic.clone(),
+          target_topic: ctx.target_topic,
           omit_variable_declaration_let: ctx.omit_variable_declaration_let,
           format_parameter_variable_as_signature: ctx
             .format_parameter_variable_as_signature,
@@ -2021,7 +2021,7 @@ fn do_node_to_source_text(
         formatting::format_keyword(&variable_visibility_to_string(visibility));
       let indent_level = indent_level + 1;
       let member_ctx = Context {
-        target_topic: ctx.target_topic.clone(),
+        target_topic: ctx.target_topic,
         omit_variable_declaration_let: true,
         format_parameter_variable_as_signature: ctx
           .format_parameter_variable_as_signature,
@@ -2238,7 +2238,7 @@ fn do_node_to_source_text(
       } else {
         let indent_level = indent_level + 1;
         let param_ctx = Context {
-          target_topic: ctx.target_topic.clone(),
+          target_topic: ctx.target_topic,
           omit_variable_declaration_let: true,
           format_parameter_variable_as_signature: ctx
             .format_parameter_variable_as_signature,
@@ -2369,7 +2369,7 @@ fn do_node_to_source_text(
 
     ASTNode::StructuredDocumentation { .. } => String::new(),
 
-    ASTNode::Stub { topic, .. } => format!("NodeStub-{}", topic.id),
+    ASTNode::Stub { topic, .. } => format!("NodeStub-{}", topic.id()),
 
     ASTNode::ModifierList { modifiers, .. } => {
       if modifiers.is_empty() {
