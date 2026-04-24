@@ -1,7 +1,7 @@
 use crate::formatting;
 use o11a_core::collaborator::parser::{self, CommentNode};
-use o11a_core::core;
-use o11a_core::core::topic;
+use o11a_core::domain;
+use o11a_core::domain::topic;
 use std::collections::BTreeMap;
 
 /// Renders comment AST nodes to HTML, wrapped in a topic block with the
@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 pub fn render_comment_html(
   nodes: &[CommentNode],
   comment_topic: &topic::Topic,
-  nodes_map: &BTreeMap<topic::Topic, core::Node>,
+  nodes_map: &BTreeMap<topic::Topic, domain::Node>,
 ) -> String {
   let content: String = nodes
     .iter()
@@ -28,7 +28,7 @@ pub fn render_comment_html(
 fn node_to_html(
   node: &CommentNode,
   comment_topic: &topic::Topic,
-  nodes_map: &BTreeMap<topic::Topic, core::Node>,
+  nodes_map: &BTreeMap<topic::Topic, domain::Node>,
 ) -> String {
   match node {
     CommentNode::Text { value } => formatting::html_escape(value),
@@ -98,7 +98,7 @@ fn node_to_html(
 pub fn render_description_html(
   text: &str,
   owner_topic: &topic::Topic,
-  audit_data: &core::AuditData,
+  audit_data: &domain::AuditData,
 ) -> String {
   let (_referenced_topics, nodes) = parser::parse_comment(text, audit_data);
   nodes

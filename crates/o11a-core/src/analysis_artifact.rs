@@ -37,7 +37,7 @@
 //!     — applied from `audit.json` via `report::apply_report`
 //!   - `section_requirements`, `member_behaviors`, `declaration_semantics`
 //!     — derivable reverse indexes, rebuilt via
-//!     `core::rebuild_feature_context`
+//!     `domain::rebuild_feature_context`
 //!
 //! ## Version compatibility
 //!
@@ -47,7 +47,7 @@
 //! with a clear error so the server can ask the operator to regenerate
 //! the artifact by re-running `o11a-analyze`.
 
-use crate::core::{
+use crate::domain::{
   AST, AuditData, Condition, FunctionModProperties, Invariant, Node,
   ProjectPath, SolidityType, SourceContext, Threat, ThreatFeatureLink,
   TopicMetadata, TopicNameIndex, topic,
@@ -80,7 +80,7 @@ pub struct AnalysisArtifact {
 /// and the four LLM-sourced topic metadata variants) are stripped out
 /// and arrive separately via `audit.json`. Derivable reverse indexes
 /// are likewise stripped and rebuilt by
-/// [`crate::core::rebuild_feature_context`] after load.
+/// [`crate::domain::rebuild_feature_context`] after load.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuditDataSnapshot {
   pub audit_name: String,
@@ -146,7 +146,7 @@ pub fn snapshot_from_audit_data(audit_data: &AuditData) -> AuditDataSnapshot {
 /// Rehydrate a snapshot into a fresh `AuditData`. Pipeline-output fields
 /// are left empty; the caller must invoke
 /// [`crate::report::apply_report`] (to fill in requirements and links)
-/// and then [`crate::core::rebuild_feature_context`] (to rebuild reverse
+/// and then [`crate::domain::rebuild_feature_context`] (to rebuild reverse
 /// indexes) before serving requests.
 pub fn apply_snapshot(audit_data: &mut AuditData, snap: AuditDataSnapshot) {
   audit_data.audit_name = snap.audit_name;

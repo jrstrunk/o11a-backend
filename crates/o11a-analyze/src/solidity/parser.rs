@@ -1,6 +1,6 @@
-use o11a_core::core;
-use o11a_core::core::ProjectPath;
-use o11a_core::core::topic;
+use o11a_core::domain;
+use o11a_core::domain::ProjectPath;
+use o11a_core::domain::topic;
 use o11a_core::solidity::ast::{
   ASTNode, NatSpecSection, NatSpecTag, SolidityAST, SourceLocation,
   TypeDescriptions, classify_node_stub_kind,
@@ -13,7 +13,7 @@ use std::str::FromStr;
 
 struct ParserContext {
   pub source_content: String,
-  pub ast_map: BTreeMap<core::ProjectPath, Vec<SolidityAST>>,
+  pub ast_map: BTreeMap<domain::ProjectPath, Vec<SolidityAST>>,
   /// The node ID of the parent signature node, used to set `parameter_variable`
   /// on VariableDeclaration nodes within parameter lists.
   pub signature_parent_node: Cell<Option<i32>>,
@@ -21,7 +21,7 @@ struct ParserContext {
 
 pub fn process(
   project_root: &Path,
-) -> Result<BTreeMap<core::ProjectPath, Vec<SolidityAST>>, String> {
+) -> Result<BTreeMap<domain::ProjectPath, Vec<SolidityAST>>, String> {
   // Look for the "out" directory in the project root
   let out_dir = project_root.join("out");
   if !out_dir.exists() || !out_dir.is_dir() {
@@ -124,7 +124,7 @@ fn ast_from_json_file(
     .ok_or_else(|| {
       "Missing or invalid 'absolutePath' field in ast object".to_string()
     })?;
-  let project_path = core::new_project_path(&absolute_path, project_root);
+  let project_path = domain::new_project_path(&absolute_path, project_root);
 
   // Read the original source file content
   let source_content = read_source_file(&project_path, project_root)?;
@@ -158,7 +158,7 @@ fn read_source_file(
 ) -> Result<String, String> {
   // Create the absolute path to the source file
   let absolute_source_file_path =
-    core::project_path_to_absolute_path(project_path, project_root);
+    domain::project_path_to_absolute_path(project_path, project_root);
 
   // Read the source file
   std::fs::read_to_string(&absolute_source_file_path).map_err(|e| {

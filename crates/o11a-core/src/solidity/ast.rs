@@ -1,6 +1,6 @@
-use crate::core;
-use crate::core::topic;
-use crate::core::{
+use crate::domain;
+use crate::domain::topic;
+use crate::domain::{
   ContractKind, FunctionKind, ProjectPath, VariableMutability,
 };
 use serde::{Deserialize, Serialize};
@@ -19,14 +19,14 @@ impl SolidityAST {
   /// from the nodes map
   pub fn resolve_nodes(
     &self,
-    nodes_map: &BTreeMap<topic::Topic, core::Node>,
+    nodes_map: &BTreeMap<topic::Topic, domain::Node>,
   ) -> Vec<ASTNode> {
     self
       .nodes
       .iter()
       .map(|node| match node {
         ASTNode::Stub { topic, .. } => {
-          if let Some(core::Node::Solidity(ast_node)) = nodes_map.get(topic) {
+          if let Some(domain::Node::Solidity(ast_node)) = nodes_map.get(topic) {
             ast_node.clone()
           } else {
             node.clone()
@@ -1999,7 +1999,7 @@ impl ASTNode {
   /// from the nodes map
   pub fn resolve_nodes(
     &self,
-    nodes_map: &BTreeMap<topic::Topic, core::Node>,
+    nodes_map: &BTreeMap<topic::Topic, domain::Node>,
   ) -> Vec<ASTNode> {
     let nodes = self.nodes();
 
@@ -2007,7 +2007,7 @@ impl ASTNode {
       .iter()
       .map(|node| match node {
         ASTNode::Stub { topic, .. } => {
-          if let Some(core::Node::Solidity(ast_node)) = nodes_map.get(topic) {
+          if let Some(domain::Node::Solidity(ast_node)) = nodes_map.get(topic) {
             ast_node.clone()
           } else {
             (*node).clone()
@@ -2021,11 +2021,11 @@ impl ASTNode {
   /// Resolve the current node if it is a node stub
   pub fn resolve<'a>(
     &'a self,
-    nodes_map: &'a BTreeMap<topic::Topic, core::Node>,
+    nodes_map: &'a BTreeMap<topic::Topic, domain::Node>,
   ) -> &'a ASTNode {
     match self {
       ASTNode::Stub { topic, .. } => {
-        if let Some(core::Node::Solidity(ast_node)) = nodes_map.get(topic) {
+        if let Some(domain::Node::Solidity(ast_node)) = nodes_map.get(topic) {
           ast_node
         } else {
           self

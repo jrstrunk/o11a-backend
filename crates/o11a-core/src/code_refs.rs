@@ -4,8 +4,8 @@
 //! the comment parser, which runs at server-time on user-authored
 //! prose, depends on them.
 
-use crate::core;
-use crate::core::topic;
+use crate::domain;
+use crate::domain::topic;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -133,21 +133,21 @@ pub const OPERATORS: &[&str] = &[
 
 /// Extracts the NamedTopicKind from topic metadata if it's a named topic
 pub fn get_named_topic_kind(
-  metadata: &core::TopicMetadata,
-) -> Option<core::NamedTopicKind> {
+  metadata: &domain::TopicMetadata,
+) -> Option<domain::NamedTopicKind> {
   match metadata {
-    core::TopicMetadata::NamedTopic { kind, .. } => Some(kind.clone()),
-    core::TopicMetadata::UnnamedTopic { .. }
-    | core::TopicMetadata::ControlFlow { .. }
-    | core::TopicMetadata::TitledTopic { .. }
-    | core::TopicMetadata::CommentTopic { .. }
-    | core::TopicMetadata::FeatureTopic { .. }
-    | core::TopicMetadata::RequirementTopic { .. }
-    | core::TopicMetadata::BehaviorTopic { .. }
-    | core::TopicMetadata::FunctionalSemanticTopic { .. }
-    | core::TopicMetadata::ThreatTopic { .. }
-    | core::TopicMetadata::InvariantTopic { .. }
-    | core::TopicMetadata::DocumentationTopic { .. } => None,
+    domain::TopicMetadata::NamedTopic { kind, .. } => Some(kind.clone()),
+    domain::TopicMetadata::UnnamedTopic { .. }
+    | domain::TopicMetadata::ControlFlow { .. }
+    | domain::TopicMetadata::TitledTopic { .. }
+    | domain::TopicMetadata::CommentTopic { .. }
+    | domain::TopicMetadata::FeatureTopic { .. }
+    | domain::TopicMetadata::RequirementTopic { .. }
+    | domain::TopicMetadata::BehaviorTopic { .. }
+    | domain::TopicMetadata::FunctionalSemanticTopic { .. }
+    | domain::TopicMetadata::ThreatTopic { .. }
+    | domain::TopicMetadata::InvariantTopic { .. }
+    | domain::TopicMetadata::DocumentationTopic { .. } => None,
   }
 }
 
@@ -233,9 +233,9 @@ pub fn split_text_code_references<T>(
 /// Search order: topic ID, qualified name, then simple name.
 /// Used to resolve inline code references to solidity declarations.
 pub fn find_declaration_by_name<'a>(
-  audit_data: &'a core::AuditData,
+  audit_data: &'a domain::AuditData,
   value: &str,
-) -> Option<&'a core::TopicMetadata> {
+) -> Option<&'a domain::TopicMetadata> {
   audit_data
     .topic_metadata
     .get(&topic::new_topic(value))

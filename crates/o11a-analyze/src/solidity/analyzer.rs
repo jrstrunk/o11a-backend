@@ -4,9 +4,9 @@ use crate::solidity::parser;
 use crate::solidity::transform;
 use o11a_core::collaborator::models;
 use o11a_core::collaborator::synthetic::create_synthetic_dev_comment;
-use o11a_core::core::topic;
-use o11a_core::core::{self, AuditData, UnnamedTopicKind};
-use o11a_core::core::{
+use o11a_core::domain::topic;
+use o11a_core::domain::{self, AuditData, UnnamedTopicKind};
+use o11a_core::domain::{
   AST, CommentType, DataContext, ElementaryType, FunctionModProperties,
   NamedTopicKind, Node, RevertConstraintKind, Scope, SolidityType,
   SourceContext, TopicMetadata, insert_into_context,
@@ -102,7 +102,7 @@ pub fn analyze(
   // Build name index for fast topic lookup. Required by dev doc injection
   // (which resolves code references in developer prose) and by the
   // documentation analyzer (which resolves inline code tokens).
-  audit_data.name_index = core::TopicNameIndex::build(audit_data);
+  audit_data.name_index = domain::TopicNameIndex::build(audit_data);
 
   // Inject developer documentation from source code as synthetic in-memory
   // CommentTopics. Inline comments on SemanticBlocks become DevTechnical
@@ -165,7 +165,7 @@ pub enum FirstPassDeclaration {
   Contract {
     /// The file where this contract is defined. Used to determine if the
     /// contract is in scope when building reference groups.
-    container_file: core::ProjectPath,
+    container_file: domain::ProjectPath,
     is_publicly_in_scope: bool,
     declaration_kind: NamedTopicKind,
     visibility: Visibility,
@@ -342,7 +342,7 @@ pub enum InScopeDeclaration {
     variable_mutations: Vec<ReferencedNode>,
   },
   Contract {
-    container_file: core::ProjectPath,
+    container_file: domain::ProjectPath,
     declaration_kind: NamedTopicKind,
     visibility: Visibility,
     name: String,
@@ -417,8 +417,8 @@ impl InScopeDeclaration {
 }
 
 fn first_pass(
-  ast_map: &std::collections::BTreeMap<core::ProjectPath, Vec<SolidityAST>>,
-  in_scope_files: &HashSet<core::ProjectPath>,
+  ast_map: &std::collections::BTreeMap<domain::ProjectPath, Vec<SolidityAST>>,
+  in_scope_files: &HashSet<domain::ProjectPath>,
 ) -> Result<BTreeMap<i32, FirstPassDeclaration>, String> {
   let mut first_pass_declarations = BTreeMap::new();
 
@@ -443,7 +443,7 @@ fn first_pass(
 /// This traverses the AST to find assignments, initializations, function arguments,
 /// and return statements to determine which variables flow into which other variables.
 fn ancestry_pass(
-  ast_map: &std::collections::BTreeMap<core::ProjectPath, Vec<SolidityAST>>,
+  ast_map: &std::collections::BTreeMap<domain::ProjectPath, Vec<SolidityAST>>,
 ) -> (AncestorsMap, RelativesMap) {
   let mut ancestors_map = AncestorsMap::new();
   let mut relatives_map = RelativesMap::new();
@@ -466,7 +466,7 @@ fn ancestry_pass(
 
 fn process_first_pass_ast_nodes(
   nodes: &Vec<&ASTNode>,
-  file_path: &core::ProjectPath,
+  file_path: &domain::ProjectPath,
   is_file_in_scope: bool,
   parent_contract: Option<i32>,
   first_pass_declarations: &mut BTreeMap<i32, FirstPassDeclaration>,
@@ -969,7 +969,7 @@ fn process_first_pass_ast_nodes(
 /// This pass must run before second_pass so that reference nodes can be looked up
 /// for sorting by source location.
 fn populate_nodes_pass(
-  ast_map: &BTreeMap<core::ProjectPath, Vec<SolidityAST>>,
+  ast_map: &BTreeMap<domain::ProjectPath, Vec<SolidityAST>>,
   in_scope_source_topics: &BTreeMap<i32, InScopeDeclaration>,
   nodes: &mut BTreeMap<topic::Topic, Node>,
 ) {
@@ -1069,7 +1069,7 @@ fn scope_to_self_reference(
 
 /// Extracts the annotation chain from a scope's containing blocks.
 /// Returns the sequence of BlockAnnotation values (filtering out None entries).
-fn extract_annotation_chain(scope: &Scope) -> Vec<core::BlockAnnotation> {
+fn extract_annotation_chain(scope: &Scope) -> Vec<domain::BlockAnnotation> {
   match scope {
     Scope::ContainingBlock {
       containing_blocks, ..
@@ -1092,7 +1092,7 @@ fn build_source_context(
   scope_map: &BTreeMap<i32, Scope>,
   nodes: &BTreeMap<topic::Topic, Node>,
   in_scope_source_topics: &BTreeMap<i32, InScopeDeclaration>,
-  in_scope_files: &HashSet<core::ProjectPath>,
+  in_scope_files: &HashSet<domain::ProjectPath>,
 ) -> Vec<SourceContext> {
   let mut groups: Vec<SourceContext> = Vec::new();
 
@@ -1155,7 +1155,7 @@ fn build_source_context(
       is_in_scope,
       subscope,
       &annotation_chain,
-      core::Reference::project_reference(ref_topic, ref_sort_key),
+      domain::Reference::project_reference(ref_topic, ref_sort_key),
     );
   };
 
@@ -1198,7 +1198,7 @@ fn build_expanded_source_context(
   scope_map: &BTreeMap<i32, Scope>,
   nodes: &BTreeMap<topic::Topic, Node>,
   in_scope_source_topics: &BTreeMap<i32, InScopeDeclaration>,
-  in_scope_files: &HashSet<core::ProjectPath>,
+  in_scope_files: &HashSet<domain::ProjectPath>,
 ) -> Vec<SourceContext> {
   // Track ancestor/descendant counts per contract
   let mut contract_ancestry_counts: BTreeMap<i32, (usize, usize)> =
@@ -1262,7 +1262,7 @@ fn build_expanded_source_context(
       in_scope,
       subscope,
       &annotation_chain,
-      core::Reference::project_reference(ref_topic, ref_sort_key),
+      domain::Reference::project_reference(ref_topic, ref_sort_key),
     );
   }
 
@@ -1316,7 +1316,7 @@ fn build_expanded_source_context(
 fn is_contract_in_scope(
   contract_id: i32,
   in_scope_source_topics: &BTreeMap<i32, InScopeDeclaration>,
-  in_scope_files: &HashSet<core::ProjectPath>,
+  in_scope_files: &HashSet<domain::ProjectPath>,
 ) -> bool {
   in_scope_source_topics
     .get(&contract_id)
@@ -1357,9 +1357,9 @@ fn get_scope_name(
 /// data structures.
 #[allow(clippy::too_many_arguments)]
 fn second_pass(
-  ast_map: &BTreeMap<core::ProjectPath, Vec<SolidityAST>>,
+  ast_map: &BTreeMap<domain::ProjectPath, Vec<SolidityAST>>,
   in_scope_source_topics: &BTreeMap<i32, InScopeDeclaration>,
-  in_scope_files: &HashSet<core::ProjectPath>,
+  in_scope_files: &HashSet<domain::ProjectPath>,
   mutations_map: &BTreeMap<i32, Vec<i32>>,
   ancestors_map: &AncestorsMap,
   descendants_map: &DescendantsMap,
@@ -1384,7 +1384,7 @@ fn second_pass(
         descendants_map,
         relatives_map,
         nodes,
-        &core::Scope::Container {
+        &domain::Scope::Container {
           container: file_path.clone(),
         },
         topic_metadata,
@@ -1427,7 +1427,7 @@ fn process_second_pass_nodes(
   ast_nodes: &Vec<&ASTNode>,
   parent_in_scope: bool,
   in_scope_source_topics: &BTreeMap<i32, InScopeDeclaration>,
-  in_scope_files: &HashSet<core::ProjectPath>,
+  in_scope_files: &HashSet<domain::ProjectPath>,
   mutations_map: &BTreeMap<i32, Vec<i32>>,
   ancestors_map: &AncestorsMap,
   descendants_map: &DescendantsMap,
@@ -1474,7 +1474,7 @@ fn process_second_pass_nodes(
 
       // Check if this declaration has mutations
       let is_mutable_variable = *in_scope_topic_declaration.declaration_kind()
-        == NamedTopicKind::StateVariable(core::VariableMutability::Mutable)
+        == NamedTopicKind::StateVariable(domain::VariableMutability::Mutable)
         || *in_scope_topic_declaration.declaration_kind()
           == NamedTopicKind::LocalVariable;
 
@@ -1549,9 +1549,9 @@ fn process_second_pass_nodes(
           // implementation counterpart provides the real properties.
 
           // Convert first-pass reverts to RevertInfo (topic + kind)
-          let reverts: Vec<core::RevertInfo> = first_pass_reverts
+          let reverts: Vec<domain::RevertInfo> = first_pass_reverts
             .iter()
-            .map(|fp| core::RevertInfo {
+            .map(|fp| domain::RevertInfo {
               topic: topic::new_node_topic(&fp.statement_node),
               kind: fp.kind,
             })
@@ -1605,19 +1605,19 @@ fn process_second_pass_nodes(
       // Control flow nodes get their own TopicMetadata variant
       let control_flow_metadata = match node {
         ASTNode::IfStatement { condition, .. } => Some((
-          core::ControlFlowStatementKind::If,
+          domain::ControlFlowStatementKind::If,
           topic::new_node_topic(&condition.node_id()),
         )),
         ASTNode::ForStatement { condition, .. } => Some((
-          core::ControlFlowStatementKind::For,
+          domain::ControlFlowStatementKind::For,
           topic::new_node_topic(&condition.node_id()),
         )),
         ASTNode::WhileStatement { condition, .. } => Some((
-          core::ControlFlowStatementKind::While,
+          domain::ControlFlowStatementKind::While,
           topic::new_node_topic(&condition.node_id()),
         )),
         ASTNode::DoWhileStatement { condition, .. } => Some((
-          core::ControlFlowStatementKind::DoWhile,
+          domain::ControlFlowStatementKind::DoWhile,
           topic::new_node_topic(&condition.node_id()),
         )),
         _ => None,
@@ -1784,11 +1784,11 @@ fn process_second_pass_nodes(
         )?;
 
         // Process true body with True branch control flow added to scope
-        let true_cf = core::BlockAnnotation {
+        let true_cf = domain::BlockAnnotation {
           topic: cf_topic,
-          kind: core::BlockAnnotationKind::If(core::ControlFlowBranch::True),
+          kind: domain::BlockAnnotationKind::If(domain::ControlFlowBranch::True),
         };
-        let true_scope = core::add_annotation_to_scope(scope, true_cf);
+        let true_scope = domain::add_annotation_to_scope(scope, true_cf);
         process_second_pass_nodes(
           &vec![true_body.as_ref()],
           is_in_scope,
@@ -1807,11 +1807,11 @@ fn process_second_pass_nodes(
 
         // Process false body with False branch control flow added to scope
         if let Some(false_body) = false_body {
-          let false_cf = core::BlockAnnotation {
+          let false_cf = domain::BlockAnnotation {
             topic: cf_topic,
-            kind: core::BlockAnnotationKind::If(core::ControlFlowBranch::False),
+            kind: domain::BlockAnnotationKind::If(domain::ControlFlowBranch::False),
           };
-          let false_scope = core::add_annotation_to_scope(scope, false_cf);
+          let false_scope = domain::add_annotation_to_scope(scope, false_cf);
           process_second_pass_nodes(
             &vec![false_body.as_ref()],
             is_in_scope,
@@ -1836,9 +1836,9 @@ fn process_second_pass_nodes(
         body,
         ..
       } => {
-        let cf = core::BlockAnnotation {
+        let cf = domain::BlockAnnotation {
           topic: topic::new_node_topic(node_id),
-          kind: core::BlockAnnotationKind::For,
+          kind: domain::BlockAnnotationKind::For,
         };
 
         // Process condition (LoopExpression) without control flow context
@@ -1859,7 +1859,7 @@ fn process_second_pass_nodes(
         )?;
 
         // Process body with control flow added to scope
-        let cf_scope = core::add_annotation_to_scope(scope, cf);
+        let cf_scope = domain::add_annotation_to_scope(scope, cf);
         process_second_pass_nodes(
           &vec![body.as_ref()],
           is_in_scope,
@@ -1883,9 +1883,9 @@ fn process_second_pass_nodes(
         body,
         ..
       } => {
-        let cf = core::BlockAnnotation {
+        let cf = domain::BlockAnnotation {
           topic: topic::new_node_topic(node_id),
-          kind: core::BlockAnnotationKind::While,
+          kind: domain::BlockAnnotationKind::While,
         };
 
         // Process condition without control flow context
@@ -1907,7 +1907,7 @@ fn process_second_pass_nodes(
 
         // Process body with control flow added to scope
         if let Some(body) = body {
-          let cf_scope = core::add_annotation_to_scope(scope, cf);
+          let cf_scope = domain::add_annotation_to_scope(scope, cf);
           process_second_pass_nodes(
             &vec![body.as_ref()],
             is_in_scope,
@@ -1932,9 +1932,9 @@ fn process_second_pass_nodes(
         body,
         ..
       } => {
-        let cf = core::BlockAnnotation {
+        let cf = domain::BlockAnnotation {
           topic: topic::new_node_topic(node_id),
-          kind: core::BlockAnnotationKind::DoWhile,
+          kind: domain::BlockAnnotationKind::DoWhile,
         };
 
         // Process condition without control flow context
@@ -1956,7 +1956,7 @@ fn process_second_pass_nodes(
 
         // Process body with control flow added to scope
         if let Some(body) = body {
-          let cf_scope = core::add_annotation_to_scope(scope, cf);
+          let cf_scope = domain::add_annotation_to_scope(scope, cf);
           process_second_pass_nodes(
             &vec![body.as_ref()],
             is_in_scope,
@@ -1981,12 +1981,12 @@ fn process_second_pass_nodes(
         ..
       } => {
         let block_scope =
-          core::add_to_scope(scope, topic::new_node_topic(node_id));
-        let ann = core::BlockAnnotation {
+          domain::add_to_scope(scope, topic::new_node_topic(node_id));
+        let ann = domain::BlockAnnotation {
           topic: topic::new_node_topic(node_id),
-          kind: core::BlockAnnotationKind::Unchecked,
+          kind: domain::BlockAnnotationKind::Unchecked,
         };
-        let annotated_scope = core::add_annotation_to_scope(&block_scope, ann);
+        let annotated_scope = domain::add_annotation_to_scope(&block_scope, ann);
         let child_nodes: Vec<&ASTNode> = statements.iter().collect();
         process_second_pass_nodes(
           &child_nodes,
@@ -2007,12 +2007,12 @@ fn process_second_pass_nodes(
 
       ASTNode::InlineAssembly { node_id, .. } => {
         let block_scope =
-          core::add_to_scope(scope, topic::new_node_topic(node_id));
-        let ann = core::BlockAnnotation {
+          domain::add_to_scope(scope, topic::new_node_topic(node_id));
+        let ann = domain::BlockAnnotation {
           topic: topic::new_node_topic(node_id),
-          kind: core::BlockAnnotationKind::InlineAssembly,
+          kind: domain::BlockAnnotationKind::InlineAssembly,
         };
-        let _annotated_scope = core::add_annotation_to_scope(&block_scope, ann);
+        let _annotated_scope = domain::add_annotation_to_scope(&block_scope, ann);
         // InlineAssembly has no parseable children — scope is created but
         // not walked further.
       }
@@ -2044,7 +2044,7 @@ fn process_second_pass_nodes(
         }
 
         // Modifiers list: set signature_container to the ModifierList node
-        let mods_scope = core::set_signature_container(
+        let mods_scope = domain::set_signature_container(
           scope,
           topic::new_node_topic(&modifiers.node_id()),
         );
@@ -2065,7 +2065,7 @@ fn process_second_pass_nodes(
         )?;
 
         // Parameters: set signature_container to the ParameterList node
-        let params_scope = core::set_signature_container(
+        let params_scope = domain::set_signature_container(
           scope,
           topic::new_node_topic(&parameters.node_id()),
         );
@@ -2086,7 +2086,7 @@ fn process_second_pass_nodes(
         )?;
 
         // Return parameters: set signature_container to the return ParameterList node
-        let ret_scope = core::set_signature_container(
+        let ret_scope = domain::set_signature_container(
           scope,
           topic::new_node_topic(&return_parameters.node_id()),
         );
@@ -2132,7 +2132,7 @@ fn process_second_pass_nodes(
         }
 
         // Parameters: set signature_container to the ParameterList node
-        let params_scope = core::set_signature_container(
+        let params_scope = domain::set_signature_container(
           scope,
           topic::new_node_topic(&parameters.node_id()),
         );
@@ -2166,7 +2166,7 @@ fn process_second_pass_nodes(
             | ASTNode::EnumDefinition { node_id, .. }
             | ASTNode::EventDefinition { node_id, .. }
             | ASTNode::ErrorDefinition { node_id, .. } => {
-              core::add_to_scope(scope, topic::new_node_topic(node_id))
+              domain::add_to_scope(scope, topic::new_node_topic(node_id))
             }
             // Transparent nodes (e.g. Block) — pass scope through unchanged
             _ => scope.clone(),
@@ -2455,15 +2455,15 @@ fn variable_visibility_to_visibility(
   }
 }
 
-/// Convert foundry_compilers_artifacts::Visibility to core::NamedTopicVisibility
+/// Convert foundry_compilers_artifacts::Visibility to domain::NamedTopicVisibility
 fn visibility_to_named_topic_visibility(
   vis: &Visibility,
-) -> core::NamedTopicVisibility {
+) -> domain::NamedTopicVisibility {
   match vis {
-    Visibility::Public => core::NamedTopicVisibility::Public,
-    Visibility::Private => core::NamedTopicVisibility::Private,
-    Visibility::Internal => core::NamedTopicVisibility::Internal,
-    Visibility::External => core::NamedTopicVisibility::External,
+    Visibility::Public => domain::NamedTopicVisibility::Public,
+    Visibility::Private => domain::NamedTopicVisibility::Private,
+    Visibility::Internal => domain::NamedTopicVisibility::Internal,
+    Visibility::External => domain::NamedTopicVisibility::External,
   }
 }
 
@@ -3464,7 +3464,7 @@ fn populate_context(
   topic_context: &mut BTreeMap<topic::Topic, Vec<SourceContext>>,
   in_scope_source_topics: &BTreeMap<i32, InScopeDeclaration>,
   nodes: &BTreeMap<topic::Topic, Node>,
-  in_scope_files: &HashSet<core::ProjectPath>,
+  in_scope_files: &HashSet<domain::ProjectPath>,
 ) {
   // Build scope_map from completed topic_metadata
   let scope_map: BTreeMap<i32, Scope> = topic_metadata
@@ -3552,7 +3552,7 @@ fn populate_expanded_context(
   relatives_map: &RelativesMap,
   nodes: &BTreeMap<topic::Topic, Node>,
   in_scope_source_topics: &BTreeMap<i32, InScopeDeclaration>,
-  in_scope_files: &HashSet<core::ProjectPath>,
+  in_scope_files: &HashSet<domain::ProjectPath>,
 ) {
   // First, collect all scopes from existing topic_metadata
   let scope_map: BTreeMap<i32, Scope> = topic_metadata
@@ -3782,7 +3782,7 @@ struct ResolvedDoc {
   target_topic: topic::Topic,
   text: String,
   comment_type: CommentType,
-  author_id: i64,
+  author: models::Author,
 }
 
 /// Walk all in-memory nodes to find developer documentation and create
@@ -3891,12 +3891,12 @@ fn inject_developer_documentation(audit_data: &mut AuditData) {
     // that child, and comments should appear on whichever topic the user
     // actually views.
     let resolved_topic =
-      core::resolve_transitive_topic(&target_topic, &audit_data.topic_metadata);
+      domain::resolve_transitive_topic(&target_topic, &audit_data.topic_metadata);
     create_synthetic_dev_comment(
       &resolved_topic,
       &doc_text,
       CommentType::DevTechnical,
-      models::AUTHOR_DEV_TECHNICAL,
+      models::Author::DevTechnical,
       audit_data,
     );
   }
@@ -3907,7 +3907,7 @@ fn inject_developer_documentation(audit_data: &mut AuditData) {
     // definition topic (e.g., FunctionDefinition) rather than the signature
     // topic (e.g., FunctionSignature). Users view the definition, and the
     // transitive chain only goes signature → definition, not the reverse.
-    let resolved_topic = core::resolve_transitive_topic(
+    let resolved_topic = domain::resolve_transitive_topic(
       &sig_doc.signature_topic,
       &audit_data.topic_metadata,
     );
@@ -3924,7 +3924,7 @@ fn inject_developer_documentation(audit_data: &mut AuditData) {
           &doc.target_topic,
           &doc.text,
           doc.comment_type,
-          doc.author_id,
+          doc.author,
           audit_data,
         );
       }
@@ -4070,7 +4070,7 @@ fn resolve_natspec(
       target_topic: *signature_topic,
       text: notice_parts.join("\n"),
       comment_type: CommentType::DevDocumentation,
-      author_id: models::AUTHOR_DEV_DOCUMENTATION,
+      author: models::Author::DevDocumentation,
     });
   }
 
@@ -4080,7 +4080,7 @@ fn resolve_natspec(
       target_topic: *signature_topic,
       text: dev_parts.join("\n"),
       comment_type: CommentType::DevTechnical,
-      author_id: models::AUTHOR_DEV_TECHNICAL,
+      author: models::Author::DevTechnical,
     });
   }
 
@@ -4091,7 +4091,7 @@ fn resolve_natspec(
         target_topic: *param_topic,
         text: texts.join("\n"),
         comment_type: CommentType::DevDocumentation,
-        author_id: models::AUTHOR_DEV_DOCUMENTATION,
+        author: models::Author::DevDocumentation,
       });
     }
   }
@@ -4102,7 +4102,7 @@ fn resolve_natspec(
       target_topic: topic,
       text: texts.join("\n"),
       comment_type: CommentType::DevDocumentation,
-      author_id: models::AUTHOR_DEV_DOCUMENTATION,
+      author: models::Author::DevDocumentation,
     });
   }
 
@@ -4406,7 +4406,7 @@ mod tests {
     assert_eq!(result[0].comment_type, CommentType::DevDocumentation);
     assert_eq!(result[0].target_topic, sig_topic());
     assert_eq!(result[0].text, "Rescues tokens");
-    assert_eq!(result[0].author_id, models::AUTHOR_DEV_DOCUMENTATION);
+    assert_eq!(result[0].author, models::Author::DevDocumentation);
   }
 
   #[test]
@@ -4417,7 +4417,7 @@ mod tests {
     assert_eq!(result[0].comment_type, CommentType::DevTechnical);
     assert_eq!(result[0].target_topic, sig_topic());
     assert_eq!(result[0].text, "Only admin");
-    assert_eq!(result[0].author_id, models::AUTHOR_DEV_TECHNICAL);
+    assert_eq!(result[0].author, models::Author::DevTechnical);
   }
 
   #[test]
@@ -4635,7 +4635,7 @@ mod tests {
     // pointing at the member, so the group's inline comment should resolve
     // through and land in `comment_index[member_topic]`.
     let mut audit_data =
-      core::new_audit_data("test".to_string(), HashSet::new(), None);
+      domain::new_audit_data("test".to_string(), HashSet::new(), None);
 
     let member_id = 100;
     let group_id = -200;
@@ -4709,7 +4709,7 @@ mod tests {
     // inline comment stays on the group topic itself. Individual members
     // do not receive the comment.
     let mut audit_data =
-      core::new_audit_data("test".to_string(), HashSet::new(), None);
+      domain::new_audit_data("test".to_string(), HashSet::new(), None);
 
     let group_id = -300;
     let member_a_id = 101;

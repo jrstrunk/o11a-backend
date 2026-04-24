@@ -7,7 +7,8 @@
 //! *after* `apply_report` has reseeded the ID counters, so user-entity IDs
 //! occupy the same `i32` space as pipeline entities without collision.
 
-use crate::core::{AuditData, Requirement, TopicMetadata, topic};
+use crate::collaborator::models::Author;
+use crate::domain::{AuditData, Requirement, TopicMetadata, topic};
 use sqlx::SqlitePool;
 
 // ============================================================================
@@ -20,7 +21,7 @@ pub struct UserFeatureRow {
   pub audit_id: String,
   pub name: String,
   pub description: String,
-  pub author_id: i64,
+  pub author_id: Author,
   pub created_at: String,
 }
 
@@ -30,7 +31,7 @@ pub struct UserRequirementRow {
   pub audit_id: String,
   pub description: String,
   pub section_topic: Option<String>,
-  pub author_id: i64,
+  pub author_id: Author,
   pub created_at: String,
 }
 
@@ -40,7 +41,7 @@ pub struct UserBehaviorRow {
   pub audit_id: String,
   pub description: String,
   pub member_topic: String,
-  pub author_id: i64,
+  pub author_id: Author,
   pub created_at: String,
 }
 
@@ -50,7 +51,7 @@ pub struct UserFunctionalSemanticRow {
   pub audit_id: String,
   pub description: String,
   pub declaration_topic: String,
-  pub author_id: i64,
+  pub author_id: Author,
   pub created_at: String,
 }
 
@@ -67,7 +68,7 @@ pub async fn create_user_feature(
   audit_id: &str,
   name: &str,
   description: &str,
-  author_id: i64,
+  author_id: Author,
   created_at: &str,
 ) -> Result<UserFeatureRow, sqlx::Error> {
   sqlx::query(
@@ -99,7 +100,7 @@ pub async fn create_user_requirement(
   audit_id: &str,
   description: &str,
   section_topic: Option<&str>,
-  author_id: i64,
+  author_id: Author,
   created_at: &str,
 ) -> Result<UserRequirementRow, sqlx::Error> {
   sqlx::query(
@@ -131,7 +132,7 @@ pub async fn create_user_behavior(
   audit_id: &str,
   description: &str,
   member_topic: &str,
-  author_id: i64,
+  author_id: Author,
   created_at: &str,
 ) -> Result<UserBehaviorRow, sqlx::Error> {
   sqlx::query(
@@ -163,7 +164,7 @@ pub async fn create_user_functional_semantic(
   audit_id: &str,
   description: &str,
   declaration_topic: &str,
-  author_id: i64,
+  author_id: Author,
   created_at: &str,
 ) -> Result<UserFunctionalSemanticRow, sqlx::Error> {
   sqlx::query(
@@ -437,7 +438,7 @@ pub async fn load_user_entities_snapshot(
 /// reseeded the counters; user-entity IDs loaded here share the same `i32`
 /// space as pipeline IDs (pipeline IDs own 1..=N, user IDs continue from N+1).
 ///
-/// Callers should invoke `crate::core::rebuild_feature_context` after this
+/// Callers should invoke `crate::domain::rebuild_feature_context` after this
 /// so reverse indexes pick up the new topic metadata.
 pub fn apply_user_entities_snapshot(
   audit_data: &mut AuditData,
@@ -460,7 +461,7 @@ pub fn apply_user_entities_snapshot(
         topic,
         name: f.name.clone(),
         description: f.description.clone(),
-        author_id: f.author_id,
+        author: f.author_id,
         created_at: Some(f.created_at.clone()),
       },
     );
@@ -487,7 +488,7 @@ pub fn apply_user_entities_snapshot(
         topic,
         description: r.description.clone(),
         section_topic,
-        author_id: r.author_id,
+        author: r.author_id,
         created_at: Some(r.created_at.clone()),
       },
     );
@@ -502,7 +503,7 @@ pub fn apply_user_entities_snapshot(
         topic,
         description: b.description.clone(),
         member_topic,
-        author_id: b.author_id,
+        author: b.author_id,
         created_at: Some(b.created_at.clone()),
       },
     );
@@ -520,7 +521,7 @@ pub fn apply_user_entities_snapshot(
         description: s.description.clone(),
         declaration_topic,
         documentation_topics,
-        author_id: s.author_id,
+        author: s.author_id,
         created_at: Some(s.created_at.clone()),
       },
     );

@@ -1,8 +1,8 @@
-//! Serializable projections of `core::Scope` for on-disk persistence (comment
+//! Serializable projections of `domain::Scope` for on-disk persistence (comment
 //! rows) and for HTTP responses. Lives in core because the collaborator DB
 //! writes comment.scope as JSON using this shape; HTTP layers reuse it.
 
-use crate::core::{self, topic::new_topic};
+use crate::domain::{self, topic::new_topic};
 use serde::{Deserialize, Serialize};
 
 /// Serializable block annotation kind for API responses and DB persistence.
@@ -23,35 +23,35 @@ pub enum BlockAnnotationKindInfo {
 }
 
 impl BlockAnnotationKindInfo {
-  pub fn from_core(kind: &core::BlockAnnotationKind) -> Self {
+  pub fn from_core(kind: &domain::BlockAnnotationKind) -> Self {
     match kind {
-      core::BlockAnnotationKind::If(core::ControlFlowBranch::True) => {
+      domain::BlockAnnotationKind::If(domain::ControlFlowBranch::True) => {
         Self::IfTrue
       }
-      core::BlockAnnotationKind::If(core::ControlFlowBranch::False) => {
+      domain::BlockAnnotationKind::If(domain::ControlFlowBranch::False) => {
         Self::IfFalse
       }
-      core::BlockAnnotationKind::For => Self::For,
-      core::BlockAnnotationKind::While => Self::While,
-      core::BlockAnnotationKind::DoWhile => Self::DoWhile,
-      core::BlockAnnotationKind::Unchecked => Self::Unchecked,
-      core::BlockAnnotationKind::InlineAssembly => Self::InlineAssembly,
+      domain::BlockAnnotationKind::For => Self::For,
+      domain::BlockAnnotationKind::While => Self::While,
+      domain::BlockAnnotationKind::DoWhile => Self::DoWhile,
+      domain::BlockAnnotationKind::Unchecked => Self::Unchecked,
+      domain::BlockAnnotationKind::InlineAssembly => Self::InlineAssembly,
     }
   }
 
-  pub fn to_core(&self) -> core::BlockAnnotationKind {
+  pub fn to_core(&self) -> domain::BlockAnnotationKind {
     match self {
       Self::IfTrue => {
-        core::BlockAnnotationKind::If(core::ControlFlowBranch::True)
+        domain::BlockAnnotationKind::If(domain::ControlFlowBranch::True)
       }
       Self::IfFalse => {
-        core::BlockAnnotationKind::If(core::ControlFlowBranch::False)
+        domain::BlockAnnotationKind::If(domain::ControlFlowBranch::False)
       }
-      Self::For => core::BlockAnnotationKind::For,
-      Self::While => core::BlockAnnotationKind::While,
-      Self::DoWhile => core::BlockAnnotationKind::DoWhile,
-      Self::Unchecked => core::BlockAnnotationKind::Unchecked,
-      Self::InlineAssembly => core::BlockAnnotationKind::InlineAssembly,
+      Self::For => domain::BlockAnnotationKind::For,
+      Self::While => domain::BlockAnnotationKind::While,
+      Self::DoWhile => domain::BlockAnnotationKind::DoWhile,
+      Self::Unchecked => domain::BlockAnnotationKind::Unchecked,
+      Self::InlineAssembly => domain::BlockAnnotationKind::InlineAssembly,
     }
   }
 }
@@ -88,10 +88,10 @@ pub struct ScopeInfo {
 }
 
 impl ScopeInfo {
-  /// Convert from core::Scope to ScopeInfo
-  pub fn from_scope(scope: &core::Scope) -> Self {
+  /// Convert from domain::Scope to ScopeInfo
+  pub fn from_scope(scope: &domain::Scope) -> Self {
     match scope {
-      core::Scope::Global => ScopeInfo {
+      domain::Scope::Global => ScopeInfo {
         scope_type: "Global".to_string(),
         container: None,
         component: None,
@@ -99,7 +99,7 @@ impl ScopeInfo {
         containing_blocks: vec![],
         signature_container: None,
       },
-      core::Scope::Container { container } => ScopeInfo {
+      domain::Scope::Container { container } => ScopeInfo {
         scope_type: "Container".to_string(),
         container: Some(container.file_path.clone()),
         component: None,
@@ -107,7 +107,7 @@ impl ScopeInfo {
         containing_blocks: vec![],
         signature_container: None,
       },
-      core::Scope::Component {
+      domain::Scope::Component {
         container,
         component,
       } => ScopeInfo {
@@ -118,7 +118,7 @@ impl ScopeInfo {
         containing_blocks: vec![],
         signature_container: None,
       },
-      core::Scope::Member {
+      domain::Scope::Member {
         container,
         component,
         member,
@@ -131,7 +131,7 @@ impl ScopeInfo {
         containing_blocks: vec![],
         signature_container: signature_container.as_ref().map(|t| t.id()),
       },
-      core::Scope::ContainingBlock {
+      domain::Scope::ContainingBlock {
         container,
         component,
         member,
@@ -159,7 +159,7 @@ impl ScopeInfo {
   }
 
   /// Get the scope from a topic's metadata, or return Global scope if not found
-  pub fn from_topic(topic_id: &str, audit_data: &core::AuditData) -> Self {
+  pub fn from_topic(topic_id: &str, audit_data: &domain::AuditData) -> Self {
     let topic = new_topic(topic_id);
     if let Some(metadata) = audit_data.topic_metadata.get(&topic) {
       Self::from_scope(metadata.scope())
@@ -179,23 +179,23 @@ impl ScopeInfo {
       .or(self.component.as_deref())
   }
 
-  /// Convert from ScopeInfo back to core::Scope
-  pub fn to_scope(&self) -> core::Scope {
-    let container = || core::ProjectPath {
+  /// Convert from ScopeInfo back to domain::Scope
+  pub fn to_scope(&self) -> domain::Scope {
+    let container = || domain::ProjectPath {
       file_path: self.container.clone().unwrap(),
     };
     match self.scope_type.as_str() {
-      "ContainingBlock" => core::Scope::ContainingBlock {
+      "ContainingBlock" => domain::Scope::ContainingBlock {
         container: container(),
         component: new_topic(self.component.as_ref().unwrap()),
         member: new_topic(self.member.as_ref().unwrap()),
         containing_blocks: self
           .containing_blocks
           .iter()
-          .map(|layer| core::ContainingBlockLayer {
+          .map(|layer| domain::ContainingBlockLayer {
             block: new_topic(&layer.block),
             annotation: layer.annotation.as_ref().map(|ann| {
-              core::BlockAnnotation {
+              domain::BlockAnnotation {
                 topic: new_topic(&ann.topic),
                 kind: ann.kind.to_core(),
               }
@@ -203,7 +203,7 @@ impl ScopeInfo {
           })
           .collect(),
       },
-      "Member" => core::Scope::Member {
+      "Member" => domain::Scope::Member {
         container: container(),
         component: new_topic(self.component.as_ref().unwrap()),
         member: new_topic(self.member.as_ref().unwrap()),
@@ -212,14 +212,14 @@ impl ScopeInfo {
           .as_ref()
           .map(|s| new_topic(s)),
       },
-      "Component" => core::Scope::Component {
+      "Component" => domain::Scope::Component {
         container: container(),
         component: new_topic(self.component.as_ref().unwrap()),
       },
-      "Container" => core::Scope::Container {
+      "Container" => domain::Scope::Container {
         container: container(),
       },
-      _ => core::Scope::Global,
+      _ => domain::Scope::Global,
     }
   }
 }

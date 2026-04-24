@@ -1,6 +1,6 @@
 use crate::formatting;
-use o11a_core::core;
-use o11a_core::core::topic;
+use o11a_core::domain;
+use o11a_core::domain::topic;
 use o11a_core::documentation::ast::DocumentationNode;
 use std::collections::BTreeMap;
 
@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 /// identifiers are annotated with their functional semantic meaning.
 pub fn node_to_html(
   node: &DocumentationNode,
-  nodes_map: &BTreeMap<topic::Topic, core::Node>,
+  nodes_map: &BTreeMap<topic::Topic, domain::Node>,
 ) -> String {
   do_node_to_html(node, 0, nodes_map, None)
 }
@@ -20,7 +20,7 @@ pub fn node_to_html(
 /// describe it.
 pub fn node_to_html_with_semantics(
   node: &DocumentationNode,
-  nodes_map: &BTreeMap<topic::Topic, core::Node>,
+  nodes_map: &BTreeMap<topic::Topic, domain::Node>,
   semantics: &BTreeMap<topic::Topic, Vec<String>>,
 ) -> String {
   do_node_to_html(node, 0, nodes_map, Some(semantics))
@@ -30,7 +30,7 @@ pub fn node_to_html_with_semantics(
 fn do_node_to_html(
   node: &DocumentationNode,
   indent_level: usize,
-  nodes_map: &BTreeMap<topic::Topic, core::Node>,
+  nodes_map: &BTreeMap<topic::Topic, domain::Node>,
   semantics: Option<&BTreeMap<topic::Topic, Vec<String>>>,
 ) -> String {
   match node.resolve(nodes_map) {
@@ -461,14 +461,14 @@ fn do_node_to_html(
 /// Converts a documentation node to plain text (raw markdown without semantics).
 pub fn node_to_plain_text(
   node: &DocumentationNode,
-  nodes_map: &BTreeMap<topic::Topic, core::Node>,
+  nodes_map: &BTreeMap<topic::Topic, domain::Node>,
 ) -> String {
   do_node_to_plain_text(node, nodes_map)
 }
 
 fn do_node_to_plain_text(
   node: &DocumentationNode,
-  nodes_map: &BTreeMap<topic::Topic, core::Node>,
+  nodes_map: &BTreeMap<topic::Topic, domain::Node>,
 ) -> String {
   let node = node.resolve(nodes_map);
   match node {

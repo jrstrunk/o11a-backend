@@ -5,8 +5,8 @@
 
 use crate::documentation;
 use crate::solidity;
-use o11a_core::core;
-use o11a_core::core::DataContext;
+use o11a_core::domain;
+use o11a_core::domain::DataContext;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -17,21 +17,21 @@ pub fn run_analysis(
 ) -> Result<(), String> {
   // Load in-scope files from scope.txt
   let in_scope_files =
-    core::load_in_scope_files(project_root).map_err(|e| {
+    domain::load_in_scope_files(project_root).map_err(|e| {
       format!("Failed to load in-scope files from scope.txt: {}", e)
     })?;
 
-  let audit_name = core::load_audit_name(project_root)
+  let audit_name = domain::load_audit_name(project_root)
     .map_err(|e| format!("Failed to load audit name from name.txt: {}", e))?;
 
   // Load ordered document file list from documents.txt
   let document_files =
-    core::load_document_files(project_root).map_err(|e| {
+    domain::load_document_files(project_root).map_err(|e| {
       format!("Failed to load document files from documents.txt: {}", e)
     })?;
 
   // Load security notes from security.md (optional)
-  let security_notes = core::load_security_notes(project_root)
+  let security_notes = domain::load_security_notes(project_root)
     .map_err(|e| format!("Failed to load security notes: {}", e))?;
 
   // Create the audit if it doesn't exist

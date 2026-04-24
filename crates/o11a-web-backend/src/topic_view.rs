@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use o11a_core::core::{
+use o11a_core::domain::{
   self, AuditData, BlockAnnotationKind, ContractKind, ControlFlowBranch,
   ControlFlowStatementKind, FunctionKind, NamedTopicKind, NamedTopicVisibility,
   Node, Reference, Scope, SourceChild, SourceContext, TitledTopicKind,
@@ -654,7 +654,7 @@ pub fn render_source_text(
       ))
     }
     Some(Node::Documentation(doc_node)) => {
-      let sem_texts = core::semantic_texts_by_declaration(audit_data);
+      let sem_texts = domain::semantic_texts_by_declaration(audit_data);
       Some(crate::documentation_formatter::node_to_html_with_semantics(
         doc_node,
         &audit_data.nodes,
@@ -996,7 +996,7 @@ fn render_source_children(
 /// Returns (html, next_index).
 #[allow(clippy::too_many_arguments)]
 fn render_annotated_block_group(
-  annotation: &core::BlockAnnotation,
+  annotation: &domain::BlockAnnotation,
   children: &[SourceChild],
   has_sibling_branch: bool,
   scope: &topic::Topic,
@@ -1226,7 +1226,7 @@ pub fn render_highlight_css(
         ancestors.iter().map(|t| t.id().to_string()).collect();
       let descendant_ids: Vec<String> =
         descendants.iter().map(|t| t.id().to_string()).collect();
-      let empty_ctx: Vec<o11a_core::core::SourceContext> = vec![];
+      let empty_ctx: Vec<o11a_core::domain::SourceContext> = vec![];
       let expanded = audit_data
         .expanded_topic_context
         .get(topic)
@@ -1391,7 +1391,7 @@ pub fn build_topic_view(
       c.highlight_css.clone(),
     ),
     None => {
-      let empty_ctx: Vec<o11a_core::core::SourceContext> = vec![];
+      let empty_ctx: Vec<o11a_core::domain::SourceContext> = vec![];
       let ctx = audit_data
         .topic_context
         .get(view_metadata.topic())
@@ -1499,7 +1499,7 @@ pub fn build_conversation(
   // signature topic (e.g. FunctionSignature) finds the comments stored on
   // the canonical definition topic (e.g. FunctionDefinition).
   let resolved_topic =
-    core::resolve_transitive_topic(&topic, &audit_data.topic_metadata);
+    domain::resolve_transitive_topic(&topic, &audit_data.topic_metadata);
 
   let mut entries: Vec<ConversationEntry> = Vec::new();
 
@@ -1926,6 +1926,6 @@ pub fn build_documentation_panel(
     }
   }
 
-  let merged = o11a_core::core::merge_context_groups(all_contexts);
+  let merged = o11a_core::domain::merge_context_groups(all_contexts);
   render_grouped_source_panel(&merged, audit_data, source_text_cache)
 }

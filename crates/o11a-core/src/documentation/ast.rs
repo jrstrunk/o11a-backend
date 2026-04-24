@@ -1,11 +1,11 @@
-use crate::core;
-use crate::core::topic;
+use crate::domain;
+use crate::domain::topic;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentationAST {
   pub nodes: Vec<DocumentationNode>,
-  pub project_path: core::ProjectPath,
+  pub project_path: domain::ProjectPath,
   pub source_content: String,
 }
 
@@ -85,7 +85,7 @@ pub enum DocumentationNode {
     node_id: i32,
     value: String,
     referenced_topic: Option<topic::Topic>,
-    kind: Option<core::NamedTopicKind>,
+    kind: Option<domain::NamedTopicKind>,
     referenced_name: Option<String>,
   },
 
@@ -392,13 +392,13 @@ impl DocumentationNode {
   pub fn resolve<'a>(
     &'a self,
     nodes_map: &'a std::collections::BTreeMap<
-      crate::core::topic::Topic,
-      crate::core::Node,
+      crate::domain::topic::Topic,
+      crate::domain::Node,
     >,
   ) -> &'a DocumentationNode {
     match self {
       DocumentationNode::Stub { topic, .. } => {
-        if let Some(crate::core::Node::Documentation(doc_node)) =
+        if let Some(crate::domain::Node::Documentation(doc_node)) =
           nodes_map.get(topic)
         {
           doc_node

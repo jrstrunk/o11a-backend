@@ -20,8 +20,8 @@
 //!
 //! Current version: 2 (alpha — stability not yet guaranteed)
 
-use crate::collaborator::models::AUTHOR_SYSTEM;
-use crate::core::{AuditData, Requirement, TopicMetadata};
+use crate::collaborator::models::Author;
+use crate::domain::{AuditData, Requirement, TopicMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -287,7 +287,7 @@ fn collect_functional_semantics(
 }
 
 fn flatten_links(
-  map: &BTreeMap<crate::core::topic::Topic, Vec<crate::core::topic::Topic>>,
+  map: &BTreeMap<crate::domain::topic::Topic, Vec<crate::domain::topic::Topic>>,
 ) -> Vec<FeatureLink> {
   let mut out = Vec::new();
   for (feat_topic, linked) in map {
@@ -344,7 +344,7 @@ impl std::error::Error for ApplyReportError {}
 /// parsed declarations). This installs the LLM-derived topics (features,
 /// requirements, behaviors, functional semantics) and their links.
 ///
-/// Callers should invoke `crate::core::rebuild_feature_context` on the audit
+/// Callers should invoke `crate::domain::rebuild_feature_context` on the audit
 /// data after applying the report, so that reverse indexes are refreshed.
 pub fn apply_report(
   audit_id: &str,
@@ -364,7 +364,7 @@ pub fn apply_report(
     });
   }
 
-  use crate::core::topic;
+  use crate::domain::topic;
 
   // Drop any stale pipeline-topic metadata before hydrating from the report.
   audit_data.topic_metadata.retain(|_, m| {
@@ -388,7 +388,7 @@ pub fn apply_report(
         topic,
         name: f.name.clone(),
         description: f.description.clone(),
-        author_id: AUTHOR_SYSTEM,
+        author: Author::System,
         created_at: None,
       },
     );
@@ -416,7 +416,7 @@ pub fn apply_report(
         topic,
         description: r.description.clone(),
         section_topic,
-        author_id: AUTHOR_SYSTEM,
+        author: Author::System,
         created_at: None,
       },
     );
@@ -431,7 +431,7 @@ pub fn apply_report(
         topic,
         description: b.description.clone(),
         member_topic,
-        author_id: AUTHOR_SYSTEM,
+        author: Author::System,
         created_at: None,
       },
     );
@@ -452,7 +452,7 @@ pub fn apply_report(
         description: s.description.clone(),
         declaration_topic,
         documentation_topics,
-        author_id: AUTHOR_SYSTEM,
+        author: Author::System,
         created_at: None,
       },
     );

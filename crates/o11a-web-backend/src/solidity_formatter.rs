@@ -1,7 +1,7 @@
 use crate::formatting;
-use o11a_core::core::topic::{self, new_node_topic};
-use o11a_core::core::{self, TopicMetadata};
-use o11a_core::core::{ContractKind, FunctionKind, VariableMutability};
+use o11a_core::domain::topic::{self, new_node_topic};
+use o11a_core::domain::{self, TopicMetadata};
+use o11a_core::domain::{ContractKind, FunctionKind, VariableMutability};
 use o11a_core::solidity::ast::{
   self, ASTNode, AssignmentOperator, BinaryOperator, FunctionStateMutability,
   FunctionVisibility, LiteralKind, StorageLocation, StubKind, UnaryOperator,
@@ -54,8 +54,8 @@ pub fn global_to_source_text(topic: &topic::Topic) -> Option<String> {
 /// and the right-hand side indented on the next line.
 pub fn node_to_source_text(
   node: &ASTNode,
-  nodes_map: &BTreeMap<topic::Topic, core::Node>,
-  topic_metadata: &BTreeMap<topic::Topic, core::TopicMetadata>,
+  nodes_map: &BTreeMap<topic::Topic, domain::Node>,
+  topic_metadata: &BTreeMap<topic::Topic, domain::TopicMetadata>,
 ) -> String {
   let ctx = Context {
     target_topic: new_node_topic(&node.node_id()),
@@ -141,8 +141,8 @@ fn maybe_identifier_placeholder(node: &ASTNode) -> String {
 fn do_node_to_source_text(
   node: &ASTNode,
   indent_level: usize,
-  nodes_map: &BTreeMap<topic::Topic, core::Node>,
-  topic_metadata: &BTreeMap<topic::Topic, core::TopicMetadata>,
+  nodes_map: &BTreeMap<topic::Topic, domain::Node>,
+  topic_metadata: &BTreeMap<topic::Topic, domain::TopicMetadata>,
   ctx: &Context,
 ) -> String {
   let node_str = match node.resolve(nodes_map) {
@@ -1421,7 +1421,7 @@ fn do_node_to_source_text(
         let is_target = ctx.target_topic == new_node_topic(node_id);
         if is_target {
           let signature_topic = new_node_topic(&signature_node_id);
-          if let Some(core::Node::Solidity(sig_node)) =
+          if let Some(domain::Node::Solidity(sig_node)) =
             nodes_map.get(&signature_topic)
           {
             Some(sig_node)
@@ -2419,8 +2419,8 @@ pub struct Delimiter {
 /// - DoWhileStatement: `do` (opening) / `while (cond)` (closing)
 pub fn node_to_delimiter(
   node: &ASTNode,
-  nodes_map: &BTreeMap<topic::Topic, core::Node>,
-  topic_metadata: &BTreeMap<topic::Topic, core::TopicMetadata>,
+  nodes_map: &BTreeMap<topic::Topic, domain::Node>,
+  topic_metadata: &BTreeMap<topic::Topic, domain::TopicMetadata>,
 ) -> Option<Delimiter> {
   let ctx = Context {
     target_topic: new_node_topic(&node.node_id()),
@@ -2433,8 +2433,8 @@ pub fn node_to_delimiter(
 
 fn do_node_to_delimiter(
   node: &ASTNode,
-  nodes_map: &BTreeMap<topic::Topic, core::Node>,
-  topic_metadata: &BTreeMap<topic::Topic, core::TopicMetadata>,
+  nodes_map: &BTreeMap<topic::Topic, domain::Node>,
+  topic_metadata: &BTreeMap<topic::Topic, domain::TopicMetadata>,
   ctx: &Context,
 ) -> Option<Delimiter> {
   let delimiter = match node.resolve(nodes_map) {
@@ -2552,7 +2552,7 @@ fn format_identifier(
   id_topic: &topic::Topic,
   name: &str,
   ref_topic: &topic::Topic,
-  topic_metadata: &BTreeMap<topic::Topic, core::TopicMetadata>,
+  topic_metadata: &BTreeMap<topic::Topic, domain::TopicMetadata>,
 ) -> String {
   match topic_metadata.get(ref_topic) {
     Some(TopicMetadata::NamedTopic { kind, .. }) => {

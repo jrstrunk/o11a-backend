@@ -9,7 +9,7 @@ use sqlx::FromRow;
 
 use o11a_core::analysis_artifact::{self, ArtifactError};
 use o11a_core::collaborator::{db, models::*};
-use o11a_core::core::{
+use o11a_core::domain::{
   self,
   topic::{self, new_topic},
 };
@@ -273,7 +273,7 @@ pub async fn create_audit(
       eprintln!("create_audit: failed to apply audit report: {}", e);
       return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
-    core::rebuild_feature_context(audit_data);
+    domain::rebuild_feature_context(audit_data);
   }
 
   Ok(Json(CreateAuditResponse {
@@ -337,7 +337,7 @@ pub async fn get_documents(
   for (topic, metadata) in &audit_data.topic_metadata {
     if matches!(
       metadata,
-      o11a_core::core::TopicMetadata::DocumentationTopic { .. }
+      o11a_core::domain::TopicMetadata::DocumentationTopic { .. }
     ) {
       documents.push(topic_metadata_to_response(topic, metadata));
     }
@@ -365,26 +365,26 @@ pub async fn get_contracts(
   // Iterate through all topic metadata and filter for contracts in scope files
   for (topic, metadata) in &audit_data.topic_metadata {
     let is_contract = match metadata {
-      o11a_core::core::TopicMetadata::NamedTopic { kind, .. } => {
-        matches!(kind, o11a_core::core::NamedTopicKind::Contract(_))
+      o11a_core::domain::TopicMetadata::NamedTopic { kind, .. } => {
+        matches!(kind, o11a_core::domain::NamedTopicKind::Contract(_))
       }
-      o11a_core::core::TopicMetadata::UnnamedTopic { .. }
-      | o11a_core::core::TopicMetadata::ControlFlow { .. }
-      | o11a_core::core::TopicMetadata::TitledTopic { .. }
-      | o11a_core::core::TopicMetadata::CommentTopic { .. }
-      | o11a_core::core::TopicMetadata::FeatureTopic { .. }
-      | o11a_core::core::TopicMetadata::RequirementTopic { .. }
-      | o11a_core::core::TopicMetadata::BehaviorTopic { .. }
-      | o11a_core::core::TopicMetadata::FunctionalSemanticTopic { .. }
-      | o11a_core::core::TopicMetadata::ThreatTopic { .. }
-      | o11a_core::core::TopicMetadata::InvariantTopic { .. }
-      | o11a_core::core::TopicMetadata::DocumentationTopic { .. } => false,
+      o11a_core::domain::TopicMetadata::UnnamedTopic { .. }
+      | o11a_core::domain::TopicMetadata::ControlFlow { .. }
+      | o11a_core::domain::TopicMetadata::TitledTopic { .. }
+      | o11a_core::domain::TopicMetadata::CommentTopic { .. }
+      | o11a_core::domain::TopicMetadata::FeatureTopic { .. }
+      | o11a_core::domain::TopicMetadata::RequirementTopic { .. }
+      | o11a_core::domain::TopicMetadata::BehaviorTopic { .. }
+      | o11a_core::domain::TopicMetadata::FunctionalSemanticTopic { .. }
+      | o11a_core::domain::TopicMetadata::ThreatTopic { .. }
+      | o11a_core::domain::TopicMetadata::InvariantTopic { .. }
+      | o11a_core::domain::TopicMetadata::DocumentationTopic { .. } => false,
     };
 
     if is_contract {
       // Check if the contract is in an in-scope file
       let is_in_scope = match metadata.scope() {
-        o11a_core::core::Scope::Container { container } => {
+        o11a_core::domain::Scope::Container { container } => {
           audit_data.in_scope_files.contains(container)
         }
         _ => false,
@@ -453,10 +453,10 @@ pub async fn get_delimiter(
   })?;
 
   let info = match node {
-    core::Node::Solidity(solidity_node) => {
+    domain::Node::Solidity(solidity_node) => {
       o11a_core::solidity::delimiter::delimiter_info_for_node(solidity_node)
     }
-    core::Node::Documentation(_) | core::Node::Comment(_) => None,
+    domain::Node::Documentation(_) | domain::Node::Comment(_) => None,
   };
 
   Ok(Json(info))
@@ -521,7 +521,7 @@ pub struct ControlFlowTopicResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct CommentTopicResponse {
   pub topic_id: String,
-  pub author_id: i64,
+  pub author_id: Author,
   pub comment_type: String,
   pub target_topic: String,
   pub created_at: String,
@@ -535,7 +535,7 @@ pub struct FeatureTopicResponse {
   pub topic_id: String,
   pub name: String,
   pub description: String,
-  pub author_id: i64,
+  pub author_id: Author,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub created_at: Option<String>,
 }
@@ -545,7 +545,7 @@ pub struct FeatureTopicResponse {
 pub struct RequirementTopicResponse {
   pub topic_id: String,
   pub description: String,
-  pub author_id: i64,
+  pub author_id: Author,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub created_at: Option<String>,
 }
@@ -556,7 +556,7 @@ pub struct BehaviorTopicResponse {
   pub topic_id: String,
   pub description: String,
   pub member_topic: String,
-  pub author_id: i64,
+  pub author_id: Author,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub created_at: Option<String>,
 }
@@ -568,7 +568,7 @@ pub struct SemanticTopicResponse {
   pub description: String,
   pub declaration_topic: String,
   pub documentation_topics: Vec<String>,
-  pub author_id: i64,
+  pub author_id: Author,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub created_at: Option<String>,
 }
@@ -579,7 +579,7 @@ pub struct ThreatTopicResponse {
   pub topic_id: String,
   pub description: String,
   pub subject_topic: String,
-  pub author_id: i64,
+  pub author_id: Author,
   pub created_at: String,
   pub severity: Option<String>,
 }
@@ -590,7 +590,7 @@ pub struct InvariantTopicResponse {
   pub topic_id: String,
   pub description: String,
   pub threat_topic: String,
-  pub author_id: i64,
+  pub author_id: Author,
   pub created_at: String,
   pub severity: Option<String>,
 }
@@ -627,13 +627,13 @@ pub enum TopicMetadataResponse {
 
 // Helper function to convert TopicMetadata to TopicMetadataResponse
 fn topic_metadata_to_response(
-  topic: &o11a_core::core::topic::Topic,
-  metadata: &o11a_core::core::TopicMetadata,
+  topic: &o11a_core::domain::topic::Topic,
+  metadata: &o11a_core::domain::TopicMetadata,
 ) -> TopicMetadataResponse {
   let scope_info = ScopeInfo::from_scope(metadata.scope());
 
   match metadata {
-    o11a_core::core::TopicMetadata::NamedTopic {
+    o11a_core::domain::TopicMetadata::NamedTopic {
       name,
       kind,
       visibility,
@@ -643,13 +643,13 @@ fn topic_metadata_to_response(
     } => {
       // Format the kind and sub_kind for NamedTopic
       let (kind_str, sub_kind) = match kind {
-        o11a_core::core::NamedTopicKind::Contract(contract_kind) => {
+        o11a_core::domain::NamedTopicKind::Contract(contract_kind) => {
           ("Contract".to_string(), Some(format!("{:?}", contract_kind)))
         }
-        o11a_core::core::NamedTopicKind::Function(function_kind) => {
+        o11a_core::domain::NamedTopicKind::Function(function_kind) => {
           ("Function".to_string(), Some(format!("{:?}", function_kind)))
         }
-        o11a_core::core::NamedTopicKind::StateVariable(mutability) => (
+        o11a_core::domain::NamedTopicKind::StateVariable(mutability) => (
           "StateVariable".to_string(),
           Some(format!("{:?}", mutability)),
         ),
@@ -676,7 +676,7 @@ fn topic_metadata_to_response(
       })
     }
 
-    o11a_core::core::TopicMetadata::TitledTopic { title, kind, .. } => {
+    o11a_core::domain::TopicMetadata::TitledTopic { title, kind, .. } => {
       TopicMetadataResponse::Titled(TitledTopicResponse {
         topic_id: topic.id(),
         title: title.clone(),
@@ -685,7 +685,7 @@ fn topic_metadata_to_response(
       })
     }
 
-    o11a_core::core::TopicMetadata::UnnamedTopic { kind, .. } => {
+    o11a_core::domain::TopicMetadata::UnnamedTopic { kind, .. } => {
       TopicMetadataResponse::Unnamed(UnnamedTopicResponse {
         topic_id: topic.id(),
         kind: format!("{:?}", kind),
@@ -693,7 +693,7 @@ fn topic_metadata_to_response(
       })
     }
 
-    o11a_core::core::TopicMetadata::DocumentationTopic {
+    o11a_core::domain::TopicMetadata::DocumentationTopic {
       is_technical, ..
     } => TopicMetadataResponse::Documentation(DocumentationTopicResponse {
       topic_id: topic.id(),
@@ -701,7 +701,7 @@ fn topic_metadata_to_response(
       is_technical: *is_technical,
     }),
 
-    o11a_core::core::TopicMetadata::ControlFlow {
+    o11a_core::domain::TopicMetadata::ControlFlow {
       kind, condition, ..
     } => TopicMetadataResponse::ControlFlow(ControlFlowTopicResponse {
       topic_id: topic.id(),
@@ -710,8 +710,8 @@ fn topic_metadata_to_response(
       condition: condition.id(),
     }),
 
-    o11a_core::core::TopicMetadata::CommentTopic {
-      author_id,
+    o11a_core::domain::TopicMetadata::CommentTopic {
+      author: author_id,
       comment_type,
       target_topic,
       created_at,
@@ -727,10 +727,10 @@ fn topic_metadata_to_response(
       mentioned_topics: mentioned_topics.iter().map(|t| t.id()).collect(),
     }),
 
-    o11a_core::core::TopicMetadata::FeatureTopic {
+    o11a_core::domain::TopicMetadata::FeatureTopic {
       name,
       description,
-      author_id,
+      author: author_id,
       created_at,
       ..
     } => TopicMetadataResponse::Feature(FeatureTopicResponse {
@@ -741,9 +741,9 @@ fn topic_metadata_to_response(
       created_at: created_at.clone(),
     }),
 
-    o11a_core::core::TopicMetadata::RequirementTopic {
+    o11a_core::domain::TopicMetadata::RequirementTopic {
       description,
-      author_id,
+      author: author_id,
       created_at,
       ..
     } => TopicMetadataResponse::Requirement(RequirementTopicResponse {
@@ -753,10 +753,10 @@ fn topic_metadata_to_response(
       created_at: created_at.clone(),
     }),
 
-    o11a_core::core::TopicMetadata::BehaviorTopic {
+    o11a_core::domain::TopicMetadata::BehaviorTopic {
       description,
       member_topic,
-      author_id,
+      author: author_id,
       created_at,
       ..
     } => TopicMetadataResponse::Behavior(BehaviorTopicResponse {
@@ -767,11 +767,11 @@ fn topic_metadata_to_response(
       created_at: created_at.clone(),
     }),
 
-    o11a_core::core::TopicMetadata::FunctionalSemanticTopic {
+    o11a_core::domain::TopicMetadata::FunctionalSemanticTopic {
       description,
       declaration_topic,
       documentation_topics,
-      author_id,
+      author: author_id,
       created_at,
       ..
     } => TopicMetadataResponse::Semantic(SemanticTopicResponse {
@@ -786,10 +786,10 @@ fn topic_metadata_to_response(
       created_at: created_at.clone(),
     }),
 
-    o11a_core::core::TopicMetadata::ThreatTopic {
+    o11a_core::domain::TopicMetadata::ThreatTopic {
       description,
       subject_topic,
-      author_id,
+      author: author_id,
       created_at,
       severity,
       ..
@@ -802,10 +802,10 @@ fn topic_metadata_to_response(
       severity: severity.map(|s| s.as_str().to_string()),
     }),
 
-    o11a_core::core::TopicMetadata::InvariantTopic {
+    o11a_core::domain::TopicMetadata::InvariantTopic {
       description,
       threat_topic,
-      author_id,
+      author: author_id,
       created_at,
       severity,
       ..
@@ -1333,7 +1333,7 @@ pub async fn get_features(
     .topic_metadata
     .iter()
     .filter_map(|(t, m)| {
-      if matches!(m, o11a_core::core::TopicMetadata::FeatureTopic { .. }) {
+      if matches!(m, o11a_core::domain::TopicMetadata::FeatureTopic { .. }) {
         Some(topic_metadata_to_response(t, m))
       } else {
         None
@@ -1366,7 +1366,7 @@ pub async fn get_feature_requirements(
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
   if !matches!(
     audit_data.topic_metadata.get(&feature_topic),
-    Some(o11a_core::core::TopicMetadata::FeatureTopic { .. })
+    Some(o11a_core::domain::TopicMetadata::FeatureTopic { .. })
   ) {
     return Err(StatusCode::NOT_FOUND);
   }
@@ -1415,7 +1415,7 @@ pub async fn get_threat_invariants(
 /// Collect requirement topics for a set of feature topics.
 fn requirements_for_features(
   feature_topics: &[topic::Topic],
-  audit_data: &core::AuditData,
+  audit_data: &domain::AuditData,
 ) -> Vec<topic::Topic> {
   let mut requirement_topics = Vec::new();
   for ft in feature_topics {
@@ -1569,7 +1569,7 @@ pub async fn get_requirements(
       .iter()
       .filter_map(|rt| {
         let metadata = audit_data.topic_metadata.get(rt)?;
-        if matches!(metadata, core::TopicMetadata::RequirementTopic { .. }) {
+        if matches!(metadata, domain::TopicMetadata::RequirementTopic { .. }) {
           Some(topic_metadata_to_response(rt, metadata))
         } else {
           None
@@ -1583,7 +1583,7 @@ pub async fn get_requirements(
     .topic_metadata
     .iter()
     .filter_map(|(t, m)| {
-      if matches!(m, core::TopicMetadata::RequirementTopic { .. }) {
+      if matches!(m, domain::TopicMetadata::RequirementTopic { .. }) {
         Some(topic_metadata_to_response(t, m))
       } else {
         None
@@ -1608,7 +1608,7 @@ pub struct SubjectPropertyResponse {
   pub topic_id: String,
   pub property_type: String,
   pub value: String,
-  pub author_id: i64,
+  pub author_id: Author,
 }
 /// GET /api/v1/audits/:audit_id/topics/:topic_id/semantics
 /// Returns all functional semantics for a topic from the in-memory state.
@@ -1631,9 +1631,9 @@ pub async fn get_functional_semantics(
         .iter()
         .filter_map(|sem_topic| {
           let metadata = audit_data.topic_metadata.get(sem_topic)?;
-          if let core::TopicMetadata::FunctionalSemanticTopic {
+          if let domain::TopicMetadata::FunctionalSemanticTopic {
             description,
-            author_id,
+            author,
             ..
           } = metadata
           {
@@ -1641,7 +1641,7 @@ pub async fn get_functional_semantics(
               topic_id: topic_id.clone(),
               property_type: "functional_semantics".to_string(),
               value: description.clone(),
-              author_id: *author_id,
+              author_id: *author,
             })
           } else {
             None
@@ -1673,7 +1673,7 @@ pub async fn get_all_functional_semantics(
     .topic_metadata
     .iter()
     .filter_map(|(t, m)| {
-      if matches!(m, core::TopicMetadata::FunctionalSemanticTopic { .. }) {
+      if matches!(m, domain::TopicMetadata::FunctionalSemanticTopic { .. }) {
         Some(topic_metadata_to_response(t, m))
       } else {
         None
@@ -1759,9 +1759,9 @@ pub async fn create_threat_feature_link(
   let threat_id = threat_topic.numeric_id() as i64;
   let feature_id = feature_topic.numeric_id() as i64;
 
-  let relation = core::ThreatFeatureRelation::parse_str(&payload.relation)
+  let relation = domain::ThreatFeatureRelation::parse_str(&payload.relation)
     .ok_or(StatusCode::BAD_REQUEST)?;
-  let severity = core::ThreatSeverity::parse_str(&payload.severity)
+  let severity = domain::ThreatSeverity::parse_str(&payload.severity)
     .ok_or(StatusCode::BAD_REQUEST)?;
 
   let _row = db::create_threat_feature_link(
@@ -1794,7 +1794,7 @@ pub async fn create_threat_feature_link(
 
     audit_data
       .threat_feature_links
-      .push(core::ThreatFeatureLink {
+      .push(domain::ThreatFeatureLink {
         threat_topic: threat_topic,
         feature_topic: feature_topic,
         relation,
@@ -1809,7 +1809,7 @@ pub async fn create_threat_feature_link(
       .map(|l| l.severity)
       .max();
     if let Some(max_sev) = max_severity
-      && let Some(core::TopicMetadata::ThreatTopic { severity: s, .. }) =
+      && let Some(domain::TopicMetadata::ThreatTopic { severity: s, .. }) =
         audit_data.topic_metadata.get_mut(&threat_topic)
     {
       *s = Some(max_sev);
@@ -1871,7 +1871,7 @@ pub async fn delete_threat_feature_link(
       .filter(|l| l.threat_topic == threat_topic)
       .map(|l| l.severity)
       .max();
-    if let Some(core::TopicMetadata::ThreatTopic { severity: s, .. }) =
+    if let Some(domain::TopicMetadata::ThreatTopic { severity: s, .. }) =
       audit_data.topic_metadata.get_mut(&threat_topic)
     {
       *s = max_severity;
@@ -1890,7 +1890,7 @@ pub struct CreateConditionRequest {
   pub subject_topic: String,
   pub condition_type: String,
   pub description: String,
-  pub author_id: i64,
+  pub author_id: Author,
   #[serde(default)]
   pub evaluations: Vec<ConditionEvaluationInput>,
 }
@@ -1907,7 +1907,7 @@ pub struct ConditionResponse {
   pub subject_topic: String,
   pub condition_type: String,
   pub description: String,
-  pub author_id: i64,
+  pub author_id: Author,
   pub created_at: String,
   pub evaluations: Vec<ConditionEvaluationResponse>,
 }
@@ -1961,23 +1961,23 @@ pub async fn create_condition(
 
   // Update in-memory state
   let condition_type = match payload.condition_type.as_str() {
-    "state_write" => core::NonPureSubjectType::StateWrite,
-    "state_read" => core::NonPureSubjectType::StateRead,
-    "external_call" => core::NonPureSubjectType::ExternalCall,
-    "delegate_call" => core::NonPureSubjectType::DelegateCall,
-    "inline_assembly" => core::NonPureSubjectType::InlineAssembly,
-    "create" => core::NonPureSubjectType::Create,
+    "state_write" => domain::NonPureSubjectType::StateWrite,
+    "state_read" => domain::NonPureSubjectType::StateRead,
+    "external_call" => domain::NonPureSubjectType::ExternalCall,
+    "delegate_call" => domain::NonPureSubjectType::DelegateCall,
+    "inline_assembly" => domain::NonPureSubjectType::InlineAssembly,
+    "create" => domain::NonPureSubjectType::Create,
     _ => return Err(StatusCode::BAD_REQUEST),
   };
 
-  let condition = core::Condition {
+  let condition = domain::Condition {
     subject_topic: topic::new_topic(&payload.subject_topic),
     condition_type,
     description: payload.description.clone(),
     evaluations: payload
       .evaluations
       .iter()
-      .map(|e| core::ConditionEvaluation {
+      .map(|e| domain::ConditionEvaluation {
         question: e.question.clone(),
         answer: e.answer.clone(),
       })
@@ -2146,7 +2146,7 @@ pub async fn get_behaviors(
     .topic_metadata
     .iter()
     .filter_map(|(bt, m)| {
-      if matches!(m, core::TopicMetadata::BehaviorTopic { .. }) {
+      if matches!(m, domain::TopicMetadata::BehaviorTopic { .. }) {
         Some(topic_metadata_to_response(bt, m))
       } else {
         None
@@ -2165,7 +2165,7 @@ pub async fn get_behaviors(
 pub struct CreateThreatRequest {
   pub description: String,
   pub subject_topic: String,
-  pub author_id: i64,
+  pub author_id: Author,
 }
 
 /// POST /api/v1/audits/:audit_id/threats
@@ -2198,15 +2198,15 @@ pub async fn create_threat(
   let subject_topic = topic::new_topic(&payload.subject_topic);
   let threat_topic = topic::new_attack_vector_topic(row.id as i32);
 
-  let threat = core::Threat {
+  let threat = domain::Threat {
     invariant_topics: Vec::new(),
   };
 
-  let metadata = core::TopicMetadata::ThreatTopic {
+  let metadata = domain::TopicMetadata::ThreatTopic {
     topic: threat_topic,
     description: row.description,
     subject_topic: subject_topic,
-    author_id: row.author_id,
+    author: row.author_id,
     created_at: row.created_at,
     severity: None,
   };
@@ -2222,7 +2222,7 @@ pub async fn create_threat(
     .topic_metadata
     .insert(threat_topic, metadata.clone());
 
-  o11a_core::core::rebuild_feature_context(audit_data);
+  o11a_core::domain::rebuild_feature_context(audit_data);
 
   let response = topic_metadata_to_response(&threat_topic, &metadata);
   Ok(Json(response))
@@ -2267,7 +2267,7 @@ pub async fn delete_threat(
     audit_data.topic_metadata.remove(&threat_topic);
     audit_data.topic_context.remove(&threat_topic);
 
-    o11a_core::core::rebuild_feature_context(audit_data);
+    o11a_core::domain::rebuild_feature_context(audit_data);
   }
 
   Ok(StatusCode::NO_CONTENT)
@@ -2306,7 +2306,7 @@ pub async fn get_threat(
 #[derive(Debug, Deserialize)]
 pub struct CreateInvariantRequest {
   pub description: String,
-  pub author_id: i64,
+  pub author_id: Author,
 }
 
 /// POST /api/v1/audits/:audit_id/threats/:threat_id/invariants
@@ -2334,7 +2334,7 @@ pub async fn create_invariant(
     })?;
     let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
     match audit_data.topic_metadata.get(&threat_topic) {
-      Some(core::TopicMetadata::ThreatTopic { severity, .. }) => *severity,
+      Some(domain::TopicMetadata::ThreatTopic { severity, .. }) => *severity,
       _ => return Err(StatusCode::NOT_FOUND),
     }
   };
@@ -2354,15 +2354,15 @@ pub async fn create_invariant(
 
   let inv_topic = topic::new_invariant_topic(row.id as i32);
 
-  let invariant = core::Invariant {
+  let invariant = domain::Invariant {
     source_topics: Vec::new(),
   };
 
-  let metadata = core::TopicMetadata::InvariantTopic {
+  let metadata = domain::TopicMetadata::InvariantTopic {
     topic: inv_topic,
     description: row.description,
     threat_topic: threat_topic,
-    author_id: row.author_id,
+    author: row.author_id,
     created_at: row.created_at,
     severity,
   };
@@ -2384,7 +2384,7 @@ pub async fn create_invariant(
     .topic_metadata
     .insert(inv_topic, metadata.clone());
 
-  o11a_core::core::rebuild_feature_context(audit_data);
+  o11a_core::domain::rebuild_feature_context(audit_data);
 
   let response = topic_metadata_to_response(&inv_topic, &metadata);
   Ok(Json(response))
@@ -2434,7 +2434,7 @@ pub async fn delete_invariant(
     audit_data.topic_metadata.remove(&inv_topic);
     audit_data.topic_context.remove(&inv_topic);
 
-    o11a_core::core::rebuild_feature_context(audit_data);
+    o11a_core::domain::rebuild_feature_context(audit_data);
   }
 
   Ok(StatusCode::NO_CONTENT)
@@ -2570,7 +2570,7 @@ pub struct CreatedResponse {
 pub struct CreateUserFeatureRequest {
   pub name: String,
   pub description: String,
-  pub author_id: i64,
+  pub author_id: Author,
   #[serde(default)]
   pub requirement_topics: Vec<String>,
   #[serde(default)]
@@ -2580,7 +2580,7 @@ pub struct CreateUserFeatureRequest {
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequirementRequest {
   pub description: String,
-  pub author_id: i64,
+  pub author_id: Author,
   #[serde(default)]
   pub section_topic: Option<String>,
   #[serde(default)]
@@ -2591,14 +2591,14 @@ pub struct CreateUserRequirementRequest {
 pub struct CreateUserBehaviorRequest {
   pub description: String,
   pub member_topic: String,
-  pub author_id: i64,
+  pub author_id: Author,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateUserFunctionalSemanticRequest {
   pub description: String,
   pub declaration_topic: String,
-  pub author_id: i64,
+  pub author_id: Author,
   #[serde(default)]
   pub documentation_topics: Vec<String>,
 }
@@ -2668,11 +2668,11 @@ pub async fn create_user_feature(
 
     audit_data.topic_metadata.insert(
       feature_topic,
-      core::TopicMetadata::FeatureTopic {
+      domain::TopicMetadata::FeatureTopic {
         topic: feature_topic,
         name: payload.name.clone(),
         description: payload.description.clone(),
-        author_id: payload.author_id,
+        author: payload.author_id,
         created_at: Some(created_at),
       },
     );
@@ -2692,7 +2692,7 @@ pub async fn create_user_feature(
         .extend(behavior_topics);
     }
 
-    core::rebuild_feature_context(audit_data);
+    domain::rebuild_feature_context(audit_data);
   }
 
   Ok(Json(CreatedResponse {
@@ -2756,23 +2756,23 @@ pub async fn create_user_requirement(
 
     audit_data.requirements.insert(
       req_topic,
-      core::Requirement {
+      domain::Requirement {
         documentation_topics,
       },
     );
 
     audit_data.topic_metadata.insert(
       req_topic,
-      core::TopicMetadata::RequirementTopic {
+      domain::TopicMetadata::RequirementTopic {
         topic: req_topic,
         description: payload.description.clone(),
         section_topic,
-        author_id: payload.author_id,
+        author: payload.author_id,
         created_at: Some(created_at),
       },
     );
 
-    core::rebuild_feature_context(audit_data);
+    domain::rebuild_feature_context(audit_data);
   }
 
   Ok(Json(CreatedResponse {
@@ -2819,16 +2819,16 @@ pub async fn create_user_behavior(
 
     audit_data.topic_metadata.insert(
       beh_topic,
-      core::TopicMetadata::BehaviorTopic {
+      domain::TopicMetadata::BehaviorTopic {
         topic: beh_topic,
         description: payload.description.clone(),
         member_topic,
-        author_id: payload.author_id,
+        author: payload.author_id,
         created_at: Some(created_at),
       },
     );
 
-    core::rebuild_feature_context(audit_data);
+    domain::rebuild_feature_context(audit_data);
   }
 
   Ok(Json(CreatedResponse {
@@ -2894,17 +2894,17 @@ pub async fn create_user_functional_semantic(
 
     audit_data.topic_metadata.insert(
       sem_topic,
-      core::TopicMetadata::FunctionalSemanticTopic {
+      domain::TopicMetadata::FunctionalSemanticTopic {
         topic: sem_topic,
         description: payload.description.clone(),
         declaration_topic,
         documentation_topics,
-        author_id: payload.author_id,
+        author: payload.author_id,
         created_at: Some(created_at),
       },
     );
 
-    core::rebuild_feature_context(audit_data);
+    domain::rebuild_feature_context(audit_data);
   }
 
   Ok(Json(CreatedResponse {

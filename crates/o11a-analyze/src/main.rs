@@ -18,7 +18,7 @@ use o11a_core::analysis_artifact::{
   self, ARTIFACT_SCHEMA_VERSION, AnalysisArtifact,
 };
 use o11a_core::collaborator::agent::pipeline::{self, PipelineState};
-use o11a_core::core;
+use o11a_core::domain;
 use o11a_core::report;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -64,7 +64,7 @@ async fn main() -> ExitCode {
 
 async fn run(project_root: &Path, audit_id: &str) -> Result<(), String> {
   println!("Loading project from {}", project_root.display());
-  let data_context = core::new_data_context();
+  let data_context = domain::new_data_context();
   let data_context = Arc::new(Mutex::new(data_context));
 
   analysis::run_analysis(project_root, audit_id, &data_context)
@@ -86,7 +86,7 @@ async fn run(project_root: &Path, audit_id: &str) -> Result<(), String> {
       .lock()
       .map_err(|e| format!("DataContext mutex poisoned: {}", e))?;
     if let Some(audit_data) = ctx.get_audit_mut(audit_id) {
-      core::rebuild_feature_context(audit_data);
+      domain::rebuild_feature_context(audit_data);
     }
   }
 

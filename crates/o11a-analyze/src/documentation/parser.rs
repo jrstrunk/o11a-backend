@@ -4,8 +4,8 @@ use o11a_core::code_refs::{
   find_declaration_by_name, get_named_topic_kind, is_keyword, match_operator,
   split_text_code_references,
 };
-use o11a_core::core;
-use o11a_core::core::topic;
+use o11a_core::domain;
+use o11a_core::domain::topic;
 use o11a_core::documentation::ast::{DocumentationAST, DocumentationNode};
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -23,7 +23,7 @@ pub fn next_node_id() -> i32 {
 /// Tokenizes code into CodeKeyword, CodeOperator, CodeIdentifier, and CodeText nodes
 fn tokenize_code(
   code: &str,
-  audit_data: &core::AuditData,
+  audit_data: &domain::AuditData,
   next_id: &dyn Fn() -> i32,
 ) -> Vec<DocumentationNode> {
   let mut tokens = Vec::new();
@@ -126,10 +126,10 @@ fn tokenize_code(
 /// Processes markdown files from src/ and docs/ directories
 pub fn process_files(
   project_root: &Path,
-  document_files: &[core::ProjectPath],
-  audit_data: &core::AuditData,
+  document_files: &[domain::ProjectPath],
+  audit_data: &domain::AuditData,
 ) -> Result<
-  std::collections::BTreeMap<core::ProjectPath, Vec<DocumentationAST>>,
+  std::collections::BTreeMap<domain::ProjectPath, Vec<DocumentationAST>>,
   String,
 > {
   let mut ast_map = std::collections::BTreeMap::new();
@@ -162,8 +162,8 @@ pub fn process_files(
 
 pub fn ast_from_markdown(
   content: &str,
-  project_path: &core::ProjectPath,
-  audit_data: &core::AuditData,
+  project_path: &domain::ProjectPath,
+  audit_data: &domain::AuditData,
   next_id: &dyn Fn() -> i32,
 ) -> Result<DocumentationAST, String> {
   // Parse markdown to mdast
@@ -184,7 +184,7 @@ pub fn ast_from_markdown(
 /// Each sentence contains all inline nodes (Text, InlineCode, Emphasis, Strong, Link) until a period
 fn split_into_sentences(
   children: Vec<DocumentationNode>,
-  audit_data: &core::AuditData,
+  audit_data: &domain::AuditData,
   next_id: &dyn Fn() -> i32,
 ) -> Vec<DocumentationNode> {
   let mut sentences = Vec::new();
@@ -282,7 +282,7 @@ fn split_into_sentences(
 
 fn split_code_references(
   children: Vec<DocumentationNode>,
-  audit_data: &core::AuditData,
+  audit_data: &domain::AuditData,
   next_id: &dyn Fn() -> i32,
 ) -> Vec<DocumentationNode> {
   split_text_code_references(
@@ -477,7 +477,7 @@ fn get_mdast_position(node: &MdNode) -> Option<usize> {
 
 fn convert_mdast_node(
   node: &MdNode,
-  audit_data: &core::AuditData,
+  audit_data: &domain::AuditData,
   next_id: &dyn Fn() -> i32,
 ) -> Result<DocumentationNode, String> {
   let node_id = next_id();
