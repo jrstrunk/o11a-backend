@@ -2007,6 +2007,7 @@ dependencies = [
  "o11a-core",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
  "tokio",
 ]
 
@@ -2020,6 +2021,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "thiserror 1.0.69",
  "tokio",
 ]
 
