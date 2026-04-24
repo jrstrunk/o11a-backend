@@ -116,7 +116,8 @@ pub async fn get_topic_view(
   .ok_or_else(|| {
     tracing::warn!(
       "Metadata for topic '{}' not found in audit '{}'",
-      topic_id, audit_id
+      topic_id,
+      audit_id
     );
     StatusCode::NOT_FOUND
   })?;
@@ -180,7 +181,11 @@ pub async fn get_conversation(
   let response =
     crate::topic_view::build_conversation(&topic_id, audit_data, cache)
       .ok_or_else(|| {
-        tracing::warn!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
+        tracing::warn!(
+          "Topic '{}' not found in audit '{}'",
+          topic_id,
+          audit_id
+        );
         StatusCode::NOT_FOUND
       })?;
 

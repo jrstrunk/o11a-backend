@@ -3,8 +3,8 @@ mod websocket;
 
 use o11a_core::analysis_artifact::{self, ArtifactError};
 use o11a_core::collaborator::db as collab_db;
-use o11a_core::domain;
 use o11a_core::db;
+use o11a_core::domain;
 use o11a_core::report::{self, AuditReport};
 use o11a_core::state::AppState;
 use std::path::{Path, PathBuf};

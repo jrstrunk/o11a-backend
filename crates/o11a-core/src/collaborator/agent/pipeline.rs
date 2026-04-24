@@ -85,9 +85,11 @@ pub async fn build_requirements(
       .lock()
       .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
     let audit_data =
-      ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
-        audit_id: audit_id.to_string(),
-      })?;
+      ctx
+        .get_audit(audit_id)
+        .ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
     task::render_documentation_files(audit_data)
   };
 
@@ -131,11 +133,9 @@ pub async fn build_requirements(
   for (section_topic, req_topics) in parsed_section_requirements {
     let mut new_req_topics = Vec::with_capacity(req_topics.len());
     for old_req_topic in req_topics {
-      let new_req_topic = *id_remap
-        .entry(old_req_topic)
-        .or_insert_with(|| {
-          topic::new_requirement_topic(ids::allocate_requirement_id())
-        });
+      let new_req_topic = *id_remap.entry(old_req_topic).or_insert_with(|| {
+        topic::new_requirement_topic(ids::allocate_requirement_id())
+      });
       new_req_topics.push(new_req_topic);
     }
     new_section_requirements.insert(section_topic, new_req_topics);
@@ -181,10 +181,11 @@ pub async fn build_requirements(
     .data_context
     .lock()
     .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
-  let audit_data =
-    ctx.get_audit_mut(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+  let audit_data = ctx.get_audit_mut(audit_id).ok_or_else(|| {
+    PipelineError::AuditNotFound {
       audit_id: audit_id.to_string(),
-    })?;
+    }
+  })?;
 
   // Clear old feature/requirement metadata — requirements are being
   // replaced and features will be re-synthesized against the new set.
@@ -219,9 +220,11 @@ pub async fn synthesize_features(
       .lock()
       .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
     let audit_data =
-      ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
-        audit_id: audit_id.to_string(),
-      })?;
+      ctx
+        .get_audit(audit_id)
+        .ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
     task::render_reconciliation_context(audit_data)
   };
 
@@ -302,10 +305,11 @@ pub async fn synthesize_features(
     .data_context
     .lock()
     .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
-  let audit_data =
-    ctx.get_audit_mut(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+  let audit_data = ctx.get_audit_mut(audit_id).ok_or_else(|| {
+    PipelineError::AuditNotFound {
       audit_id: audit_id.to_string(),
-    })?;
+    }
+  })?;
 
   audit_data
     .topic_metadata
@@ -337,9 +341,11 @@ pub async fn build_behaviors(
       .lock()
       .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
     let audit_data =
-      ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
-        audit_id: audit_id.to_string(),
-      })?;
+      ctx
+        .get_audit(audit_id)
+        .ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
     context::collect_contracts_for_behavior_extraction(audit_data)
   };
 
@@ -397,10 +403,11 @@ pub async fn build_behaviors(
     .data_context
     .lock()
     .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
-  let audit_data =
-    ctx.get_audit_mut(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+  let audit_data = ctx.get_audit_mut(audit_id).ok_or_else(|| {
+    PipelineError::AuditNotFound {
       audit_id: audit_id.to_string(),
-    })?;
+    }
+  })?;
 
   // Clear old behaviors
   audit_data
@@ -437,9 +444,11 @@ pub async fn build_semantic_links(
       .lock()
       .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
     let audit_data =
-      ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
-        audit_id: audit_id.to_string(),
-      })?;
+      ctx
+        .get_audit(audit_id)
+        .ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
 
     let mechanical = context::mechanical_semantic_links(audit_data);
     let sections = task::collect_documentation_sections(audit_data);
@@ -497,10 +506,11 @@ pub async fn build_semantic_links(
         .data_context
         .lock()
         .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
-      let audit_data =
-        ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+      let audit_data = ctx.get_audit(audit_id).ok_or_else(|| {
+        PipelineError::AuditNotFound {
           audit_id: audit_id.to_string(),
-        })?;
+        }
+      })?;
       context::render_section_text(section_topic, audit_data)
         .unwrap_or_default()
     };
@@ -561,10 +571,11 @@ pub async fn build_semantic_links(
         .data_context
         .lock()
         .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
-      let audit_data =
-        ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+      let audit_data = ctx.get_audit(audit_id).ok_or_else(|| {
+        PipelineError::AuditNotFound {
           audit_id: audit_id.to_string(),
-        })?;
+        }
+      })?;
       let stxt = context::render_section_text(section_topic, audit_data)
         .unwrap_or_default();
 
@@ -618,9 +629,8 @@ pub async fn build_semantic_links(
   for handle in pass2_handles {
     match handle.await {
       Ok(Ok(result)) => {
-        let doc_members = section_doc_members
-          .entry(result.section_topic)
-          .or_default();
+        let doc_members =
+          section_doc_members.entry(result.section_topic).or_default();
 
         for mapping in result.member_mappings {
           // If no doc_topics, use the section topic as fallback
@@ -663,10 +673,11 @@ pub async fn build_semantic_links(
         .data_context
         .lock()
         .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
-      let audit_data =
-        ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+      let audit_data = ctx.get_audit(audit_id).ok_or_else(|| {
+        PipelineError::AuditNotFound {
           audit_id: audit_id.to_string(),
-        })?;
+        }
+      })?;
       context::render_section_text(section_topic, audit_data)
         .unwrap_or_default()
     };
@@ -677,10 +688,11 @@ pub async fn build_semantic_links(
           .data_context
           .lock()
           .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
-        let audit_data =
-          ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+        let audit_data = ctx.get_audit(audit_id).ok_or_else(|| {
+          PipelineError::AuditNotFound {
             audit_id: audit_id.to_string(),
-          })?;
+          }
+        })?;
 
         let decls = context::render_batched_member_declarations_for_semantics(
           member_topics,
@@ -721,10 +733,11 @@ pub async fn build_semantic_links(
         .data_context
         .lock()
         .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
-      let audit_data =
-        ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+      let audit_data = ctx.get_audit(audit_id).ok_or_else(|| {
+        PipelineError::AuditNotFound {
           audit_id: audit_id.to_string(),
-        })?;
+        }
+      })?;
 
       let stxt = context::render_section_text(section_topic, audit_data)
         .unwrap_or_default();
@@ -779,9 +792,11 @@ pub async fn build_semantic_links(
       .lock()
       .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
     let audit_data =
-      ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
-        audit_id: audit_id.to_string(),
-      })?;
+      ctx
+        .get_audit(audit_id)
+        .ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
 
     for link in &mut all_links {
       if let Some(base) = audit_data
@@ -892,10 +907,11 @@ pub async fn build_semantic_links(
     .data_context
     .lock()
     .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
-  let audit_data =
-    ctx.get_audit_mut(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+  let audit_data = ctx.get_audit_mut(audit_id).ok_or_else(|| {
+    PipelineError::AuditNotFound {
       audit_id: audit_id.to_string(),
-    })?;
+    }
+  })?;
 
   // Clear old functional-semantic metadata so repeated runs don't accumulate.
   audit_data.topic_metadata.retain(|_, m| {

@@ -42,11 +42,7 @@ async fn main() {
   let doc_list = match std::fs::read_to_string(&doc_list_path) {
     Ok(content) => content,
     Err(e) => {
-      tracing::error!(
-        "failed to read '{}': {}",
-        doc_list_path.display(),
-        e
-      );
+      tracing::error!("failed to read '{}': {}", doc_list_path.display(), e);
       std::process::exit(1);
     }
   };
@@ -103,11 +99,7 @@ async fn main() {
     match std::fs::write(&absolute_path, content) {
       Ok(()) => tracing::info!("Wrote: {}", relative_path),
       Err(e) => {
-        tracing::error!(
-          "failed to write '{}': {}",
-          absolute_path.display(),
-          e
-        );
+        tracing::error!("failed to write '{}': {}", absolute_path.display(), e);
       }
     }
   }

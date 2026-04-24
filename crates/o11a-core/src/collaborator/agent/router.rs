@@ -153,9 +153,8 @@ pub async fn chat_completion(
     );
   }
 
-  let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
-    TaskError::MissingEnv("OPENROUTER_API_KEY".to_string())
-  })?;
+  let api_key = std::env::var("OPENROUTER_API_KEY")
+    .map_err(|_| TaskError::MissingEnv("OPENROUTER_API_KEY".to_string()))?;
 
   let model = match task_size {
     TaskSize::Large => LARGE_MODEL,

@@ -312,7 +312,9 @@ pub async fn extract_requirements_from_documentation(
   documentation_files: &[String],
 ) -> Result<ParsedRequirements, TaskError> {
   if documentation_files.is_empty() {
-    return Err(TaskError::Other("No documentation found in audit".to_string()));
+    return Err(TaskError::Other(
+      "No documentation found in audit".to_string(),
+    ));
   }
 
   if documentation_files.len() == 1 {
@@ -1034,7 +1036,8 @@ fn render_requirements_for_reconciliation(audit_data: &AuditData) -> String {
       .iter()
       .filter_map(|rt| {
         if let Some(domain::TopicMetadata::RequirementTopic {
-          description, ..
+          description,
+          ..
         }) = audit_data.topic_metadata.get(rt)
         {
           Some(serde_json::json!({

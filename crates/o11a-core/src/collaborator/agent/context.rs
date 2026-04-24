@@ -2318,7 +2318,9 @@ pub fn render_contract_for_behavior_extraction(
       continue;
     };
     let in_contract = match metadata.scope() {
-      domain::Scope::Component { component, .. } => *component == contract_topic,
+      domain::Scope::Component { component, .. } => {
+        *component == contract_topic
+      }
       domain::Scope::Member { component, .. } => *component == contract_topic,
       domain::Scope::ContainingBlock { component, .. } => {
         *component == contract_topic
@@ -2815,9 +2817,7 @@ fn collect_mechanical_links_recursive(
     } => {
       if let Some(section_topic) = current_section {
         // Record section → declaration
-        let decls = section_to_declarations
-          .entry(*section_topic)
-          .or_default();
+        let decls = section_to_declarations.entry(*section_topic).or_default();
         if !decls.contains(ref_topic) {
           decls.push(*ref_topic);
         }
@@ -2831,9 +2831,7 @@ fn collect_mechanical_links_recursive(
               ..
             } => Some(*ref_topic),
             _ => match metadata.scope() {
-              domain::Scope::Component { component, .. } => {
-                Some(*component)
-              }
+              domain::Scope::Component { component, .. } => Some(*component),
               domain::Scope::Member { component, .. } => Some(*component),
               domain::Scope::ContainingBlock { component, .. } => {
                 Some(*component)
@@ -2842,9 +2840,8 @@ fn collect_mechanical_links_recursive(
             },
           };
           if let Some(ct) = contract_topic {
-            let contracts = section_to_contracts
-              .entry(*section_topic)
-              .or_default();
+            let contracts =
+              section_to_contracts.entry(*section_topic).or_default();
             if !contracts.contains(&ct) {
               contracts.push(ct);
             }
