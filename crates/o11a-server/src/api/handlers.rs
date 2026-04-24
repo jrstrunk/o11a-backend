@@ -7,12 +7,14 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
+use o11a_core::analysis_artifact::{self, ArtifactError};
 use o11a_core::collaborator::{db, models::*};
 use o11a_core::core::{
-  self, project,
+  self,
   topic::{self, TopicKind, new_topic},
 };
 use o11a_core::feature_lookup::features_for_topic;
+use o11a_core::report::{self, AuditReport};
 use o11a_core::state::AppState;
 
 // Health check handler
@@ -193,23 +195,88 @@ pub struct CreateAuditResponse {
   pub message: String,
 }
 
-// Create a new audit
+// Create a new audit by loading its pre-built artifact and report.
 pub async fn create_audit(
   State(state): State<AppState>,
   Json(payload): Json<CreateAuditRequest>,
 ) -> Result<Json<CreateAuditResponse>, StatusCode> {
   println!("POST /api/v1/audits");
   let project_root = std::path::Path::new(&payload.project_root);
+  let artifact_path =
+    project_root.join("o11a").join("audit.analysis.bin");
+  let report_path = project_root.join("o11a").join("audit.json");
 
-  // Load the project for this audit
-  project::load_project(project_root, &payload.audit_id, &state.data_context)
-    .map_err(|e| {
+  let artifact = match analysis_artifact::read_artifact(&artifact_path) {
+    Ok(a) => a,
+    Err(ArtifactError::VersionMismatch { found, expected }) => {
+      eprintln!(
+        "create_audit: artifact at {} has schema {} (server expects {})",
+        artifact_path.display(),
+        found,
+        expected
+      );
+      return Err(StatusCode::CONFLICT);
+    }
+    Err(e) => {
+      eprintln!(
+        "create_audit: failed to read {}: {}",
+        artifact_path.display(),
+        e
+      );
+      return Err(StatusCode::BAD_REQUEST);
+    }
+  };
+
+  if artifact.audit_id != payload.audit_id {
     eprintln!(
-      "Failed to load project for audit '{}': {}",
-      payload.audit_id, e
+      "create_audit: artifact is for '{}' but request is for '{}'",
+      artifact.audit_id, payload.audit_id
     );
-    StatusCode::INTERNAL_SERVER_ERROR
+    return Err(StatusCode::BAD_REQUEST);
+  }
+
+  let report_body = std::fs::read_to_string(&report_path).map_err(|e| {
+    eprintln!(
+      "create_audit: failed to read {}: {}",
+      report_path.display(),
+      e
+    );
+    StatusCode::BAD_REQUEST
   })?;
+  let report: AuditReport =
+    serde_json::from_str(&report_body).map_err(|e| {
+      eprintln!("create_audit: failed to parse audit.json: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+
+  {
+    let mut ctx = state.data_context.lock().map_err(|e| {
+      eprintln!("Mutex poisoned in create_audit: {}", e);
+      StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    ctx.create_audit(
+      payload.audit_id.clone(),
+      artifact.payload.audit_name.clone(),
+      artifact.payload.in_scope_files.clone(),
+      artifact.payload.security_notes.clone(),
+    );
+    let audit_data = ctx.get_audit_mut(&payload.audit_id).ok_or_else(|| {
+      eprintln!(
+        "create_audit: audit '{}' missing after create_audit",
+        payload.audit_id
+      );
+      StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    analysis_artifact::apply_snapshot(audit_data, artifact.payload);
+
+    if let Err(e) =
+      report::apply_report(&payload.audit_id, audit_data, &report)
+    {
+      eprintln!("create_audit: failed to apply audit report: {}", e);
+      return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    core::rebuild_feature_context(audit_data);
+  }
 
   Ok(Json(CreateAuditResponse {
     audit_id: payload.audit_id.clone(),

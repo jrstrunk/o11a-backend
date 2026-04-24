@@ -1,29 +1,43 @@
 //! o11a-analyze — the batch analysis binary.
 //!
 //! Runs the analysis pipeline end-to-end against a Solidity project and
-//! writes an `audit.json` report. Intended for CI use and as the producer
-//! side of the handoff to `o11a-server`.
+//! writes two outputs into `<project_root>/o11a/`:
+//!   - `audit.json` — the canonical pipeline report (human-readable JSON).
+//!   - `audit.analysis.bin` — a bincode-encoded snapshot of the analyzed
+//!     `AuditData` (ASTs, topic metadata, etc.), consumed by `o11a-server`
+//!     so it can serve code views without re-running the analyzer.
 //!
 //! Usage:
-//!   o11a-analyze <project_root> <audit_id> [output_path]
+//!   o11a-analyze <project_root> <audit_id>
 //!
-//! If `output_path` is omitted, writes to `<project_root>/audit.json`.
+//! Both output files are written atomically (tmp + rename). The output
+//! directory is created if it does not exist.
 
+use o11a_analyze::analysis;
+use o11a_core::analysis_artifact::{
+  self, ARTIFACT_SCHEMA_VERSION, AnalysisArtifact,
+};
 use o11a_core::collaborator::agent::pipeline::{self, PipelineState};
-use o11a_core::core::{self, project};
+use o11a_core::core;
 use o11a_core::report;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
+const OUTPUT_DIR_NAME: &str = "o11a";
+const REPORT_FILE_NAME: &str = "audit.json";
+const ARTIFACT_FILE_NAME: &str = "audit.analysis.bin";
+
 #[tokio::main]
 async fn main() -> ExitCode {
   let args: Vec<String> = std::env::args().collect();
-  if args.len() < 3 || args.len() > 4 {
+  if args.len() != 3 {
     eprintln!(
-      "Usage: o11a-analyze <project_root> <audit_id> [output_path]\n\n\
-       Runs the analysis pipeline and writes audit.json.\n\
-       If output_path is omitted, writes to <project_root>/audit.json."
+      "Usage: o11a-analyze <project_root> <audit_id>\n\n\
+       Runs the analysis pipeline and writes the report and binary\n\
+       artifact into <project_root>/{}/ (creating the directory if\n\
+       necessary).",
+      OUTPUT_DIR_NAME
     );
     return ExitCode::from(2);
   }
@@ -39,12 +53,7 @@ async fn main() -> ExitCode {
 
   let audit_id = args[2].clone();
 
-  let output_path = args
-    .get(3)
-    .map(PathBuf::from)
-    .unwrap_or_else(|| project_root.join("audit.json"));
-
-  match run(&project_root, &audit_id, &output_path).await {
+  match run(&project_root, &audit_id).await {
     Ok(()) => ExitCode::SUCCESS,
     Err(e) => {
       eprintln!("Error: {}", e);
@@ -53,16 +62,12 @@ async fn main() -> ExitCode {
   }
 }
 
-async fn run(
-  project_root: &Path,
-  audit_id: &str,
-  output_path: &Path,
-) -> Result<(), String> {
+async fn run(project_root: &Path, audit_id: &str) -> Result<(), String> {
   println!("Loading project from {}", project_root.display());
   let data_context = core::new_data_context();
   let data_context = Arc::new(Mutex::new(data_context));
 
-  project::load_project(project_root, audit_id, &data_context)
+  analysis::run_analysis(project_root, audit_id, &data_context)
     .map_err(|e| format!("Failed to load project: {}", e))?;
 
   let pipeline_state = PipelineState {
@@ -85,7 +90,15 @@ async fn run(
     }
   }
 
-  // Export the pipeline output as a versioned JSON report.
+  let output_dir = project_root.join(OUTPUT_DIR_NAME);
+  std::fs::create_dir_all(&output_dir).map_err(|e| {
+    format!(
+      "Failed to create output directory {}: {}",
+      output_dir.display(),
+      e
+    )
+  })?;
+
   let ctx = data_context
     .lock()
     .map_err(|e| format!("DataContext mutex poisoned: {}", e))?;
@@ -93,25 +106,59 @@ async fn run(
     format!("Audit '{}' not present after pipeline run", audit_id)
   })?;
 
-  let report = report::build_report(audit_id, audit_data, generated_at);
-  let json = serde_json::to_string_pretty(&report)
+  let report = report::build_report(audit_id, audit_data, generated_at.clone());
+  let report_path = output_dir.join(REPORT_FILE_NAME);
+  write_json_atomic(&report_path, &report)?;
+  println!("Wrote report to {}", report_path.display());
+
+  let artifact = AnalysisArtifact {
+    schema_version: ARTIFACT_SCHEMA_VERSION,
+    generator: report::GENERATOR_NAME.to_string(),
+    generator_version: report::GENERATOR_VERSION.to_string(),
+    generated_at,
+    audit_id: audit_id.to_string(),
+    payload: analysis_artifact::snapshot_from_audit_data(audit_data),
+  };
+  let artifact_path = output_dir.join(ARTIFACT_FILE_NAME);
+  analysis_artifact::write_artifact(&artifact_path, &artifact)
+    .map_err(|e| format!("Failed to write analysis artifact: {}", e))?;
+  println!("Wrote artifact to {}", artifact_path.display());
+
+  Ok(())
+}
+
+/// Serialize `value` as pretty JSON to `path` atomically (tmp + rename).
+fn write_json_atomic<T: serde::Serialize>(
+  path: &Path,
+  value: &T,
+) -> Result<(), String> {
+  let json = serde_json::to_string_pretty(value)
     .map_err(|e| format!("Failed to serialize report: {}", e))?;
 
-  if let Some(parent) = output_path.parent()
-    && !parent.as_os_str().is_empty()
-  {
-    std::fs::create_dir_all(parent).map_err(|e| {
-      format!(
-        "Failed to create output directory {}: {}",
-        parent.display(),
-        e
-      )
-    })?;
-  }
+  let tmp_path = match path.file_name() {
+    Some(name) => {
+      let mut tmp_name = name.to_os_string();
+      tmp_name.push(".tmp");
+      path.with_file_name(tmp_name)
+    }
+    None => {
+      return Err(format!(
+        "report path {} has no file name",
+        path.display()
+      ));
+    }
+  };
 
-  std::fs::write(output_path, json)
-    .map_err(|e| format!("Failed to write {}: {}", output_path.display(), e))?;
-
-  println!("Wrote report to {}", output_path.display());
+  std::fs::write(&tmp_path, json).map_err(|e| {
+    format!("Failed to write {}: {}", tmp_path.display(), e)
+  })?;
+  std::fs::rename(&tmp_path, path).map_err(|e| {
+    format!(
+      "Failed to rename {} to {}: {}",
+      tmp_path.display(),
+      path.display(),
+      e
+    )
+  })?;
   Ok(())
 }

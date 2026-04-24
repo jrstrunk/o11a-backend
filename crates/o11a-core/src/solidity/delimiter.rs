@@ -5,7 +5,7 @@
 //! knowledge inside this crate.
 
 use crate::core::topic::{self, new_node_topic};
-use crate::solidity::parser::ASTNode;
+use crate::solidity::ast::ASTNode;
 use serde::Serialize;
 
 /// Kind of control-flow statement that carries renderable delimiters.

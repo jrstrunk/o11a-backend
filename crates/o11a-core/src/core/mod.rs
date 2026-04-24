@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-pub mod project;
 pub mod topic;
 
 use serde::{Deserialize, Serialize};
@@ -60,7 +59,7 @@ impl CommentType {
 
 /// Represents a Solidity type for use in the checker.
 /// Contains enough detail to derive valid value ranges.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SolidityType {
   /// Elementary types with full detail for value range derivation
   Elementary(ElementaryType),
@@ -85,7 +84,7 @@ pub enum SolidityType {
 
 /// Elementary types with enough detail to derive value ranges.
 /// Numbers include bit size so the checker can compute min/max values.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ElementaryType {
   /// Boolean: range is {false, true}
   Bool,
@@ -140,7 +139,7 @@ impl ElementaryType {
 ///
 /// Branch information is encoded directly in the kind — only `If` has branches,
 /// so this avoids a disjoint field that would be meaningless for other kinds.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlockAnnotation {
   /// The topic of the annotating node (the control flow statement or
   /// the annotated block itself).
@@ -148,7 +147,7 @@ pub struct BlockAnnotation {
   pub kind: BlockAnnotationKind,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BlockAnnotationKind {
   // Control flow
   If(ControlFlowBranch),
@@ -163,7 +162,7 @@ pub enum BlockAnnotationKind {
 /// Branchless kind for the TopicMetadata::ControlFlow variant.
 /// Unlike BlockAnnotationKind (which encodes branch info for scope tracking),
 /// this simply identifies the statement type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlFlowStatementKind {
   If,
   For,
@@ -171,7 +170,7 @@ pub enum ControlFlowStatementKind {
   DoWhile,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ControlFlowBranch {
   True,
   False,
@@ -180,7 +179,7 @@ pub enum ControlFlowBranch {
 /// One layer in the containing block nesting chain.
 /// Pairs a semantic block with an optional annotation describing what
 /// kind of block it is (control flow body, unchecked, assembly, etc.).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainingBlockLayer {
   /// The semantic block at this nesting level.
   pub block: topic::Topic,
@@ -194,13 +193,13 @@ pub struct ContainingBlockLayer {
 // ============================================================================
 
 /// Simple revert/require statement info stored on FunctionModProperties.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevertInfo {
   pub topic: topic::Topic,
   pub kind: RevertConstraintKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RevertConstraintKind {
   /// require(condition) - reverts when condition is false
   Require,
@@ -208,7 +207,7 @@ pub enum RevertConstraintKind {
   Revert,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FunctionKind {
   Constructor,
   Function,
@@ -217,7 +216,7 @@ pub enum FunctionKind {
   FreeFunction,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ContractKind {
   Contract,
   Library,
@@ -453,6 +452,7 @@ fn is_common_word(name: &str) -> bool {
 
 /// Pre-computed name indexes for fast topic lookup by name.
 /// Built once after all topic_metadata insertions are complete.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopicNameIndex {
   by_qualified_name: HashMap<String, topic::Topic>,
   by_simple_name: HashMap<String, topic::Topic>,
@@ -540,10 +540,10 @@ pub struct DataContext {
   pub audits: BTreeMap<String, AuditData>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Node {
-  Solidity(crate::solidity::parser::ASTNode),
-  Documentation(crate::documentation::parser::DocumentationNode),
+  Solidity(crate::solidity::ast::ASTNode),
+  Documentation(crate::documentation::ast::DocumentationNode),
   Comment(Vec<crate::collaborator::parser::CommentNode>),
 }
 
@@ -558,12 +558,13 @@ impl Node {
   }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AST {
-  Solidity(crate::solidity::parser::SolidityAST),
-  Documentation(crate::documentation::parser::DocumentationAST),
+  Solidity(crate::solidity::ast::SolidityAST),
+  Documentation(crate::documentation::ast::DocumentationAST),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Scope {
   Global,
   Container {
@@ -785,14 +786,14 @@ pub fn set_signature_container(
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VariableMutability {
   Mutable,
   Immutable,
   Constant,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NamedTopicKind {
   Contract(ContractKind),
   Function(FunctionKind),
@@ -808,13 +809,13 @@ pub enum NamedTopicKind {
 }
 
 /// Kinds of titled topics (topics with a title but not a full declaration)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TitledTopicKind {
   /// Documentation section (H1 becomes component, sub-H1 becomes member)
   DocumentationSection,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnnamedTopicKind {
   VariableMutation,
   Arithmetic,
@@ -903,7 +904,7 @@ impl NamedTopicKind {
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NamedTopicVisibility {
   Public,
   Private,
@@ -912,7 +913,7 @@ pub enum NamedTopicVisibility {
 }
 
 /// Represents a reference to a topic, with type information about its source.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Reference {
   /// A reference from project analysis (solidity analyzer or documentation analyzer).
   ProjectReference {
@@ -997,7 +998,7 @@ impl Reference {
 /// Organizes topics hierarchically by their source scope.
 /// For Solidity: scope is a contract, scope_references are contract-level refs, nested_references are function-level refs.
 /// For Documentation: scope is a file, scope_references are file-level refs, nested_references are section-level refs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceContext {
   /// The grouping scope where these references occur (contract for Solidity, file for documentation, feature for doc expanded context)
   scope: topic::Topic,
@@ -1051,7 +1052,7 @@ impl SourceContext {
 /// A child element within a nested or annotated block source context.
 /// Unifies references and annotated block groups into a single ordered list
 /// so that correct linear source order is preserved.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SourceChild {
   /// A direct reference to a topic at this level.
   Reference(Reference),
@@ -1071,7 +1072,7 @@ impl SourceChild {
 
 /// Groups references within an annotated block (control flow body, unchecked, assembly, etc.).
 /// Recursive to handle nesting (e.g. if inside for inside unchecked).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnnotatedBlockSourceContext {
   /// The block annotation that groups these references
   annotation: BlockAnnotation,
@@ -1104,7 +1105,7 @@ impl AnnotatedBlockSourceContext {
 /// Groups references within a nested scope.
 /// For Solidity: represents references within a function/modifier.
 /// For Documentation: represents references within a section (component).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NestedSourceContext {
   /// The nested scope containing these references (function for Solidity, section for documentation)
   subscope: topic::Topic,
@@ -1485,7 +1486,7 @@ fn insert_child_ref(children: &mut Vec<SourceChild>, reference: Reference) {
   children.insert(pos, SourceChild::Reference(reference));
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TopicMetadata {
   NamedTopic {
     topic: topic::Topic,
@@ -1857,6 +1858,7 @@ pub fn resolve_transitive_topic(
   current
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FunctionModProperties {
   FunctionProperties {
     reverts: Vec<RevertInfo>,
@@ -1870,7 +1872,9 @@ pub enum FunctionModProperties {
   },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+  Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 /// This type represents a path within a project, making sure that it is
 /// a relative path to the project root.
 pub struct ProjectPath {

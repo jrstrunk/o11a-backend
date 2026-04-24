@@ -1,7 +1,7 @@
 use crate::formatting;
 use o11a_core::core;
 use o11a_core::core::topic;
-use o11a_core::documentation::parser::DocumentationNode;
+use o11a_core::documentation::ast::DocumentationNode;
 use std::collections::BTreeMap;
 
 /// Converts a documentation node to formatted HTML string.

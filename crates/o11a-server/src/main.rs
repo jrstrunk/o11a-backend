@@ -1,8 +1,9 @@
 mod api;
 mod websocket;
 
+use o11a_core::analysis_artifact::{self, ArtifactError};
 use o11a_core::collaborator::db as collab_db;
-use o11a_core::core::{self, project};
+use o11a_core::core;
 use o11a_core::db;
 use o11a_core::report::{self, AuditReport};
 use o11a_core::state::AppState;
@@ -10,6 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::api::routes;
+
+const OUTPUT_DIR_NAME: &str = "o11a";
+const REPORT_FILE_NAME: &str = "audit.json";
+const ARTIFACT_FILE_NAME: &str = "audit.analysis.bin";
 
 #[tokio::main]
 async fn main() {
@@ -50,18 +55,49 @@ async fn main() {
   let audit_id =
     std::env::var("AUDIT_ID").unwrap_or_else(|_| "nudgexyz".to_string());
 
+  // Load the binary artifact first. It contains the analyzed AuditData
+  // snapshot (ASTs, topic metadata, source contexts, etc.). The server no
+  // longer reads the project's source tree; all of that state comes from
+  // the artifact produced by `o11a-analyze`.
+  let artifact_path = audit_artifact_path(project_root);
   println!(
-    "Loading audit '{}' from project: {}",
+    "Loading analysis artifact for audit '{}' from {}",
     audit_id,
-    project_root.display()
+    artifact_path.display()
   );
+  let artifact = match analysis_artifact::read_artifact(&artifact_path) {
+    Ok(artifact) => artifact,
+    Err(ArtifactError::VersionMismatch { found, expected }) => {
+      eprintln!(
+        "error: analysis artifact at {} has schema version {} but this \
+         server supports {}. Re-run `o11a-analyze <project_root> <audit_id>` \
+         to regenerate the artifact.",
+        artifact_path.display(),
+        found,
+        expected
+      );
+      std::process::exit(1);
+    }
+    Err(e) => {
+      eprintln!(
+        "error: could not read analysis artifact at {}: {}. Run \
+         `o11a-analyze <project_root> <audit_id>` first.",
+        artifact_path.display(),
+        e
+      );
+      std::process::exit(1);
+    }
+  };
 
-  project::load_project(project_root, &audit_id, &data_context)
-    .expect("Unable to load project");
+  if artifact.audit_id != audit_id {
+    eprintln!(
+      "error: artifact audit id mismatch: expected '{}', artifact is for '{}'",
+      audit_id, artifact.audit_id
+    );
+    std::process::exit(1);
+  }
 
-  // Load pipeline output from audit.json. This is the handoff from
-  // `o11a-analyze`; without it the server has no pipeline data to serve,
-  // so the server refuses to start.
+  // Load the audit report (pipeline output, e.g. features/requirements).
   let report_path = audit_report_path(project_root);
   let report = match load_report(&report_path) {
     Ok(Some(report)) => report,
@@ -82,15 +118,21 @@ async fn main() {
     }
   };
 
+  // Create the audit entry and hydrate it from the artifact snapshot, then
+  // apply the pipeline report on top.
   {
     let mut ctx = data_context.lock().unwrap();
-    let audit_data = ctx.get_audit_mut(&audit_id).unwrap_or_else(|| {
-      eprintln!(
-        "error: audit '{}' not initialized after load_project",
-        audit_id
-      );
-      std::process::exit(1);
-    });
+    ctx.create_audit(
+      audit_id.clone(),
+      artifact.payload.audit_name.clone(),
+      artifact.payload.in_scope_files.clone(),
+      artifact.payload.security_notes.clone(),
+    );
+    let audit_data = ctx
+      .get_audit_mut(&audit_id)
+      .expect("audit entry must exist after create_audit");
+    analysis_artifact::apply_snapshot(audit_data, artifact.payload);
+
     if let Err(e) = report::apply_report(&audit_id, audit_data, &report) {
       eprintln!("error: failed to apply audit report: {}", e);
       std::process::exit(1);
@@ -183,12 +225,21 @@ async fn main() {
 }
 
 /// Resolve the path to the audit report JSON. Overridable via `AUDIT_REPORT`.
-/// Defaults to `<project_root>/audit.json`.
+/// Defaults to `<project_root>/o11a/audit.json`.
 fn audit_report_path(project_root: &Path) -> PathBuf {
   if let Ok(explicit) = std::env::var("AUDIT_REPORT") {
     return PathBuf::from(explicit);
   }
-  project_root.join("audit.json")
+  project_root.join(OUTPUT_DIR_NAME).join(REPORT_FILE_NAME)
+}
+
+/// Resolve the path to the binary analysis artifact. Overridable via
+/// `AUDIT_ARTIFACT`. Defaults to `<project_root>/o11a/audit.analysis.bin`.
+fn audit_artifact_path(project_root: &Path) -> PathBuf {
+  if let Ok(explicit) = std::env::var("AUDIT_ARTIFACT") {
+    return PathBuf::from(explicit);
+  }
+  project_root.join(OUTPUT_DIR_NAME).join(ARTIFACT_FILE_NAME)
 }
 
 /// Load the audit report from `path`. Returns `Ok(None)` when the file

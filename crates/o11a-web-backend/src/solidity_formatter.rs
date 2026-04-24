@@ -2,7 +2,7 @@ use crate::formatting;
 use o11a_core::core::topic::{self, new_node_topic};
 use o11a_core::core::{self, TopicMetadata};
 use o11a_core::core::{ContractKind, FunctionKind, VariableMutability};
-use o11a_core::solidity::parser::{
+use o11a_core::solidity::ast::{
   self, ASTNode, AssignmentOperator, BinaryOperator, FunctionStateMutability,
   FunctionVisibility, LiteralKind, StorageLocation, StubKind, UnaryOperator,
   VariableVisibility,
@@ -75,7 +75,7 @@ pub fn node_to_source_text(
 fn get_stub_kind(node: &ASTNode) -> StubKind {
   match node {
     ASTNode::Stub { kind, .. } => kind.clone(),
-    _ => parser::classify_node_stub_kind(node),
+    _ => ast::classify_node_stub_kind(node),
   }
 }
 

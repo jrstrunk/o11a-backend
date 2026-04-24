@@ -11,8 +11,8 @@ use crate::core::{
   UnnamedTopicKind, VariableMutability, topic,
 };
 
-use crate::documentation::parser::DocumentationNode;
-use crate::solidity::parser::{ASTNode, contract_members};
+use crate::documentation::ast::DocumentationNode;
+use crate::solidity::ast::{ASTNode, contract_members};
 
 // ============================================================================
 // Response Types
@@ -2182,10 +2182,10 @@ pub fn build_agent_topic_context(
 /// Render a contract's members (signatures only, no bodies) as a JSON object
 /// with N-prefixed topic IDs. Used by semantic linking pass 1.
 pub fn render_contract_members_for_semantic_linking(
-  contract_node: &crate::solidity::parser::ASTNode,
+  contract_node: &crate::solidity::ast::ASTNode,
   audit_data: &AuditData,
 ) -> Option<String> {
-  use crate::solidity::parser::ASTNode;
+  use crate::solidity::ast::ASTNode;
 
   let (name, kind) = match contract_node {
     ASTNode::ContractDefinition { signature, .. } => {
@@ -2754,7 +2754,7 @@ pub fn mechanical_semantic_links(
 /// child sections inherit the parent so that all mechanical links roll
 /// up to the top-level section that the pipeline actually processes.
 fn collect_mechanical_links_recursive(
-  node: &crate::documentation::parser::DocumentationNode,
+  node: &crate::documentation::ast::DocumentationNode,
   current_section: Option<&topic::Topic>,
   audit_data: &AuditData,
   section_to_contracts: &mut std::collections::HashMap<
@@ -2889,7 +2889,7 @@ fn collect_mechanical_links_recursive(
 pub fn render_contract_list_for_semantic_linking(
   audit_data: &AuditData,
 ) -> Vec<(topic::Topic, String)> {
-  use crate::solidity::parser::ASTNode;
+  use crate::solidity::ast::ASTNode;
 
   let mut contracts = Vec::new();
   for (path, ast) in &audit_data.asts {
@@ -2965,12 +2965,12 @@ pub fn render_section_text(
 fn find_doc_node_by_id(
   audit_data: &AuditData,
   target_id: i32,
-) -> Option<&crate::documentation::parser::DocumentationNode> {
+) -> Option<&crate::documentation::ast::DocumentationNode> {
   fn search_node<'a>(
-    node: &'a crate::documentation::parser::DocumentationNode,
+    node: &'a crate::documentation::ast::DocumentationNode,
     target_id: i32,
     nodes_map: &'a std::collections::BTreeMap<topic::Topic, core::Node>,
-  ) -> Option<&'a crate::documentation::parser::DocumentationNode> {
+  ) -> Option<&'a crate::documentation::ast::DocumentationNode> {
     let resolved = node.resolve(nodes_map);
     if resolved.node_id() == target_id {
       return Some(resolved);
@@ -3001,11 +3001,11 @@ fn find_doc_node_by_id(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::collaborator::synthetic;
   use crate::core::{
     ContractKind, NamedTopicKind, NamedTopicVisibility, Scope,
   };
-  use crate::solidity::analyzer;
-  use crate::solidity::parser::SourceLocation;
+  use crate::solidity::ast::SourceLocation;
   use std::collections::HashSet;
 
   fn dummy_src_location() -> SourceLocation {
@@ -3145,7 +3145,7 @@ mod tests {
 
     // Inject developer documentation — this is the real code path that
     // creates synthetic DevTechnical comments from group docs.
-    analyzer::create_synthetic_dev_comment(
+    synthetic::create_synthetic_dev_comment(
       &event_topic,
       "Fires when the admin approves",
       CommentType::DevTechnical,
@@ -3253,7 +3253,7 @@ mod tests {
     register_event_metadata(&mut audit_data, &event_a_topic, "AdminSet");
     register_event_metadata(&mut audit_data, &event_b_topic, "AdminRevoked");
 
-    analyzer::create_synthetic_dev_comment(
+    synthetic::create_synthetic_dev_comment(
       &group_topic,
       "Admin lifecycle events",
       CommentType::DevTechnical,
@@ -3350,9 +3350,9 @@ mod tests {
         }),
         scope: contract_id,
         state_mutability:
-          crate::solidity::parser::FunctionStateMutability::NonPayable,
+          crate::solidity::ast::FunctionStateMutability::NonPayable,
         virtual_: false,
-        visibility: crate::solidity::parser::FunctionVisibility::External,
+        visibility: crate::solidity::ast::FunctionVisibility::External,
         implementation_declaration: None,
       }),
       body: Some(Box::new(ASTNode::Block {
@@ -3424,7 +3424,7 @@ mod tests {
     );
 
     // Untrusted dev comment: must NOT leak into the behavior render.
-    analyzer::create_synthetic_dev_comment(
+    synthetic::create_synthetic_dev_comment(
       &event_topic,
       "Admin-only entry point",
       CommentType::DevTechnical,
@@ -3433,7 +3433,7 @@ mod tests {
     );
 
     // Trusted auditor comment: should still surface.
-    analyzer::create_synthetic_dev_comment(
+    synthetic::create_synthetic_dev_comment(
       &event_topic,
       "Auditor: confirmed role-restricted",
       CommentType::Info,

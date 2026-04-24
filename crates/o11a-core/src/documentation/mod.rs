@@ -1,7 +1,4 @@
-pub use parser::{DocumentationAST, DocumentationNode};
+pub mod ast;
 
-pub mod analyzer;
-pub mod parser;
-
-// Re-export analyzer function
-pub use analyzer::analyze;
+// Re-export AST types at the documentation root.
+pub use ast::*;
