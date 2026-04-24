@@ -165,18 +165,17 @@ pub(crate) fn is_keyword(s: &str) -> bool {
 
 /// Tries to match an operator at the current position
 pub(crate) fn match_operator(s: &str) -> Option<&'static str> {
-  for op in OPERATORS {
-    if s.starts_with(op) {
-      return Some(op);
-    }
-  }
-  None
+  OPERATORS
+    .iter()
+    .find(|&op| s.starts_with(op))
+    .map(|v| v as _)
 }
 
 /// Regex matching code-like identifiers in prose text:
-/// - camelCase (e.g., balanceOf, getOwner)
-/// - snake_case (e.g., total_supply, _owner)
-/// - SCREAMING_SNAKE_CASE (e.g., MAX_SUPPLY, ADMIN_ROLE)
+///   - camelCase (e.g., balanceOf, getOwner)
+///   - snake_case (e.g., total_supply, _owner)
+///   - SCREAMING_SNAKE_CASE (e.g., MAX_SUPPLY, ADMIN_ROLE)
+///
 /// Optionally followed by () to capture function-call style references.
 static CODE_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
   Regex::new(
@@ -796,7 +795,7 @@ fn split_into_sentences(
                 sentences.push(DocumentationNode::Sentence {
                   node_id: next_id(),
                   children: split_code_references(
-                    current_sentence_nodes.drain(..).collect(),
+                    std::mem::take(&mut current_sentence_nodes),
                     audit_data,
                     next_id,
                   ),
@@ -836,7 +835,7 @@ fn split_into_sentences(
           sentences.push(DocumentationNode::Sentence {
             node_id: next_id(),
             children: split_code_references(
-              current_sentence_nodes.drain(..).collect(),
+              std::mem::take(&mut current_sentence_nodes),
               audit_data,
               next_id,
             ),
@@ -988,7 +987,7 @@ fn group_into_sections_at_level(
           if let Some(heading) = current_heading.take() {
             // Recursively group the content at deeper levels
             let nested_children = group_into_sections_at_level(
-              current_content.drain(..).collect(),
+              std::mem::take(&mut current_content),
               effective_level + 1,
               next_id,
             );
@@ -1014,7 +1013,7 @@ fn group_into_sections_at_level(
           // but handle gracefully by finalizing current and adding to result
           if let Some(heading) = current_heading.take() {
             let nested_children = group_into_sections_at_level(
-              current_content.drain(..).collect(),
+              std::mem::take(&mut current_content),
               effective_level + 1,
               next_id,
             );
@@ -1158,7 +1157,7 @@ fn convert_mdast_node(
       if sentences.len() == 1 {
         // If there is only one sentence, return it directly as a sentence
         // node without a containing paragraph node
-        Ok(sentences.get(0).unwrap().clone())
+        Ok(sentences.first().unwrap().clone())
       } else {
         Ok(DocumentationNode::Paragraph {
           node_id,
@@ -1706,7 +1705,7 @@ mod tests {
         TestNode::Text(s) => Some(s.as_str()),
         _ => None,
       },
-      |s| TestNode::Text(s),
+      TestNode::Text,
       |s| TestNode::Code(s.to_string()),
     )
   }

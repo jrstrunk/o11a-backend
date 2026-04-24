@@ -66,13 +66,12 @@ pub fn features_for_topic(
   for (ft, beh_topics) in &audit_data.feature_behavior_links {
     for bt in beh_topics {
       if let Some(core::TopicMetadata::BehaviorTopic {
-        member_topic: bmt,
-        ..
+        member_topic: bmt, ..
       }) = audit_data.topic_metadata.get(bt)
+        && *bmt == member_topic
+        && !features.contains(ft)
       {
-        if *bmt == member_topic && !features.contains(ft) {
-          features.push(ft.clone());
-        }
+        features.push(ft.clone());
       }
     }
   }

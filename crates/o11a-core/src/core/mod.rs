@@ -39,7 +39,7 @@ impl CommentType {
     }
   }
 
-  pub fn from_str(s: &str) -> Option<Self> {
+  pub fn parse_str(s: &str) -> Option<Self> {
     match s {
       "note" => Some(CommentType::Note),
       "info" => Some(CommentType::Info),
@@ -247,7 +247,7 @@ impl ThreatSeverity {
     }
   }
 
-  pub fn from_str(s: &str) -> Option<ThreatSeverity> {
+  pub fn parse_str(s: &str) -> Option<ThreatSeverity> {
     match s {
       "low" => Some(ThreatSeverity::Low),
       "medium" => Some(ThreatSeverity::Medium),
@@ -298,7 +298,7 @@ impl ThreatFeatureRelation {
     }
   }
 
-  pub fn from_str(s: &str) -> Option<ThreatFeatureRelation> {
+  pub fn parse_str(s: &str) -> Option<ThreatFeatureRelation> {
     match s {
       "is_vulnerable_to" => Some(ThreatFeatureRelation::IsVulnerableTo),
       "defends_against" => Some(ThreatFeatureRelation::DefendsAgainst),
@@ -641,11 +641,10 @@ pub fn add_to_scope(scope: &Scope, topic: topic::Topic) -> Scope {
       member,
       ..
     } => {
-      let mut containing_blocks = Vec::new();
-      containing_blocks.push(ContainingBlockLayer {
+      let containing_blocks = vec![ContainingBlockLayer {
         block: topic,
         annotation: None,
-      });
+      }];
       Scope::ContainingBlock {
         container: container.clone(),
         component: component.clone(),
@@ -1329,11 +1328,12 @@ fn find_or_create_annotation_context<'a>(
     // If we found a sibling, mark the existing sibling too
     if has_sibling {
       for child in children.iter_mut() {
-        if let SourceChild::AnnotatedBlock(g) = child {
-          if g.annotation.topic == ann.topic && g.annotation.kind != ann.kind {
-            g.has_sibling_branch = true;
-            break;
-          }
+        if let SourceChild::AnnotatedBlock(g) = child
+          && g.annotation.topic == ann.topic
+          && g.annotation.kind != ann.kind
+        {
+          g.has_sibling_branch = true;
+          break;
         }
       }
     }
@@ -1505,9 +1505,10 @@ pub enum TopicMetadata {
     /// Only populated for variable declarations.
     descendants: Vec<topic::Topic>,
     /// Variables that are related to this variable:
-    /// 1. Appear together in comparison, arithmetic, or bitwise binary operations
-    /// 2. Appear as alternatives in conditional (ternary) expressions
-    /// 3. Are involved in this variable's assignment (RHS of assignments)
+    ///   1. Appear together in comparison, arithmetic, or bitwise binary operations
+    ///   2. Appear as alternatives in conditional (ternary) expressions
+    ///   3. Are involved in this variable's assignment (RHS of assignments)
+    ///
     /// Only populated for variable declarations.
     relatives: Vec<topic::Topic>,
     /// When set, this declaration is a transparent proxy for another declaration.
@@ -1838,9 +1839,9 @@ impl TopicMetadata {
 /// Use this whenever looking up comments or other per-topic data to ensure
 /// signature nodes, single-statement semantic blocks, and other transitive
 /// proxies redirect to their canonical declaration.
-pub fn resolve_transitive_topic<'a>(
+pub fn resolve_transitive_topic(
   topic: &topic::Topic,
-  topic_metadata: &'a BTreeMap<topic::Topic, TopicMetadata>,
+  topic_metadata: &BTreeMap<topic::Topic, TopicMetadata>,
 ) -> topic::Topic {
   let mut current = topic.clone();
   let mut visited = HashSet::new();
@@ -2441,7 +2442,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         },
       ];
       let nested_references = build_invariant_nested_refs(
-        &[threat_topic.clone()],
+        std::slice::from_ref(threat_topic),
         &audit_data.threats,
       );
       let context = vec![SourceContext {
@@ -2541,10 +2542,9 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
       for bt in beh_topics {
         if let Some(TopicMetadata::BehaviorTopic { member_topic, .. }) =
           audit_data.topic_metadata.get(bt)
+          && !member_topics.contains(member_topic)
         {
-          if !member_topics.contains(member_topic) {
-            member_topics.push(member_topic.clone());
-          }
+          member_topics.push(member_topic.clone());
         }
       }
 

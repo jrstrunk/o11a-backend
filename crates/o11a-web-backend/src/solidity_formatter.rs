@@ -219,19 +219,16 @@ fn do_node_to_source_text(
           ctx,
         );
         format!(
-          "{}{}\n{}{}",
+          "{}{}\n{}{} {}",
           lhs_placeholder,
           lhs,
           rhs_placeholder,
-          format!(
-            "{} {}",
-            formatting::format_topic_operator(
-              &new_node_topic(node_id),
-              &op,
-              &new_node_topic(node_id)
-            ),
-            &rhs
+          formatting::format_topic_operator(
+            &new_node_topic(node_id),
+            &op,
+            &new_node_topic(node_id)
           ),
+          &rhs,
         )
       } else {
         let indent_level = indent_level + 1;
@@ -420,7 +417,7 @@ fn do_node_to_source_text(
               name,
               referenced_declaration,
               ..
-            } if name != "" => {
+            } if !name.is_empty() => {
               // Placeholder for the parameter name, targeting the referenced declaration
               let param_placeholder = formatting::format_identifier_placeholder(
                 &new_node_topic(referenced_declaration),
@@ -636,14 +633,14 @@ fn do_node_to_source_text(
     } => match kind {
       LiteralKind::String => formatting::format_string(&format!(
         "\"{}\"",
-        formatting::html_escape(value.as_ref().unwrap_or(&hex_value))
+        formatting::html_escape(value.as_ref().unwrap_or(hex_value))
       )),
       LiteralKind::HexString => formatting::format_number(&format!(
         "0x{}",
-        value.as_ref().unwrap_or(&hex_value)
+        value.as_ref().unwrap_or(hex_value)
       )),
       LiteralKind::Number | LiteralKind::Bool => {
-        formatting::format_number(&value.as_ref().unwrap_or(&hex_value))
+        formatting::format_number(value.as_ref().unwrap_or(hex_value))
       }
     },
 
@@ -658,23 +655,26 @@ fn do_node_to_source_text(
       let resolved_expression = expression.resolve(nodes_map);
       let is_special_case =
         if let ASTNode::Identifier { name, .. } = resolved_expression {
-          (name == "block" && member_name == "timestamp")
-            || (name == "block" && member_name == "number")
-            || (name == "block" && member_name == "prevrandao")
-            || (name == "block" && member_name == "gaslimit")
-            || (name == "block" && member_name == "difficulty")
-            || (name == "block" && member_name == "coinbase")
-            || (name == "block" && member_name == "chainid")
-            || (name == "block" && member_name == "blobbasefee")
-            || (name == "block" && member_name == "basefee")
-            || (name == "msg" && member_name == "sender")
-            || (name == "msg" && member_name == "value")
-            || (name == "msg" && member_name == "data")
-            || (name == "msg" && member_name == "sig")
-            || (name == "tx" && member_name == "gasprice")
-            || (name == "tx" && member_name == "origin")
-            || (name == "abi" && member_name == "encode")
-            || (name == "abi" && member_name == "encodePacked")
+          matches!(
+            (name.as_str(), member_name.as_str()),
+            ("block", "timestamp")
+              | ("block", "number")
+              | ("block", "prevrandao")
+              | ("block", "gaslimit")
+              | ("block", "difficulty")
+              | ("block", "coinbase")
+              | ("block", "chainid")
+              | ("block", "blobbasefee")
+              | ("block", "basefee")
+              | ("msg", "sender")
+              | ("msg", "value")
+              | ("msg", "data")
+              | ("msg", "sig")
+              | ("tx", "gasprice")
+              | ("tx", "origin")
+              | ("abi", "encode")
+              | ("abi", "encodePacked")
+          )
         } else {
           false
         };
@@ -720,7 +720,7 @@ fn do_node_to_source_text(
           );
           format!("{}{}", expr, formatting::indent(&member_expr, indent_level),)
         } else {
-          let member = formatting::format_member(&member_name);
+          let member = formatting::format_member(member_name);
 
           let member_expr =
             format!("{}{}", formatting::format_operator("."), member);
@@ -1686,7 +1686,7 @@ fn do_node_to_source_text(
         formatting::format_keyword(&kind),
         format_identifier(
           &new_node_topic(node_id),
-          &name,
+          name,
           &new_node_topic(declaration_id),
           topic_metadata
         ),
@@ -1876,7 +1876,7 @@ fn do_node_to_source_text(
       );
 
       if ctx.omit_function_and_modifier_bodies {
-        format!("{}", sig_str)
+        sig_str.to_string()
       } else {
         let body_str = if let Some(b) = body {
           do_node_to_source_text(
@@ -1968,7 +1968,7 @@ fn do_node_to_source_text(
         String::new()
       };
       let visibility_str =
-        formatting::format_keyword(&function_visibility_to_string(&visibility));
+        formatting::format_keyword(&function_visibility_to_string(visibility));
 
       format!(
         "{}{} {} {}{}",
@@ -1996,7 +1996,7 @@ fn do_node_to_source_text(
       );
 
       if ctx.omit_function_and_modifier_bodies {
-        format!("{}", sig_str)
+        sig_str.to_string()
       } else {
         let body_str = do_node_to_source_text(
           body,
@@ -2018,7 +2018,7 @@ fn do_node_to_source_text(
       ..
     } => {
       let visibility_str =
-        formatting::format_keyword(&variable_visibility_to_string(&visibility));
+        formatting::format_keyword(&variable_visibility_to_string(visibility));
       let indent_level = indent_level + 1;
       let member_ctx = Context {
         target_topic: ctx.target_topic.clone(),
@@ -2129,7 +2129,7 @@ fn do_node_to_source_text(
       format!(
         "{} {}",
         formatting::format_keyword("import"),
-        formatting::format_string(&file)
+        formatting::format_string(file)
       )
     }
 

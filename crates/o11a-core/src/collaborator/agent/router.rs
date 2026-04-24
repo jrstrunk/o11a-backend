@@ -254,53 +254,53 @@ pub async fn chat_completion(
 
       // Some providers return HTTP 200 with an error object in the body
       // (e.g. 504 timeouts wrapped as `{"error": {"message": "...", "code": 504}}`).
-      if let Ok(value) = serde_json::from_str::<serde_json::Value>(&resp_body) {
-        if let Some(err_obj) = value.get("error") {
-          let err_code =
-            err_obj.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
-          let err_msg = err_obj
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("unknown");
-          let is_retryable = err_code == 429
-            || err_code == 502
-            || err_code == 503
-            || err_code == 504;
+      if let Ok(value) = serde_json::from_str::<serde_json::Value>(&resp_body)
+        && let Some(err_obj) = value.get("error")
+      {
+        let err_code =
+          err_obj.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
+        let err_msg = err_obj
+          .get("message")
+          .and_then(|m| m.as_str())
+          .unwrap_or("unknown");
+        let is_retryable = err_code == 429
+          || err_code == 502
+          || err_code == 503
+          || err_code == 504;
 
-          if is_retryable && attempts <= max_retries {
-            let wait_secs = 2u64.pow(attempts - 1).min(60);
-            agent_log::warn(
-              "api_error_in_200",
-              Some(model),
-              Some(task_label),
-              &format!(
-                "Error {} in 200 body: {} — retrying in {}s (attempt {}/{})",
-                err_code,
-                err_msg,
-                wait_secs,
-                attempts,
-                max_retries + 1
-              ),
-              None,
-              None,
-            );
-            tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
-            continue;
-          }
-
-          agent_log::error(
+        if is_retryable && attempts <= max_retries {
+          let wait_secs = 2u64.pow(attempts - 1).min(60);
+          agent_log::warn(
             "api_error_in_200",
             Some(model),
             Some(task_label),
-            &format!("Error {} in 200 body: {}", err_code, err_msg),
-            Some(prompt),
-            Some(&resp_body),
+            &format!(
+              "Error {} in 200 body: {} — retrying in {}s (attempt {}/{})",
+              err_code,
+              err_msg,
+              wait_secs,
+              attempts,
+              max_retries + 1
+            ),
+            None,
+            None,
           );
-          return Err(format!(
-            "API error in 200 response ({}): {}",
-            err_code, err_msg
-          ));
+          tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+          continue;
         }
+
+        agent_log::error(
+          "api_error_in_200",
+          Some(model),
+          Some(task_label),
+          &format!("Error {} in 200 body: {}", err_code, err_msg),
+          Some(prompt),
+          Some(&resp_body),
+        );
+        return Err(format!(
+          "API error in 200 response ({}): {}",
+          err_code, err_msg
+        ));
       }
 
       break resp_body;
@@ -395,11 +395,11 @@ pub async fn chat_completion(
 
   // Prefer content; fall back to reasoning only if it looks like it
   // contains actual JSON data (not just chain-of-thought or newlines).
-  if let Some(content) = message.content {
-    if !content.trim().is_empty() {
-      agent_log::prompt(model, task_label, prompt, &content);
-      return Ok(content);
-    }
+  if let Some(content) = message.content
+    && !content.trim().is_empty()
+  {
+    agent_log::prompt(model, task_label, prompt, &content);
+    return Ok(content);
   }
 
   if let Some(reasoning) = message.reasoning {

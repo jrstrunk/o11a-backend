@@ -29,12 +29,11 @@ async fn handle_socket(socket: WebSocket, audit_id: String, state: AppState) {
   let send_task = tokio::spawn(async move {
     while let Ok(event) = rx.recv().await {
       // Filter events for this audit
-      if event.audit_id() == audit_id_clone {
-        if let Ok(msg) = serde_json::to_string(&event) {
-          if sender.send(Message::Text(msg.into())).await.is_err() {
-            break;
-          }
-        }
+      if event.audit_id() == audit_id_clone
+        && let Ok(msg) = serde_json::to_string(&event)
+        && sender.send(Message::Text(msg)).await.is_err()
+      {
+        break;
       }
     }
   });

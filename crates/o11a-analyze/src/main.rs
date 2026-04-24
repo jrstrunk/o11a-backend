@@ -97,16 +97,16 @@ async fn run(
   let json = serde_json::to_string_pretty(&report)
     .map_err(|e| format!("Failed to serialize report: {}", e))?;
 
-  if let Some(parent) = output_path.parent() {
-    if !parent.as_os_str().is_empty() {
-      std::fs::create_dir_all(parent).map_err(|e| {
-        format!(
-          "Failed to create output directory {}: {}",
-          parent.display(),
-          e
-        )
-      })?;
-    }
+  if let Some(parent) = output_path.parent()
+    && !parent.as_os_str().is_empty()
+  {
+    std::fs::create_dir_all(parent).map_err(|e| {
+      format!(
+        "Failed to create output directory {}: {}",
+        parent.display(),
+        e
+      )
+    })?;
   }
 
   std::fs::write(output_path, json)

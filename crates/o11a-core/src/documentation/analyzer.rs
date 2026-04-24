@@ -37,7 +37,7 @@ pub fn analyze(
     .collect();
 
   // Parse document files in the order specified by documents.txt
-  let ast_map = parser::process_files(project_root, &paths, &audit_data)?;
+  let ast_map = parser::process_files(project_root, &paths, audit_data)?;
 
   // Collect mentions during processing: referenced_topic -> [scope]
   // The scope tells us the container (file), component (section), and member (paragraph)

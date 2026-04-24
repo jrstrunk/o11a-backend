@@ -58,8 +58,8 @@ pub struct AgentNestedGroup {
   pub children: Vec<serde_json::Value>,
 }
 
-/// A source child is a raw JSON value — either an AST snippet (for
-/// references) or an annotated block wrapper.
+// A source child is a raw JSON value — either an AST snippet (for
+// references) or an annotated block wrapper.
 
 // ============================================================================
 // Utility: Topic name resolution
@@ -616,7 +616,7 @@ fn render_solidity_ast_snippet(
       "type": "function_call",
       "id": id,
       "expression": recurse(expression),
-      "arguments": arguments.iter().map(|a| recurse(a)).collect::<Vec<_>>(),
+      "arguments": arguments.iter().map(&recurse).collect::<Vec<_>>(),
     }),
 
     ASTNode::TypeConversion {
@@ -638,7 +638,7 @@ fn render_solidity_ast_snippet(
       "type": "function_call",
       "id": id,
       "expression": recurse(expression),
-      "arguments": arguments.iter().map(|a| recurse(a)).collect::<Vec<_>>(),
+      "arguments": arguments.iter().map(&recurse).collect::<Vec<_>>(),
     }),
 
     ASTNode::MemberAccess {
@@ -697,7 +697,7 @@ fn render_solidity_ast_snippet(
     ASTNode::TupleExpression { components, .. } => json!({
       "type": "tuple",
       "id": id,
-      "components": components.iter().map(|c| recurse(c)).collect::<Vec<_>>(),
+      "components": components.iter().map(&recurse).collect::<Vec<_>>(),
     }),
 
     // === Statement nodes ===
@@ -761,7 +761,7 @@ fn render_solidity_ast_snippet(
       let mut obj = json!({
         "type": "variable_declaration",
         "id": id,
-        "declarations": declarations.iter().map(|d| recurse(d)).collect::<Vec<_>>(),
+        "declarations": declarations.iter().map(&recurse).collect::<Vec<_>>(),
       });
       if let Some(val) = initial_value {
         obj["initial_value"] = recurse(val);
@@ -1012,14 +1012,14 @@ fn render_solidity_ast_snippet(
       "type": "struct_definition",
       "id": id,
       "name": name,
-      "members": members.iter().map(|m| recurse(m)).collect::<Vec<_>>(),
+      "members": members.iter().map(&recurse).collect::<Vec<_>>(),
     }),
 
     ASTNode::EnumDefinition { name, members, .. } => json!({
       "type": "enum_definition",
       "id": id,
       "name": name,
-      "members": members.iter().map(|m| recurse(m)).collect::<Vec<_>>(),
+      "members": members.iter().map(&recurse).collect::<Vec<_>>(),
     }),
 
     ASTNode::EnumValue { name, .. } => json!({
@@ -1058,16 +1058,12 @@ fn render_solidity_ast_snippet(
         obj["abstract"] = json!(true);
       }
       if !base_contracts.is_empty() {
-        obj["base_contracts"] = json!(
-          base_contracts
-            .iter()
-            .map(|b| recurse(b))
-            .collect::<Vec<_>>()
-        );
+        obj["base_contracts"] =
+          json!(base_contracts.iter().map(&recurse).collect::<Vec<_>>());
       }
       if !directives.is_empty() {
         obj["directives"] =
-          json!(directives.iter().map(|d| recurse(d)).collect::<Vec<_>>());
+          json!(directives.iter().map(&recurse).collect::<Vec<_>>());
       }
       obj
     }
@@ -1122,13 +1118,13 @@ fn render_solidity_ast_snippet(
     ASTNode::ParameterList { parameters, .. } => json!({
       "type": "parameter_list",
       "id": id,
-      "parameters": parameters.iter().map(|p| recurse(p)).collect::<Vec<_>>(),
+      "parameters": parameters.iter().map(&recurse).collect::<Vec<_>>(),
     }),
 
     ASTNode::ModifierList { modifiers, .. } => json!({
       "type": "modifier_list",
       "id": id,
-      "modifiers": modifiers.iter().map(|m| recurse(m)).collect::<Vec<_>>(),
+      "modifiers": modifiers.iter().map(&recurse).collect::<Vec<_>>(),
     }),
 
     ASTNode::ModifierInvocation {
@@ -1142,8 +1138,7 @@ fn render_solidity_ast_snippet(
         "name": recurse(modifier_name),
       });
       if let Some(args) = arguments {
-        obj["arguments"] =
-          json!(args.iter().map(|a| recurse(a)).collect::<Vec<_>>());
+        obj["arguments"] = json!(args.iter().map(&recurse).collect::<Vec<_>>());
       }
       obj
     }
@@ -1211,14 +1206,14 @@ fn render_solidity_ast_snippet(
       "type": "function_call_options",
       "id": id,
       "expression": recurse(expression),
-      "options": options.iter().map(|o| recurse(o)).collect::<Vec<_>>(),
+      "options": options.iter().map(&recurse).collect::<Vec<_>>(),
     }),
 
     ASTNode::IndexRangeAccess { nodes, body, .. } => {
       let mut obj = json!({
         "type": "index_range_access",
         "id": id,
-        "nodes": nodes.iter().map(|n| recurse(n)).collect::<Vec<_>>(),
+        "nodes": nodes.iter().map(&recurse).collect::<Vec<_>>(),
       });
       if let Some(b) = body {
         obj["body"] = recurse(b);
@@ -1270,7 +1265,7 @@ fn render_solidity_ast_snippet(
       "id": id,
       "kind": "try",
       "external_call": recurse(external_call),
-      "clauses": clauses.iter().map(|c| recurse(c)).collect::<Vec<_>>(),
+      "clauses": clauses.iter().map(&recurse).collect::<Vec<_>>(),
     }),
 
     ASTNode::PragmaDirective { literals, .. } => json!({
@@ -1293,7 +1288,7 @@ fn render_solidity_ast_snippet(
     ASTNode::SourceUnit { nodes, .. } => json!({
       "type": "source_unit",
       "id": id,
-      "nodes": nodes.iter().map(|n| recurse(n)).collect::<Vec<_>>(),
+      "nodes": nodes.iter().map(&recurse).collect::<Vec<_>>(),
     }),
 
     ASTNode::TryCatchClause {
@@ -1803,12 +1798,10 @@ fn convert_source_children(
         if snippet.get("kind").and_then(|v| v.as_str()) == Some("semantic")
           && snippet.get("type").and_then(|v| v.as_str()) == Some("block")
           && snippet.get("comments").is_none()
-        {
-          if let Some(stmts) =
+          && let Some(stmts) =
             snippet.get("statements").and_then(|v| v.as_array())
-          {
-            return stmts.clone();
-          }
+        {
+          return stmts.clone();
         }
         vec![snippet]
       }
@@ -2436,14 +2429,14 @@ pub fn render_member_declarations_for_semantics(
   let mut declarations: Vec<serde_json::Value> = Vec::new();
 
   // Include the member itself as a candidate
-  if let Some(metadata) = audit_data.topic_metadata.get(member_topic) {
-    if let Some(name) = metadata.name() {
-      declarations.push(json!({
-        "topic": member_topic.id(),
-        "name": name,
-        "kind": "member",
-      }));
-    }
+  if let Some(metadata) = audit_data.topic_metadata.get(member_topic)
+    && let Some(name) = metadata.name()
+  {
+    declarations.push(json!({
+      "topic": member_topic.id(),
+      "name": name,
+      "kind": "member",
+    }));
   }
 
   // Collect declarations scoped to this member
@@ -2537,7 +2530,7 @@ pub fn render_member_source_for_semantics(
   audit_data: &AuditData,
 ) -> Option<String> {
   // Find the AST node for this member
-  for (_path, ast) in &audit_data.asts {
+  for ast in audit_data.asts.values() {
     let sol_ast = match ast {
       core::AST::Solidity(sol_ast) => sol_ast,
       _ => continue,
@@ -2545,7 +2538,7 @@ pub fn render_member_source_for_semantics(
     for contract_node in &sol_ast.nodes {
       let resolved_contract = contract_node.resolve(&audit_data.nodes);
       if let ASTNode::ContractDefinition { .. } = resolved_contract {
-        for member_node in contract_members(&resolved_contract) {
+        for member_node in contract_members(resolved_contract) {
           let resolved_member = member_node.resolve(&audit_data.nodes);
           let node_topic = topic::new_node_topic(&resolved_member.node_id());
           if node_topic == *member_topic {
@@ -2606,7 +2599,7 @@ pub fn render_contract_declaration_signatures(
   contract_topic: &topic::Topic,
   audit_data: &AuditData,
 ) -> String {
-  for (_path, ast) in &audit_data.asts {
+  for ast in audit_data.asts.values() {
     let sol_ast = match ast {
       core::AST::Solidity(sol_ast) => sol_ast,
       _ => continue,
@@ -2684,10 +2677,8 @@ pub fn mechanical_section_to_members(
                 ..
               } => (mutations, calls),
             };
-            if mutations.contains(decl_topic) {
-              if !members.contains(fn_topic) {
-                members.push(fn_topic.clone());
-              }
+            if mutations.contains(decl_topic) && !members.contains(fn_topic) {
+              members.push(fn_topic.clone());
             }
           }
         }
@@ -2731,7 +2722,7 @@ pub fn mechanical_semantic_links(
     Vec<topic::Topic>,
   > = std::collections::HashMap::new();
 
-  for (_path, ast) in &audit_data.asts {
+  for ast in audit_data.asts.values() {
     let doc_ast = match ast {
       core::AST::Documentation(doc_ast) => doc_ast,
       _ => continue,
@@ -2971,10 +2962,10 @@ pub fn render_section_text(
 /// Find a documentation node by its node_id across all documentation ASTs.
 /// Resolves Stub nodes through `audit_data.nodes`, following the same pattern
 /// as `render_documentation_ast_snippet` and other AST traversals.
-fn find_doc_node_by_id<'a>(
-  audit_data: &'a AuditData,
+fn find_doc_node_by_id(
+  audit_data: &AuditData,
   target_id: i32,
-) -> Option<&'a crate::documentation::parser::DocumentationNode> {
+) -> Option<&crate::documentation::parser::DocumentationNode> {
   fn search_node<'a>(
     node: &'a crate::documentation::parser::DocumentationNode,
     target_id: i32,
@@ -2992,7 +2983,7 @@ fn find_doc_node_by_id<'a>(
     None
   }
 
-  for (_path, ast) in &audit_data.asts {
+  for ast in audit_data.asts.values() {
     let doc_ast = match ast {
       core::AST::Documentation(doc_ast) => doc_ast,
       _ => continue,
@@ -3506,7 +3497,7 @@ mod tests {
       semantics.iter().any(|s| s
         .get("semantic")
         .and_then(|v| v.as_str())
-        .map_or(false, |text| text.contains("admin role"))),
+        .is_some_and(|text| text.contains("admin role"))),
       "expected trusted semantic annotation on function, got: {:?}",
       semantics
     );
