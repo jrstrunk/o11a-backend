@@ -44,7 +44,7 @@ pub fn ingest_comment(
     comment_topic,
     domain::TopicMetadata::CommentTopic {
       topic: comment_topic,
-      author: comment.author_id,
+      author: comment.author,
       comment_type: domain::CommentType::parse_str(&comment.comment_type)
         .unwrap_or_else(|| {
           panic!(
@@ -126,7 +126,7 @@ pub async fn create_comment(
     .bind(audit_id)
     .bind(&request.topic_id)
     .bind(&request.content)
-    .bind(request.author_id)
+    .bind(request.author)
     .bind(comment_type)
     .bind(status)
     .bind(scope_json)
@@ -436,7 +436,8 @@ pub struct ConditionRow {
   pub subject_topic: String,
   pub condition_type: String,
   pub description: String,
-  pub author_id: Author,
+  #[sqlx(rename = "author_id")]
+  pub author: Author,
   pub created_at: String,
 }
 
@@ -562,7 +563,8 @@ pub struct ThreatRow {
   pub audit_id: String,
   pub subject_topic: String,
   pub description: String,
-  pub author_id: Author,
+  #[sqlx(rename = "author_id")]
+  pub author: Author,
   pub created_at: String,
   pub severity: Option<String>,
 }
@@ -674,7 +676,8 @@ pub struct InvariantRow {
   pub id: i64,
   pub threat_id: i64,
   pub description: String,
-  pub author_id: Author,
+  #[sqlx(rename = "author_id")]
+  pub author: Author,
   pub created_at: String,
   pub severity: Option<String>,
 }
