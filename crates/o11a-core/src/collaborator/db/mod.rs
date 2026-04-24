@@ -34,16 +34,16 @@ pub fn ingest_comment(
 
   audit_data
     .nodes
-    .insert(comment_topic.clone(), core::Node::Comment(nodes));
+    .insert(comment_topic, core::Node::Comment(nodes));
 
   let mut mentioned_topics: Vec<topic::Topic> = mentions.clone();
   mentioned_topics.sort_unstable();
   mentioned_topics.dedup();
 
   audit_data.topic_metadata.insert(
-    comment_topic.clone(),
+    comment_topic,
     core::TopicMetadata::CommentTopic {
-      topic: comment_topic.clone(),
+      topic: comment_topic,
       author_id: comment.author_id,
       comment_type: core::CommentType::parse_str(&comment.comment_type)
         .unwrap_or_else(|| {
@@ -52,7 +52,7 @@ pub fn ingest_comment(
             comment.comment_type, comment.id
           )
         }),
-      target_topic: target_topic.clone(),
+      target_topic,
       created_at: comment.created_at.clone(),
       scope: scope.to_scope(),
       mentioned_topics,
@@ -61,16 +61,16 @@ pub fn ingest_comment(
 
   let comments = audit_data.comment_index.entry(target_topic).or_default();
   if !comments.contains(&comment_topic) {
-    comments.push(comment_topic.clone());
+    comments.push(comment_topic);
   }
 
   for mention in &mentions {
     let entries = audit_data
       .mentions_index
-      .entry(mention.clone())
+      .entry(*mention)
       .or_default();
     if !entries.contains(&comment_topic) {
-      entries.push(comment_topic.clone());
+      entries.push(comment_topic);
     }
   }
 

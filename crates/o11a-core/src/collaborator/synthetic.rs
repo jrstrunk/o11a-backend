@@ -8,9 +8,7 @@
 
 use crate::collaborator::parser as comment_parser;
 use crate::core::topic;
-use crate::core::{
-  AuditData, CommentType, Node, Scope, TopicMetadata,
-};
+use crate::core::{AuditData, CommentType, Node, Scope, TopicMetadata};
 use std::sync::atomic::{AtomicI32, Ordering};
 
 /// Global counter for synthetic developer documentation comment IDs.
@@ -42,7 +40,7 @@ pub fn create_synthetic_dev_comment(
 
   audit_data
     .nodes
-    .insert(comment_topic.clone(), Node::Comment(comment_nodes));
+    .insert(comment_topic, Node::Comment(comment_nodes));
 
   let mut mentioned_topics = mentions;
   mentioned_topics.sort_unstable();
@@ -55,10 +53,10 @@ pub fn create_synthetic_dev_comment(
     .unwrap_or(Scope::Global);
 
   audit_data.topic_metadata.insert(
-    comment_topic.clone(),
+    comment_topic,
     TopicMetadata::CommentTopic {
-      topic: comment_topic.clone(),
-      target_topic: target_topic.clone(),
+      topic: comment_topic,
+      target_topic: *target_topic,
       comment_type,
       author_id,
       created_at: String::new(), // Synthetic — no real timestamp
@@ -69,15 +67,15 @@ pub fn create_synthetic_dev_comment(
 
   audit_data
     .comment_index
-    .entry(target_topic.clone())
+    .entry(*target_topic)
     .or_default()
-    .push(comment_topic.clone());
+    .push(comment_topic);
 
   for mention in &mentioned_topics {
     audit_data
       .mentions_index
-      .entry(mention.clone())
+      .entry(*mention)
       .or_default()
-      .push(comment_topic.clone());
+      .push(comment_topic);
   }
 }

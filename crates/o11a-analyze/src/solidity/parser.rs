@@ -1,6 +1,6 @@
 use o11a_core::core;
-use o11a_core::core::topic;
 use o11a_core::core::ProjectPath;
+use o11a_core::core::topic;
 use o11a_core::solidity::ast::{
   ASTNode, NatSpecSection, NatSpecTag, SolidityAST, SourceLocation,
   TypeDescriptions, classify_node_stub_kind,
@@ -182,9 +182,7 @@ pub fn type_descriptions_from_json(
   let type_string = value
     .get("typeString")
     .and_then(|v| v.as_str())
-    .ok_or_else(|| {
-      format!("TypeDescriptions missing typeString: {:?}", value)
-    })?
+    .ok_or_else(|| format!("TypeDescriptions missing typeString: {:?}", value))?
     .to_string();
 
   Ok(TypeDescriptions {
@@ -3262,7 +3260,6 @@ fn node_from_json(
 // ============================================================================
 // NatSpec Parsing
 // ============================================================================
-
 
 /// Parse StructuredDocumentation text into NatSpec sections.
 /// Lines following a tag line that don't start with @ are treated as

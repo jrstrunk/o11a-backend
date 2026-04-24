@@ -113,7 +113,7 @@ impl ScopeInfo {
       } => ScopeInfo {
         scope_type: "Component".to_string(),
         container: Some(container.file_path.clone()),
-        component: Some(component.id.clone()),
+        component: Some(component.id()),
         member: None,
         containing_blocks: vec![],
         signature_container: None,
@@ -126,10 +126,10 @@ impl ScopeInfo {
       } => ScopeInfo {
         scope_type: "Member".to_string(),
         container: Some(container.file_path.clone()),
-        component: Some(component.id.clone()),
-        member: Some(member.id.clone()),
+        component: Some(component.id()),
+        member: Some(member.id()),
         containing_blocks: vec![],
-        signature_container: signature_container.as_ref().map(|t| t.id.clone()),
+        signature_container: signature_container.as_ref().map(|t| t.id()),
       },
       core::Scope::ContainingBlock {
         container,
@@ -139,15 +139,15 @@ impl ScopeInfo {
       } => ScopeInfo {
         scope_type: "ContainingBlock".to_string(),
         container: Some(container.file_path.clone()),
-        component: Some(component.id.clone()),
-        member: Some(member.id.clone()),
+        component: Some(component.id()),
+        member: Some(member.id()),
         containing_blocks: containing_blocks
           .iter()
           .map(|layer| ContainingBlockLayerInfo {
-            block: layer.block.id.clone(),
+            block: layer.block.id(),
             annotation: layer.annotation.as_ref().map(|ann| {
               BlockAnnotationResponse {
-                topic: ann.topic.id.clone(),
+                topic: ann.topic.id(),
                 kind: BlockAnnotationKindInfo::from_core(&ann.kind),
               }
             }),

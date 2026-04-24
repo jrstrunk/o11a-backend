@@ -89,7 +89,7 @@ fn tokenize_code(
           find_declaration_by_name(audit_data, &ident)
         {
           (
-            Some(metadata.topic().clone()),
+            Some(*metadata.topic()),
             get_named_topic_kind(metadata),
             metadata.name().map(|n| n.to_string()),
           )
@@ -1030,4 +1030,3 @@ fn node_to_stub(node: DocumentationNode) -> DocumentationNode {
     topic: topic::new_documentation_topic(node.node_id()),
   }
 }
-

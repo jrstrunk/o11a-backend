@@ -1034,7 +1034,7 @@ fn scope_to_self_reference(
       // Declaration is at contract level (e.g., state variable, function declaration)
       Some(ScopedReference {
         reference_node: node_id,
-        containing_component: component.underlying_id().ok()?,
+        containing_component: component.numeric_id(),
         containing_member: None,
       })
     }
@@ -1044,8 +1044,8 @@ fn scope_to_self_reference(
       // Declaration is at member level (e.g., local variable, parameter)
       Some(ScopedReference {
         reference_node: node_id,
-        containing_component: component.underlying_id().ok()?,
-        containing_member: Some(member.underlying_id().ok()?),
+        containing_component: component.numeric_id(),
+        containing_member: Some(member.numeric_id()),
       })
     }
     Scope::ContainingBlock {
@@ -1059,9 +1059,9 @@ fn scope_to_self_reference(
       // than the individual declaration.
       let innermost_block = &containing_blocks.last()?.block;
       Some(ScopedReference {
-        reference_node: innermost_block.underlying_id().ok()?,
-        containing_component: component.underlying_id().ok()?,
-        containing_member: Some(member.underlying_id().ok()?),
+        reference_node: innermost_block.numeric_id(),
+        containing_component: component.numeric_id(),
+        containing_member: Some(member.numeric_id()),
       })
     }
   }
@@ -1169,11 +1169,11 @@ fn build_source_context(
   // Post-sort: subject's contract first, then by contract name
   let subject_contract_id = self_reference.map(|r| r.containing_component);
   groups.sort_by(|a, b| {
-    let id_a = a.scope().underlying_id().ok();
-    let id_b = b.scope().underlying_id().ok();
+    let id_a = a.scope().numeric_id();
+    let id_b = b.scope().numeric_id();
 
-    let is_subject_a = subject_contract_id == id_a;
-    let is_subject_b = subject_contract_id == id_b;
+    let is_subject_a = subject_contract_id == Some(id_a);
+    let is_subject_b = subject_contract_id == Some(id_b);
 
     if is_subject_a != is_subject_b {
       return is_subject_a.cmp(&is_subject_b).reverse();
@@ -1210,7 +1210,7 @@ fn build_expanded_source_context(
       Scope::Component { component, .. }
       | Scope::Member { component, .. }
       | Scope::ContainingBlock { component, .. } => {
-        component.underlying_id().ok()
+        Some(component.numeric_id())
       }
     }
   };
@@ -1275,8 +1275,8 @@ fn build_expanded_source_context(
       return in_scope_b.cmp(&in_scope_a);
     }
 
-    let id_a = a.scope().underlying_id().unwrap_or(0);
-    let id_b = b.scope().underlying_id().unwrap_or(0);
+    let id_a = a.scope().numeric_id();
+    let id_b = b.scope().numeric_id();
 
     let (ancestors_a, _) = contract_ancestry_counts
       .get(&id_a)
@@ -1344,12 +1344,11 @@ fn get_scope_name(
   scope_topic: &topic::Topic,
   in_scope_source_topics: &BTreeMap<i32, InScopeDeclaration>,
 ) -> String {
-  if let Ok(node_id) = scope_topic.underlying_id()
-    && let Some(decl) = in_scope_source_topics.get(&node_id)
-  {
+  let node_id = scope_topic.numeric_id();
+  if let Some(decl) = in_scope_source_topics.get(&node_id) {
     return decl.name().clone();
   }
-  scope_topic.id().to_string()
+  scope_topic.id()
 }
 
 /// Second pass: Parse each AST and build the final data structures for in-scope nodes
@@ -1452,7 +1451,7 @@ fn process_second_pass_nodes(
       let stubbed_node =
         Node::Solidity(parser::children_to_stubs((*node).clone()));
 
-      nodes.insert(topic.clone(), stubbed_node);
+      nodes.insert(topic, stubbed_node);
     }
 
     // Process declarations only if they exist in in_scope_declarations
@@ -1520,7 +1519,7 @@ fn process_second_pass_nodes(
       };
 
       let topic_metadata_entry = TopicMetadata::NamedTopic {
-        topic: topic.clone(),
+        topic: topic,
         kind: in_scope_topic_declaration.declaration_kind().clone(),
         visibility: visibility_to_named_topic_visibility(
           in_scope_topic_declaration.visibility(),
@@ -1532,11 +1531,11 @@ fn process_second_pass_nodes(
         ancestors: ancestor_topics,
         descendants: descendant_topics,
         relatives: relative_topics,
-        transitive_topic: transitive_topic.clone(),
+        transitive_topic: transitive_topic,
         doc_references: Vec::new(),
       };
 
-      topic_metadata.insert(topic.clone(), topic_metadata_entry);
+      topic_metadata.insert(topic, topic_metadata_entry);
 
       match in_scope_topic_declaration {
         InScopeDeclaration::FunctionMod {
@@ -1570,7 +1569,7 @@ fn process_second_pass_nodes(
           match node {
             ASTNode::FunctionDefinition { .. } => {
               function_properties.insert(
-                topic.clone(),
+                topic,
                 FunctionModProperties::FunctionProperties {
                   reverts,
                   calls: call_topics,
@@ -1580,7 +1579,7 @@ fn process_second_pass_nodes(
             }
             ASTNode::ModifierDefinition { .. } => {
               function_properties.insert(
-                topic.clone(),
+                topic,
                 FunctionModProperties::ModifierProperties {
                   reverts,
                   calls: call_topics,
@@ -1600,7 +1599,7 @@ fn process_second_pass_nodes(
       if let ASTNode::VariableDeclaration { type_name, .. } = node
         && let Some(solidity_type) = extract_solidity_type(type_name)
       {
-        variable_types.insert(topic.clone(), solidity_type);
+        variable_types.insert(topic, solidity_type);
       }
     } else {
       // Control flow nodes get their own TopicMetadata variant
@@ -1626,7 +1625,7 @@ fn process_second_pass_nodes(
 
       if let Some((kind, condition)) = control_flow_metadata {
         topic_metadata.insert(
-          topic.clone(),
+          topic,
           TopicMetadata::ControlFlow {
             topic,
             scope: scope.clone(),
@@ -1743,7 +1742,7 @@ fn process_second_pass_nodes(
         };
 
         topic_metadata.insert(
-          topic.clone(),
+          topic,
           TopicMetadata::UnnamedTopic {
             topic,
             scope: scope.clone(),
@@ -1786,7 +1785,7 @@ fn process_second_pass_nodes(
 
         // Process true body with True branch control flow added to scope
         let true_cf = core::BlockAnnotation {
-          topic: cf_topic.clone(),
+          topic: cf_topic,
           kind: core::BlockAnnotationKind::If(core::ControlFlowBranch::True),
         };
         let true_scope = core::add_annotation_to_scope(scope, true_cf);
@@ -3471,7 +3470,7 @@ fn populate_context(
   let scope_map: BTreeMap<i32, Scope> = topic_metadata
     .iter()
     .filter_map(|(topic, metadata)| {
-      let node_id = topic.underlying_id().ok()?;
+      let node_id = topic.numeric_id();
       Some((node_id, metadata.scope().clone()))
     })
     .collect();
@@ -3502,7 +3501,7 @@ fn populate_context(
     if let Some(refs) = refs_map.get(topic)
       && matches!(metadata, TopicMetadata::NamedTopic { .. })
     {
-      topic_context.insert(topic.clone(), refs.clone());
+      topic_context.insert(*topic, refs.clone());
     }
   }
 
@@ -3514,9 +3513,8 @@ fn populate_context(
       | TopicMetadata::ControlFlow { topic, scope, .. }
       | TopicMetadata::TitledTopic { topic, scope, .. }
       | TopicMetadata::CommentTopic { topic, scope, .. } => {
-        if let Ok(node_id) = topic.underlying_id()
-          && let Some(self_ref) = scope_to_self_reference(scope, node_id)
-        {
+        let node_id = topic.numeric_id();
+        if let Some(self_ref) = scope_to_self_reference(scope, node_id) {
           let context = build_source_context(
             &[],
             Some(self_ref),
@@ -3525,7 +3523,7 @@ fn populate_context(
             in_scope_source_topics,
             in_scope_files,
           );
-          topic_context.insert(topic.clone(), context);
+          topic_context.insert(*topic, context);
         }
       }
       TopicMetadata::FeatureTopic { .. }
@@ -3560,7 +3558,7 @@ fn populate_expanded_context(
   let scope_map: BTreeMap<i32, Scope> = topic_metadata
     .iter()
     .filter_map(|(topic, metadata)| {
-      let node_id = topic.underlying_id().ok()?;
+      let node_id = topic.numeric_id();
       Some((node_id, metadata.scope().clone()))
     })
     .collect();
@@ -3570,7 +3568,7 @@ fn populate_expanded_context(
     topic_metadata
       .iter()
       .filter_map(|(topic, _metadata)| {
-        let node_id = topic.underlying_id().ok()?;
+        let node_id = topic.numeric_id();
 
         // Get recursive ancestry (ancestors, descendants, and relatives tracked separately)
         let ancestry = collect_recursive_ancestry(
@@ -3614,7 +3612,7 @@ fn populate_expanded_context(
                 containing_blocks, ..
               } => containing_blocks
                 .last()
-                .and_then(|layer| layer.block.underlying_id().ok()),
+                .map(|layer| layer.block.numeric_id()),
               _ => None,
             };
 
@@ -3691,7 +3689,7 @@ fn populate_expanded_context(
           in_scope_files,
         );
 
-        Some((topic.clone(), expanded_refs))
+        Some((*topic, expanded_refs))
       })
       .collect();
 
@@ -3704,7 +3702,7 @@ fn populate_expanded_context(
       if expanded_refs.is_empty() {
         expanded_topic_context.remove(topic);
       } else {
-        expanded_topic_context.insert(topic.clone(), expanded_refs.clone());
+        expanded_topic_context.insert(*topic, expanded_refs.clone());
       }
     }
   }
@@ -3808,7 +3806,7 @@ fn inject_developer_documentation(audit_data: &mut AuditData) {
         ..
       } => {
         if !doc.trim().is_empty() {
-          semantic_block_docs.push((node_topic.clone(), doc.clone()));
+          semantic_block_docs.push((*node_topic, doc.clone()));
         }
       }
 
@@ -3819,7 +3817,7 @@ fn inject_developer_documentation(audit_data: &mut AuditData) {
         ..
       } => {
         if !doc.trim().is_empty() {
-          semantic_block_docs.push((node_topic.clone(), doc.clone()));
+          semantic_block_docs.push((*node_topic, doc.clone()));
         }
       }
 
@@ -3954,7 +3952,7 @@ fn extract_signature_doc(
   if text.trim().is_empty() {
     return None;
   }
-  Some((signature_topic.clone(), text.clone()))
+  Some((*signature_topic, text.clone()))
 }
 
 /// Build a map of parameter name → topic from a ParameterList node.
@@ -4069,7 +4067,7 @@ fn resolve_natspec(
   // @notice → DevDocumentation on signature
   if !notice_parts.is_empty() {
     result.push(ResolvedDoc {
-      target_topic: signature_topic.clone(),
+      target_topic: *signature_topic,
       text: notice_parts.join("\n"),
       comment_type: CommentType::DevDocumentation,
       author_id: models::AUTHOR_DEV_DOCUMENTATION,
@@ -4079,7 +4077,7 @@ fn resolve_natspec(
   // @dev + untagged + failed resolves → DevTechnical on signature
   if !dev_parts.is_empty() {
     result.push(ResolvedDoc {
-      target_topic: signature_topic.clone(),
+      target_topic: *signature_topic,
       text: dev_parts.join("\n"),
       comment_type: CommentType::DevTechnical,
       author_id: models::AUTHOR_DEV_TECHNICAL,
@@ -4090,7 +4088,7 @@ fn resolve_natspec(
   for (name, texts) in &param_docs {
     if let Some(param_topic) = param_map.get(name) {
       result.push(ResolvedDoc {
-        target_topic: param_topic.clone(),
+        target_topic: *param_topic,
         text: texts.join("\n"),
         comment_type: CommentType::DevDocumentation,
         author_id: models::AUTHOR_DEV_DOCUMENTATION,
@@ -4127,7 +4125,7 @@ fn resolve_return_target<'a>(
   for (name, ret_topic) in return_params {
     if !name.is_empty() && name == first_word {
       let rest = text[first_word.len()..].trim_start();
-      return Some((name.clone(), rest, ret_topic.clone()));
+      return Some((name.clone(), rest, *ret_topic));
     }
   }
 
@@ -4136,7 +4134,7 @@ fn resolve_return_target<'a>(
     return Some((
       return_params[0].0.clone(),
       text,
-      return_params[0].1.clone(),
+      return_params[0].1,
     ));
   }
 
@@ -4692,8 +4690,9 @@ mod tests {
     let comment_topic = &member_comments[0];
     match audit_data.nodes.get(comment_topic) {
       Some(Node::Comment(comment_nodes)) => {
-        let text =
-          o11a_core::collaborator::parser::render_comment_plain_text(comment_nodes);
+        let text = o11a_core::collaborator::parser::render_comment_plain_text(
+          comment_nodes,
+        );
         assert!(
           text.contains("Group docs for single member"),
           "comment text missing: {:?}",

@@ -383,7 +383,7 @@ pub fn apply_report(
   for f in &report.pipeline.features {
     let topic = topic::new_topic(&f.topic);
     audit_data.topic_metadata.insert(
-      topic.clone(),
+      topic,
       TopicMetadata::FeatureTopic {
         topic,
         name: f.name.clone(),
@@ -404,14 +404,14 @@ pub fn apply_report(
       .collect();
 
     audit_data.requirements.insert(
-      topic.clone(),
+      topic,
       Requirement {
         documentation_topics,
       },
     );
 
     audit_data.topic_metadata.insert(
-      topic.clone(),
+      topic,
       TopicMetadata::RequirementTopic {
         topic,
         description: r.description.clone(),
@@ -426,7 +426,7 @@ pub fn apply_report(
     let topic = topic::new_topic(&b.topic);
     let member_topic = topic::new_topic(&b.member_topic);
     audit_data.topic_metadata.insert(
-      topic.clone(),
+      topic,
       TopicMetadata::BehaviorTopic {
         topic,
         description: b.description.clone(),
@@ -446,7 +446,7 @@ pub fn apply_report(
       .map(|id| topic::new_topic(id))
       .collect();
     audit_data.topic_metadata.insert(
-      topic.clone(),
+      topic,
       TopicMetadata::FunctionalSemanticTopic {
         topic,
         description: s.description.clone(),

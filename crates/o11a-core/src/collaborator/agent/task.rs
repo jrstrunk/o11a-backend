@@ -247,7 +247,7 @@ fn parse_requirements_response(
     for raw_req in section.requirements {
       req_counter += 1;
       let req_topic = topic::new_requirement_topic(req_counter);
-      section_req_topics.push(req_topic.clone());
+      section_req_topics.push(req_topic);
 
       let doc_topics: Vec<topic::Topic> = raw_req
         .documentation_topics
@@ -256,11 +256,11 @@ fn parse_requirements_response(
         .collect();
 
       topic_metadata.insert(
-        req_topic.clone(),
+        req_topic,
         core::TopicMetadata::RequirementTopic {
-          topic: req_topic.clone(),
+          topic: req_topic,
           description: raw_req.description,
-          section_topic: section_topic.clone(),
+          section_topic,
           author_id: AUTHOR_AGENT_LARGE,
           created_at: None,
         },
@@ -601,7 +601,7 @@ pub async fn semantic_link_pass1(
   let confirmed_str = if confirmed_contracts.is_empty() {
     String::new()
   } else {
-    let ids: Vec<&str> = confirmed_contracts.iter().map(|t| t.id()).collect();
+    let ids: Vec<String> = confirmed_contracts.iter().map(|t| t.id()).collect();
     format!("\nConfirmed relevant contracts: {}\n", ids.join(", "))
   };
 
@@ -624,7 +624,7 @@ pub async fn semantic_link_pass1(
     router::parse_response(&response, "semantic link pass1", &prompt)?;
 
   Ok(SemanticLinkPass1Result {
-    section_topic: section_topic.clone(),
+    section_topic: *section_topic,
     contract_topics: wrapper
       .contract_topics
       .into_iter()
@@ -643,7 +643,7 @@ pub async fn semantic_link_pass2(
   let confirmed_str = if confirmed_members.is_empty() {
     String::new()
   } else {
-    let ids: Vec<&str> = confirmed_members.iter().map(|t| t.id()).collect();
+    let ids: Vec<String> = confirmed_members.iter().map(|t| t.id()).collect();
     format!("\nConfirmed relevant members: {}\n", ids.join(", "))
   };
 
@@ -666,7 +666,7 @@ pub async fn semantic_link_pass2(
     router::parse_response(&response, "semantic link pass2", &prompt)?;
 
   Ok(SemanticLinkPass2Result {
-    section_topic: section_topic.clone(),
+    section_topic: *section_topic,
     member_mappings: wrapper
       .members
       .into_iter()
@@ -726,7 +726,7 @@ pub async fn semantic_link_pass3(
 
       core::SemanticLink {
         documentation_topics: if doc_topics.is_empty() {
-          vec![fallback_doc_topic.clone()]
+          vec![*fallback_doc_topic]
         } else {
           doc_topics
         },
@@ -759,7 +759,7 @@ pub fn collect_documentation_sections(
       {
         // Only top-level sections (Container scope = document root children)
         if matches!(scope, core::Scope::Container { .. }) {
-          return Some(t.clone());
+          return Some(*t);
         }
       }
       None
@@ -1158,11 +1158,11 @@ pub async fn synthesize_features(
       .map(|id| topic::new_topic(&id))
       .collect();
 
-    feature_requirement_links.insert(feature_topic.clone(), requirement_topics);
-    feature_behavior_links.insert(feature_topic.clone(), behavior_topics);
+    feature_requirement_links.insert(feature_topic, requirement_topics);
+    feature_behavior_links.insert(feature_topic, behavior_topics);
 
     topic_metadata.insert(
-      feature_topic.clone(),
+      feature_topic,
       core::TopicMetadata::FeatureTopic {
         topic: feature_topic,
         name: raw.name,
@@ -1285,7 +1285,7 @@ pub async fn extract_behaviors_from_contract(
   for group in wrapper.members {
     let member_topic = topic::new_topic(&group.member_topic);
     for desc in group.behaviors {
-      behaviors.push((member_topic.clone(), desc));
+      behaviors.push((member_topic, desc));
     }
   }
 

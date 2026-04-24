@@ -119,7 +119,7 @@ pub fn snapshot_from_audit_data(audit_data: &AuditData) -> AuditDataSnapshot {
           | TopicMetadata::FunctionalSemanticTopic { .. }
       )
     })
-    .map(|(t, m)| (t.clone(), m.clone()))
+    .map(|(t, m)| (*t, m.clone()))
     .collect();
 
   AuditDataSnapshot {

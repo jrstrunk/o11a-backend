@@ -477,13 +477,13 @@ impl TopicNameIndex {
     for (topic, metadata) in &audit_data.topic_metadata {
       if let TopicMetadata::NamedTopic { name: sname, .. } = metadata {
         if let Some(qname) = metadata.qualified_name(audit_data) {
-          by_qualified_name.insert(qname, topic.clone());
+          by_qualified_name.insert(qname, *topic);
         }
         if !is_common_word(sname) {
           simple_name_candidates
             .entry(sname.to_string())
             .or_default()
-            .push(topic.clone());
+            .push(*topic);
         }
       }
     }
@@ -508,7 +508,7 @@ impl TopicNameIndex {
             .collect();
 
           if non_transitive.len() == 1 {
-            Some((name, non_transitive[0].clone()))
+            Some((name, *non_transitive[0]))
           } else {
             None
           }
@@ -632,7 +632,7 @@ pub fn add_to_scope(scope: &Scope, topic: topic::Topic) -> Scope {
       component,
     } => Scope::Member {
       container: container.clone(),
-      component: component.clone(),
+      component: *component,
       member: topic,
       signature_container: None,
     },
@@ -648,8 +648,8 @@ pub fn add_to_scope(scope: &Scope, topic: topic::Topic) -> Scope {
       }];
       Scope::ContainingBlock {
         container: container.clone(),
-        component: component.clone(),
-        member: member.clone(),
+        component: *component,
+        member: *member,
         containing_blocks,
       }
     }
@@ -666,8 +666,8 @@ pub fn add_to_scope(scope: &Scope, topic: topic::Topic) -> Scope {
       });
       Scope::ContainingBlock {
         container: container.clone(),
-        component: component.clone(),
-        member: member.clone(),
+        component: *component,
+        member: *member,
         containing_blocks,
       }
     }
@@ -712,8 +712,8 @@ pub fn add_annotation_to_scope(
       last_mut.annotation = Some(annotation);
       Scope::ContainingBlock {
         container: container.clone(),
-        component: component.clone(),
-        member: member.clone(),
+        component: *component,
+        member: *member,
         containing_blocks,
       }
     }
@@ -735,7 +735,7 @@ pub fn set_member(scope: &Scope, topic: topic::Topic) -> Scope {
       component,
     } => Scope::Member {
       container: container.clone(),
-      component: component.clone(),
+      component: *component,
       member: topic,
       signature_container: None,
     },
@@ -745,7 +745,7 @@ pub fn set_member(scope: &Scope, topic: topic::Topic) -> Scope {
       ..
     } => Scope::Member {
       container: container.clone(),
-      component: component.clone(),
+      component: *component,
       member: topic,
       signature_container: None,
     },
@@ -755,7 +755,7 @@ pub fn set_member(scope: &Scope, topic: topic::Topic) -> Scope {
       ..
     } => Scope::Member {
       container: container.clone(),
-      component: component.clone(),
+      component: *component,
       member: topic,
       signature_container: None,
     },
@@ -776,8 +776,8 @@ pub fn set_signature_container(
       ..
     } => Scope::Member {
       container: proj.clone(),
-      component: component.clone(),
-      member: member.clone(),
+      component: *component,
+      member: *member,
       signature_container: Some(container),
     },
     _ => panic!(
@@ -1150,7 +1150,7 @@ pub fn merge_context_groups(
   for ctx in contexts {
     ensure_context(
       &mut merged,
-      ctx.scope.clone(),
+      ctx.scope,
       ctx.sort_key,
       ctx.is_in_scope,
     );
@@ -1231,7 +1231,7 @@ pub fn insert_into_context(
   reference: Reference,
 ) {
   // Ensure the context exists
-  ensure_context(groups, scope.clone(), scope_sort_key, is_in_scope);
+  ensure_context(groups, scope, scope_sort_key, is_in_scope);
 
   // We know the group exists now — find it
   let group = groups.iter_mut().find(|g| g.scope == scope).unwrap();
@@ -1255,7 +1255,7 @@ pub fn insert_into_context(
         group.nested_references.insert(
           pos,
           NestedSourceContext {
-            subscope: subscope_topic.clone(),
+            subscope: subscope_topic,
             sort_key: subscope_sort_key,
             children: Vec::new(),
           },
@@ -1312,7 +1312,7 @@ fn find_or_create_annotation_context<'a>(
         )
       });
 
-    let sort_key = ann.topic.underlying_id().ok().map(|id| id as usize);
+    let sort_key = Some(ann.topic.numeric_id() as usize);
     let pos = children
       .binary_search_by(|c| c.sort_key().cmp(&sort_key))
       .unwrap_or_else(|pos| pos);
@@ -1368,7 +1368,7 @@ fn find_or_create_annotation_context<'a>(
 /// - ProjectReferenceWithMentions + CommentMention → merge mention_topics
 /// - CommentMention + ProjectReference → promote to ProjectReferenceWithMentions
 fn merge_reference(existing: &mut Reference, incoming: &Reference) {
-  let ref_topic = existing.reference_topic().clone();
+  let ref_topic = *existing.reference_topic();
 
   match (&mut *existing, incoming) {
     // ProjectReference + ProjectReference → already present, skip
@@ -1403,7 +1403,7 @@ fn merge_reference(existing: &mut Reference, incoming: &Reference) {
     ) => {
       for mt in new_mentions {
         if !existing_mentions.contains(mt) {
-          existing_mentions.push(mt.clone());
+          existing_mentions.push(*mt);
         }
       }
     }
@@ -1421,7 +1421,7 @@ fn merge_reference(existing: &mut Reference, incoming: &Reference) {
     ) => {
       for mt in new_mentions {
         if !existing_mentions.contains(mt) {
-          existing_mentions.push(mt.clone());
+          existing_mentions.push(*mt);
         }
       }
     }
@@ -1808,6 +1808,7 @@ impl TopicMetadata {
           .topic_metadata
           .get(component)
           .and_then(|d| d.name())
+          .map(|s| s.to_string())
           .unwrap_or_else(|| component.id());
         format!("{}.{}", component_name, name)
       }
@@ -1821,11 +1822,13 @@ impl TopicMetadata {
           .topic_metadata
           .get(component)
           .and_then(|d| d.name())
+          .map(|s| s.to_string())
           .unwrap_or_else(|| component.id());
         let member_name = audit_data
           .topic_metadata
           .get(member)
           .and_then(|d| d.name())
+          .map(|s| s.to_string())
           .unwrap_or_else(|| member.id());
         format!("{}.{}.{}", component_name, member_name, name)
       }
@@ -1844,14 +1847,14 @@ pub fn resolve_transitive_topic(
   topic: &topic::Topic,
   topic_metadata: &BTreeMap<topic::Topic, TopicMetadata>,
 ) -> topic::Topic {
-  let mut current = topic.clone();
+  let mut current = *topic;
   let mut visited = HashSet::new();
   while let Some(meta) = topic_metadata.get(&current) {
-    if !visited.insert(current.clone()) {
+    if !visited.insert(current) {
       break; // cycle guard
     }
     match meta.transitive_topic() {
-      Some(next) => current = next.clone(),
+      Some(next) => current = *next,
       None => break,
     }
   }
@@ -2078,20 +2081,20 @@ fn build_invariant_nested_refs(
       Some(t) if !t.invariant_topics.is_empty() => t,
       _ => continue,
     };
-    let sort_key = tt.numeric_id().map(|id| id as usize);
+    let sort_key = Some(tt.numeric_id() as usize);
     let children = threat
       .invariant_topics
       .iter()
       .map(|inv_topic| {
-        let inv_sort_key = inv_topic.numeric_id().map(|id| id as usize);
+        let inv_sort_key = Some(inv_topic.numeric_id() as usize);
         SourceChild::Reference(Reference::ProjectReference {
-          reference_topic: inv_topic.clone(),
+          reference_topic: *inv_topic,
           sort_key: inv_sort_key,
         })
       })
       .collect();
     nested.push(NestedSourceContext {
-      subscope: tt.clone(),
+      subscope: *tt,
       sort_key,
       children,
     });
@@ -2143,7 +2146,7 @@ pub fn semantic_texts_by_declaration(
       }
     }
     if !texts.is_empty() {
-      out.insert(decl_topic.clone(), texts);
+      out.insert(*decl_topic, texts);
     }
   }
   out
@@ -2163,9 +2166,9 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     {
       audit_data
         .section_requirements
-        .entry(st.clone())
+        .entry(*st)
         .or_default()
-        .push(req_topic.clone());
+        .push(*req_topic);
     }
   }
 
@@ -2175,9 +2178,9 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     if let TopicMetadata::BehaviorTopic { member_topic, .. } = metadata {
       audit_data
         .member_behaviors
-        .entry(member_topic.clone())
+        .entry(*member_topic)
         .or_default()
-        .push(beh_topic.clone());
+        .push(*beh_topic);
     }
   }
 
@@ -2191,9 +2194,9 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     {
       audit_data
         .declaration_semantics
-        .entry(decl_topic.clone())
+        .entry(*decl_topic)
         .or_default()
-        .push(sem_topic.clone());
+        .push(*sem_topic);
     }
   }
 
@@ -2203,9 +2206,9 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
   for (req_topic, requirement) in &audit_data.requirements {
     for doc_topic in &requirement.documentation_topics {
       doc_to_requirements
-        .entry(doc_topic.clone())
+        .entry(*doc_topic)
         .or_default()
-        .push(req_topic.clone());
+        .push(*req_topic);
     }
   }
 
@@ -2214,9 +2217,9 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     HashMap::new();
   for (ft, req_topics) in &audit_data.feature_requirement_links {
     for rt in req_topics {
-      let features = req_to_features.entry(rt.clone()).or_default();
+      let features = req_to_features.entry(*rt).or_default();
       if !features.contains(ft) {
-        features.push(ft.clone());
+        features.push(*ft);
       }
     }
   }
@@ -2228,10 +2231,10 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
   for (doc_topic, req_topics) in &doc_to_requirements {
     for rt in req_topics {
       if let Some(fts) = req_to_features.get(rt) {
-        let features = doc_to_features.entry(doc_topic.clone()).or_default();
+        let features = doc_to_features.entry(*doc_topic).or_default();
         for ft in fts {
           if !features.contains(ft) {
-            features.push(ft.clone());
+            features.push(*ft);
           }
         }
       }
@@ -2249,9 +2252,9 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     let expanded_context: Vec<SourceContext> = feature_topics
       .into_iter()
       .map(|ft| {
-        let sort_key = ft.numeric_id().map(|id| id as usize);
+        let sort_key = Some(ft.numeric_id() as usize);
         SourceContext {
-          scope: ft.clone(),
+          scope: ft,
           sort_key,
           is_in_scope: true,
           scope_references: vec![Reference::ProjectReference {
@@ -2267,7 +2270,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     } else {
       audit_data
         .expanded_topic_context
-        .insert(topic.clone(), expanded_context);
+        .insert(*topic, expanded_context);
     }
   }
 
@@ -2277,7 +2280,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
       continue;
     }
     let mut scope_references = vec![Reference::ProjectReference {
-      reference_topic: feature_topic.clone(),
+      reference_topic: *feature_topic,
       sort_key: Some(0),
     }];
 
@@ -2286,9 +2289,9 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
       audit_data.feature_requirement_links.get(feature_topic)
     {
       for rt in req_topics {
-        let sort_key = rt.numeric_id().map(|id| id as usize);
+        let sort_key = Some(rt.numeric_id() as usize);
         scope_references.push(Reference::ProjectReference {
-          reference_topic: rt.clone(),
+          reference_topic: *rt,
           sort_key,
         });
       }
@@ -2296,7 +2299,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
 
     // Feature + requirements as the first context entry
     let mut context = vec![SourceContext {
-      scope: feature_topic.clone(),
+      scope: *feature_topic,
       sort_key: Some(0),
       is_in_scope: true,
       scope_references,
@@ -2316,9 +2319,9 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
           audit_data.topic_metadata.get(bt)
         {
           member_behaviors
-            .entry(member_topic.clone())
+            .entry(*member_topic)
             .or_default()
-            .push(bt.clone());
+            .push(*bt);
         }
       }
     }
@@ -2333,10 +2336,10 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         .topic_metadata
         .get(&mt)
         .and_then(|m| match m.scope() {
-          Scope::Component { component, .. } => Some(component.clone()),
+          Scope::Component { component, .. } => Some(*component),
           _ => None,
         })
-        .unwrap_or_else(|| mt.clone());
+        .unwrap_or(mt);
       contract_members
         .entry(contract)
         .or_default()
@@ -2345,21 +2348,21 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
 
     // Create a SourceContext per contract with members as nested scopes
     for (contract_topic, members) in contract_members {
-      let contract_sort_key = contract_topic.numeric_id().map(|id| id as usize);
+      let contract_sort_key = Some(contract_topic.numeric_id() as usize);
       let nested_references: Vec<NestedSourceContext> = members
         .into_iter()
         .map(|(mt, beh_topics)| {
           let children = beh_topics
             .into_iter()
             .map(|bt| {
-              let sort_key = bt.numeric_id().map(|id| id as usize);
+              let sort_key = Some(bt.numeric_id() as usize);
               SourceChild::Reference(Reference::ProjectReference {
                 reference_topic: bt,
                 sort_key,
               })
             })
             .collect();
-          let sort_key = mt.numeric_id().map(|id| id as usize);
+          let sort_key = Some(mt.numeric_id() as usize);
           NestedSourceContext::new(mt, sort_key, children)
         })
         .collect();
@@ -2374,7 +2377,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }
     audit_data
       .topic_context
-      .insert(feature_topic.clone(), context);
+      .insert(*feature_topic, context);
   }
 
   // Build reverse index: behavior → [features] from feature_behavior_links
@@ -2382,9 +2385,9 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     HashMap::new();
   for (ft, beh_topics) in &audit_data.feature_behavior_links {
     for bt in beh_topics {
-      let features = beh_to_features.entry(bt.clone()).or_default();
+      let features = beh_to_features.entry(*bt).or_default();
       if !features.contains(ft) {
-        features.push(ft.clone());
+        features.push(*ft);
       }
     }
   }
@@ -2398,16 +2401,16 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
       continue;
     }
     let context = vec![SourceContext {
-      scope: beh_topic.clone(),
-      sort_key: beh_topic.numeric_id().map(|id| id as usize),
+      scope: *beh_topic,
+      sort_key: Some(beh_topic.numeric_id() as usize),
       is_in_scope: true,
       scope_references: vec![Reference::ProjectReference {
-        reference_topic: beh_topic.clone(),
-        sort_key: beh_topic.numeric_id().map(|id| id as usize),
+        reference_topic: *beh_topic,
+        sort_key: Some(beh_topic.numeric_id() as usize),
       }],
       nested_references: vec![],
     }];
-    audit_data.topic_context.insert(beh_topic.clone(), context);
+    audit_data.topic_context.insert(*beh_topic, context);
   }
 
   // Build context for FunctionalSemanticTopics (same self-ref pattern)
@@ -2415,33 +2418,33 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     if !matches!(metadata, TopicMetadata::FunctionalSemanticTopic { .. }) {
       continue;
     }
-    let sort_key = sem_topic.numeric_id().map(|id| id as usize);
+    let sort_key = Some(sem_topic.numeric_id() as usize);
     let context = vec![SourceContext {
-      scope: sem_topic.clone(),
+      scope: *sem_topic,
       sort_key,
       is_in_scope: true,
       scope_references: vec![Reference::ProjectReference {
-        reference_topic: sem_topic.clone(),
+        reference_topic: *sem_topic,
         sort_key,
       }],
       nested_references: vec![],
     }];
-    audit_data.topic_context.insert(sem_topic.clone(), context);
+    audit_data.topic_context.insert(*sem_topic, context);
   }
 
   // Build context for ThreatTopics: subject + threat as scope refs,
   // invariants as nested refs indented under the threat
   for (threat_topic, metadata) in &audit_data.topic_metadata {
     if let TopicMetadata::ThreatTopic { subject_topic, .. } = metadata {
-      let subj_sort_key = subject_topic.numeric_id().map(|id| id as usize);
-      let threat_sort_key = threat_topic.numeric_id().map(|id| id as usize);
+      let subj_sort_key = Some(subject_topic.numeric_id() as usize);
+      let threat_sort_key = Some(threat_topic.numeric_id() as usize);
       let scope_references = vec![
         Reference::ProjectReference {
-          reference_topic: subject_topic.clone(),
+          reference_topic: *subject_topic,
           sort_key: subj_sort_key,
         },
         Reference::ProjectReference {
-          reference_topic: threat_topic.clone(),
+          reference_topic: *threat_topic,
           sort_key: threat_sort_key,
         },
       ];
@@ -2450,7 +2453,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         &audit_data.threats,
       );
       let context = vec![SourceContext {
-        scope: threat_topic.clone(),
+        scope: *threat_topic,
         sort_key: threat_sort_key,
         is_in_scope: true,
         scope_references,
@@ -2458,25 +2461,25 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
       }];
       audit_data
         .topic_context
-        .insert(threat_topic.clone(), context);
+        .insert(*threat_topic, context);
     }
   }
 
   // Build context for InvariantTopics: parent threat as a SourceContext entry
   for (inv_topic, metadata) in &audit_data.topic_metadata {
     if let TopicMetadata::InvariantTopic { threat_topic, .. } = metadata {
-      let sort_key = threat_topic.numeric_id().map(|id| id as usize);
+      let sort_key = Some(threat_topic.numeric_id() as usize);
       let context = vec![SourceContext {
-        scope: inv_topic.clone(),
+        scope: *inv_topic,
         sort_key,
         is_in_scope: true,
         scope_references: vec![Reference::ProjectReference {
-          reference_topic: threat_topic.clone(),
+          reference_topic: *threat_topic,
           sort_key,
         }],
         nested_references: vec![],
       }];
-      audit_data.topic_context.insert(inv_topic.clone(), context);
+      audit_data.topic_context.insert(*inv_topic, context);
     }
   }
 
@@ -2492,7 +2495,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
           .cloned()
           .unwrap_or_default();
         if !ctx.is_empty() {
-          Some((bt.clone(), ctx))
+          Some((*bt, ctx))
         } else {
           None
         }
@@ -2522,7 +2525,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
           .cloned()
           .unwrap_or_default();
         if !ctx.is_empty() {
-          Some((pt.clone(), ctx))
+          Some((*pt, ctx))
         } else {
           None
         }
@@ -2548,7 +2551,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
           audit_data.topic_metadata.get(bt)
           && !member_topics.contains(member_topic)
         {
-          member_topics.push(member_topic.clone());
+          member_topics.push(*member_topic);
         }
       }
 
@@ -2559,7 +2562,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         }
       }
 
-      (ft.clone(), merge_context_groups(all_contexts))
+      (*ft, merge_context_groups(all_contexts))
     })
     .collect();
 
@@ -2583,7 +2586,7 @@ pub fn new_audit_data(
   // keccak256 function with node_id -8
   let keccak256_topic = topic::new_node_topic(&-8);
   topic_metadata.insert(
-    keccak256_topic.clone(),
+    keccak256_topic,
     TopicMetadata::NamedTopic {
       topic: keccak256_topic,
       scope: Scope::Global,
@@ -2603,7 +2606,7 @@ pub fn new_audit_data(
   // type() function with node_id -27
   let type_topic = topic::new_node_topic(&-27);
   topic_metadata.insert(
-    type_topic.clone(),
+    type_topic,
     TopicMetadata::NamedTopic {
       topic: type_topic,
       scope: Scope::Global,
@@ -2623,7 +2626,7 @@ pub fn new_audit_data(
   // this keyword with node_id -28
   let this_topic = topic::new_node_topic(&-28);
   topic_metadata.insert(
-    this_topic.clone(),
+    this_topic,
     TopicMetadata::NamedTopic {
       topic: this_topic,
       scope: Scope::Global,

@@ -549,7 +549,7 @@ fn render_subscope_title(
 ) -> String {
   let name_html = match audit_data.topic_metadata.get(subscope_topic) {
     Some(metadata) => highlighted_name(metadata),
-    None => format!("<code>{}</code>", html_escape(subscope_topic.id())),
+    None => format!("<code>{}</code>", html_escape(&subscope_topic.id())),
   };
   format!(
     "<div style=\"{}\">{}</div>",
@@ -678,17 +678,18 @@ fn get_source_text(
   audit_data: &AuditData,
   source_text_cache: &mut std::collections::HashMap<String, String>,
 ) -> String {
-  if let Some(html) = source_text_cache.get(topic.id()) {
+  let topic_id = topic.id();
+  if let Some(html) = source_text_cache.get(&topic_id) {
     return html.clone();
   }
 
   let html = render_source_text(topic, audit_data).unwrap_or_else(|| {
     format!(
       "<div class=\"error\">Source text not found for {}</div>",
-      html_escape(topic.id())
+      html_escape(&topic_id)
     )
   });
-  source_text_cache.insert(topic.id().to_string(), html.clone());
+  source_text_cache.insert(topic_id, html.clone());
   html
 }
 
@@ -955,8 +956,8 @@ fn render_source_children(
 
         html.push_str(&format!(
           "<div><div class=\"source-container\" data-topic=\"{}\" data-contract=\"{}\" style=\"{}\">{}{}</div></div>",
-          html_escape(ref_topic.id()),
-          html_escape(scope.id()),
+          html_escape(&ref_topic.id()),
+          html_escape(&scope.id()),
           container_style,
           title_html,
           indented_source
@@ -1122,8 +1123,8 @@ pub fn render_grouped_source_panel(
 
       html.push_str(&format!(
         "<div><div class=\"source-container\" data-topic=\"{}\" data-contract=\"{}\" style=\"{}\">{}</div></div>",
-        html_escape(ref_topic.id()),
-        html_escape(group.scope().id()),
+        html_escape(&ref_topic.id()),
+        html_escape(&group.scope().id()),
         container_style,
         source_html
       ));
@@ -1408,7 +1409,7 @@ pub fn build_topic_view(
       );
       let breadcrumb = render_history_breadcrumb(metadata, audit_data);
       let css = render_highlight_css(
-        view_metadata.topic().id(),
+        &view_metadata.topic().id(),
         view_metadata,
         audit_data,
       );
@@ -1470,7 +1471,7 @@ fn build_generated_conversation_entry(
     "<div class=\"{}\" data-topic=\"{}\" style=\"{}\">{}\
      <p style=\"margin: 0\">{}</p></div>",
     css_class,
-    html_escape(topic.id()),
+    html_escape(&topic.id()),
     COMBINED_PANEL_STYLE,
     header,
     desc_html,
@@ -1578,8 +1579,8 @@ pub fn build_conversation_entry(
 ) -> Option<ConversationEntry> {
   let metadata = audit_data.topic_metadata.get(entry_topic)?;
 
-  let html = match entry_topic.kind() {
-    Some(topic::TopicKind::Comment) => build_comment_thread_html(
+  let html = match entry_topic {
+    topic::Topic::Comment(_) => build_comment_thread_html(
       entry_topic,
       metadata,
       audit_data,
@@ -1607,8 +1608,8 @@ pub fn build_thread(
   let topic = topic::new_topic(topic_id);
   let metadata = audit_data.topic_metadata.get(&topic)?;
 
-  let html = match topic.kind() {
-    Some(topic::TopicKind::Comment) => {
+  let html = match topic {
+    topic::Topic::Comment(_) => {
       build_comment_thread_html(&topic, metadata, audit_data, source_text_cache)
     }
     _ => render_topic_node(metadata, audit_data, source_text_cache),
@@ -1666,7 +1667,7 @@ fn render_comment_node(
 
   format!(
     "<div class=\"comment-thread-node\" data-topic=\"{}\" style=\"{}\">{}</div>",
-    html_escape(topic_id),
+    html_escape(&topic_id),
     style,
     wrapped
   )
@@ -1763,7 +1764,7 @@ fn render_topic_node(
     String::new()
   } else {
     let kind_label = topic_kind_label(metadata);
-    let name = metadata.name().unwrap_or(topic_id);
+    let name = metadata.name().unwrap_or(&topic_id);
     format!(
       "<div style=\"{}\"><span class=\"comment-type keyword\">{}</span> \
        <span class=\"comment-author\">{}</span></div>",
@@ -1791,7 +1792,7 @@ fn render_topic_node(
 
   format!(
     "<div class=\"conversation-node\" data-topic=\"{}\" style=\"{}\">{}</div>",
-    html_escape(topic_id),
+    html_escape(&topic_id),
     style,
     inner
   )
@@ -1873,10 +1874,10 @@ pub fn build_documentation_panel(
       // Render the feature as a navigable section header
       if audit_data.topic_metadata.contains_key(ft) {
         all_contexts.push(SourceContext::new_with_scope_references(
-          ft.clone(),
+          *ft,
           None,
           true,
-          vec![Reference::project_reference(ft.clone(), None)],
+          vec![Reference::project_reference(*ft, None)],
         ));
       }
     } else {
@@ -1886,7 +1887,7 @@ pub fn build_documentation_panel(
           if let Some(req) = audit_data.requirements.get(rt) {
             for dt in &req.documentation_topics {
               if !seen_doc_topics.contains(dt) {
-                seen_doc_topics.push(dt.clone());
+                seen_doc_topics.push(*dt);
               }
             }
           }
@@ -1898,7 +1899,7 @@ pub fn build_documentation_panel(
   // Collect doc topics from mentions and semantic links
   for mention_topic in mention_topics {
     if !seen_doc_topics.contains(mention_topic) {
-      seen_doc_topics.push(mention_topic.clone());
+      seen_doc_topics.push(*mention_topic);
     }
   }
 
