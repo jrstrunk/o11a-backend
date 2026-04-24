@@ -18,14 +18,15 @@
 //! don't understand rather than silently skipping fields. Additive changes
 //! (new optional fields) do not require a bump.
 //!
-//! Current version: 1 (alpha — stability not yet guaranteed)
+//! Current version: 2 (alpha — stability not yet guaranteed)
 
+use crate::collaborator::models::AUTHOR_SYSTEM;
 use crate::core::{AuditData, Requirement, TopicMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The current audit-report schema version. Bump on breaking changes.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Name of the tool that produced the report.
 pub const GENERATOR_NAME: &str = "o11a-analyze";
@@ -84,8 +85,6 @@ pub struct ReportFeature {
   pub topic: String,
   pub name: String,
   pub description: String,
-  pub author_id: i64,
-  pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,8 +96,6 @@ pub struct ReportRequirement {
   pub section_topic: String,
   /// D-prefixed documentation topics that informed this requirement.
   pub documentation_topics: Vec<String>,
-  pub author_id: i64,
-  pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,8 +105,6 @@ pub struct ReportBehavior {
   pub description: String,
   /// N-prefixed code member topic this behavior belongs to.
   pub member_topic: String,
-  pub author_id: i64,
-  pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,8 +116,6 @@ pub struct ReportFunctionalSemantic {
   pub declaration_topic: String,
   /// D-prefixed documentation topics this semantic was derived from.
   pub documentation_topics: Vec<String>,
-  pub author_id: i64,
-  pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,7 +156,9 @@ pub fn build_report(
     requirements: collect_requirements(audit_data),
     behaviors: collect_behaviors(audit_data),
     functional_semantics: collect_functional_semantics(audit_data),
-    feature_requirement_links: flatten_links(&audit_data.feature_requirement_links),
+    feature_requirement_links: flatten_links(
+      &audit_data.feature_requirement_links,
+    ),
     feature_behavior_links: flatten_links(&audit_data.feature_behavior_links),
   };
 
@@ -188,14 +183,11 @@ fn collect_features(audit_data: &AuditData) -> Vec<ReportFeature> {
         topic,
         name,
         description,
-        author_id,
-        created_at,
+        ..
       } => Some(ReportFeature {
         topic: topic.id().to_string(),
         name: name.clone(),
         description: description.clone(),
-        author_id: *author_id,
-        created_at: created_at.clone(),
       }),
       _ => None,
     })
@@ -213,26 +205,27 @@ fn collect_requirements(audit_data: &AuditData) -> Vec<ReportRequirement> {
         topic,
         description,
         section_topic,
-        author_id,
-        created_at,
+        ..
       } => {
         let documentation_topics = audit_data
           .requirements
           .get(topic)
-          .map(|Requirement { documentation_topics }| {
-            documentation_topics
-              .iter()
-              .map(|t| t.id().to_string())
-              .collect()
-          })
+          .map(
+            |Requirement {
+               documentation_topics,
+             }| {
+              documentation_topics
+                .iter()
+                .map(|t| t.id().to_string())
+                .collect()
+            },
+          )
           .unwrap_or_default();
         Some(ReportRequirement {
           topic: topic.id().to_string(),
           description: description.clone(),
           section_topic: section_topic.id().to_string(),
           documentation_topics,
-          author_id: *author_id,
-          created_at: created_at.clone(),
         })
       }
       _ => None,
@@ -251,14 +244,11 @@ fn collect_behaviors(audit_data: &AuditData) -> Vec<ReportBehavior> {
         topic,
         description,
         member_topic,
-        author_id,
-        created_at,
+        ..
       } => Some(ReportBehavior {
         topic: topic.id().to_string(),
         description: description.clone(),
         member_topic: member_topic.id().to_string(),
-        author_id: *author_id,
-        created_at: created_at.clone(),
       }),
       _ => None,
     })
@@ -279,8 +269,7 @@ fn collect_functional_semantics(
         description,
         declaration_topic,
         documentation_topics,
-        author_id,
-        created_at,
+        ..
       } => Some(ReportFunctionalSemantic {
         topic: topic.id().to_string(),
         description: description.clone(),
@@ -289,8 +278,6 @@ fn collect_functional_semantics(
           .iter()
           .map(|t| t.id().to_string())
           .collect(),
-        author_id: *author_id,
-        created_at: created_at.clone(),
       }),
       _ => None,
     })
@@ -401,8 +388,8 @@ pub fn apply_report(
         topic,
         name: f.name.clone(),
         description: f.description.clone(),
-        author_id: f.author_id,
-        created_at: f.created_at.clone(),
+        author_id: AUTHOR_SYSTEM,
+        created_at: None,
       },
     );
   }
@@ -416,9 +403,12 @@ pub fn apply_report(
       .map(|id| topic::new_topic(id))
       .collect();
 
-    audit_data
-      .requirements
-      .insert(topic.clone(), Requirement { documentation_topics });
+    audit_data.requirements.insert(
+      topic.clone(),
+      Requirement {
+        documentation_topics,
+      },
+    );
 
     audit_data.topic_metadata.insert(
       topic.clone(),
@@ -426,8 +416,8 @@ pub fn apply_report(
         topic,
         description: r.description.clone(),
         section_topic,
-        author_id: r.author_id,
-        created_at: r.created_at.clone(),
+        author_id: AUTHOR_SYSTEM,
+        created_at: None,
       },
     );
   }
@@ -441,8 +431,8 @@ pub fn apply_report(
         topic,
         description: b.description.clone(),
         member_topic,
-        author_id: b.author_id,
-        created_at: b.created_at.clone(),
+        author_id: AUTHOR_SYSTEM,
+        created_at: None,
       },
     );
   }
@@ -462,8 +452,8 @@ pub fn apply_report(
         description: s.description.clone(),
         declaration_topic,
         documentation_topics,
-        author_id: s.author_id,
-        created_at: s.created_at.clone(),
+        author_id: AUTHOR_SYSTEM,
+        created_at: None,
       },
     );
   }

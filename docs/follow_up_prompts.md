@@ -392,3 +392,547 @@ design discussion. Everything it needs is in the prompt body.
 > required dep of `o11a-core`'s Cargo.toml (it's OK if `axum` stays as a
 > dep temporarily for the move; remove it in the same PR if nothing in
 > `o11a-core` needs it anymore, which should be the case).
+
+---
+
+## 8. Delete the pipeline-trigger HTTP endpoints
+
+> You are working in the Rust workspace at `/home/john/o11a-backend`. It
+> has four crates: `o11a-core` (library), `o11a-analyze` (bin — runs the
+> pipeline once and writes `audit.json`), `o11a-server` (bin — serves
+> HTTP), `o11a-web-backend` (library — HTML rendering).
+>
+> Context: the analysis pipeline is now run by the `o11a-analyze` binary
+> and writes its output to `audit.json`. The server loads that file on
+> startup. The HTTP pipeline-trigger endpoints are a vestige of the old
+> architecture where the server ran the pipeline; they serve no purpose
+> now and invite confusion. We are in alpha — delete them cleanly. When
+> we later want "re-run task X with user feedback," it will be a new
+> endpoint with different semantics and should not reuse these URLs.
+>
+> **Task:**
+>
+> 1. In `crates/o11a-core/src/api/routes.rs` (or
+>    `crates/o11a-server/src/api/routes.rs` if task 7 has already moved
+>    the module), delete the route entries for:
+>    - `POST /api/v1/audits/:audit_id/analyze`
+>    - `POST /api/v1/audits/:audit_id/pipeline/semantic_links`
+>    - `POST /api/v1/audits/:audit_id/pipeline/requirements`
+>    - `POST /api/v1/audits/:audit_id/pipeline/behaviors`
+>    - `POST /api/v1/audits/:audit_id/pipeline/synthesize`
+>
+> 2. In the matching `handlers.rs`, delete the five handler functions:
+>    `analyze`, `pipeline_semantic_links`, `pipeline_requirements`,
+>    `pipeline_behaviors`, `pipeline_synthesize`. Delete the
+>    `pipeline_state()` helper and the `run_pipeline_step()` helper that
+>    exist only to support them. Remove any now-unused imports.
+>
+> 3. If `pipeline::PipelineState` is no longer referenced anywhere outside
+>    the pipeline module itself, leave the type as-is (it's still used
+>    internally and by `o11a-analyze`) — but double-check that no stale
+>    usage remains in the server.
+>
+> **Verify:** `cargo build --workspace` and `cargo test --workspace`
+> both succeed. `grep -R "pipeline_state\|run_pipeline_step\|pipeline_semantic_links\|pipeline_requirements\|pipeline_behaviors\|pipeline_synthesize" crates/` should return no hits outside of the
+> pipeline module itself.
+
+---
+
+## 9. Unify user-create endpoints with pipeline-read resource URLs
+
+> You are working in the Rust workspace at `/home/john/o11a-backend`. It
+> has four crates: `o11a-core` (library), `o11a-analyze` (bin),
+> `o11a-server` (bin), `o11a-web-backend` (HTML).
+>
+> Pipeline-generated entities (features, requirements, behaviors,
+> functional semantics) and user-created entities have the same shape;
+> they only differ by `author_id`. The HTTP surface should reflect this:
+> one resource URL per kind, with `GET` listing pipeline + user entries
+> together and `POST` creating a new user entry.
+>
+> This task supersedes the URL conventions in task **6** in this
+> document. If task 6 has already been done with `/user/features`-style
+> URLs, rename them here. If task 6 hasn't been done yet, apply this
+> convention when implementing it and skip the rename step.
+>
+> **Task:**
+>
+> 1. Create (or rename if already present) the following POST routes.
+>    Each creates one user entity; none take a `/user/` infix:
+>    - `POST /api/v1/audits/:audit_id/features`
+>    - `POST /api/v1/audits/:audit_id/requirements`
+>    - `POST /api/v1/audits/:audit_id/behaviors`
+>    - `POST /api/v1/audits/:audit_id/functional_semantics`
+>
+> 2. Keep the existing `GET` endpoints:
+>    - `GET /api/v1/audits/:audit_id/features` (existing)
+>    - `GET /api/v1/audits/:audit_id/requirements` (add if missing —
+>      returns all requirements, pipeline + user)
+>    - `GET /api/v1/audits/:audit_id/behaviors` (existing)
+>    - `GET /api/v1/audits/:audit_id/functional_semantics` (add if
+>      missing)
+>
+>    These GETs already return any entity present in `DataContext`, so
+>    merging pipeline + user happens for free once user entities are
+>    loaded at startup (task 5 already does that).
+>
+> 3. Keep per-item GETs:
+>    - `GET /api/v1/audits/:audit_id/features/:topic_id`
+>    - `GET /api/v1/audits/:audit_id/requirements/:topic_id`
+>    - `GET /api/v1/audits/:audit_id/behaviors/:topic_id`
+>    - `GET /api/v1/audits/:audit_id/functional_semantics/:topic_id`
+>
+>    Rename any existing `:feature_id` / `:requirement_id` /
+>    `:behavior_id` path params to `:topic_id` while you're here — see
+>    task 10 for the full topic-id-only convention.
+>
+> **Verify:** `cargo build --workspace` succeeds. `curl` against each
+> POST endpoint creates an entity; a subsequent GET on the same resource
+> returns it alongside pipeline-produced entries. Restart the server
+> and confirm user entries persist (they live in SQLite via task 5).
+
+---
+
+## 10. Adopt topic IDs as the sole path identifier; drop numeric fallback
+
+> You are working in the Rust workspace at `/home/john/o11a-backend`. It
+> has four crates: `o11a-core` (library), `o11a-analyze` (bin),
+> `o11a-server` (bin), `o11a-web-backend` (HTML).
+>
+> Topic IDs (`F42`, `R7`, `B13`, `P99`, `N-100`, `D34`, `C2`, `I4`,
+> `T1`) are globally unique across kinds. The API currently accepts
+> both the prefixed form (`F42`) and a bare numeric ID (`42`) via the
+> `parse_path_id` helper in `crates/o11a-core/src/api/handlers.rs` (or
+> `crates/o11a-server/src/api/handlers.rs` post-task-7). The dual
+> acceptance is a vestige of an earlier migration and forces every
+> handler to tell the parser which kind it expects.
+>
+> **Task:**
+>
+> 1. Introduce (or locate) `parse_topic_id(input: &str, expected_kind:
+>    TopicKind) -> Result<Topic, ParseError>` in
+>    `crates/o11a-core/src/core/topic.rs` if one does not already exist.
+>    It must require the prefix and validate the kind. Reject bare
+>    numeric input with a clear error.
+>
+> 2. Replace every call site of `parse_path_id(&raw, Kind)` in the
+>    handlers module with `parse_topic_id(&raw, Kind)` (or
+>    `topic::parse_topic_id`). The handler then uses the returned
+>    `Topic` directly — no need to convert back to `i64` unless the
+>    DB call wants a numeric ID (and even then, call `Topic::numeric_id()`
+>    at the narrow seam).
+>
+> 3. Delete the `parse_path_id` function and its `FromStr`-ish
+>    numeric fallback.
+>
+> 4. Update handler signatures/bodies that previously accepted `:id: i64`
+>    path params to accept `:topic_id: String` instead. Example URLs
+>    affected: `/features/:feature_id`, `/requirements/:requirement_id`,
+>    `/behaviors/:behavior_id`, `/threats/:threat_id`,
+>    `/invariants/:invariant_id`, `/conditions/id/:condition_id` (see
+>    task 11 for the further URL cleanup on conditions), and the various
+>    vote/comment `:comment_id` routes. For comments specifically,
+>    prefer the prefixed `C42` form; the payload/body form stays
+>    numeric where Sqlx needs it.
+>
+> 5. Document the contract in a brief comment above `parse_topic_id`:
+>    "All path parameters that identify a topic use the prefixed form
+>    exclusively. Bare numeric IDs are not accepted."
+>
+> **Verify:** `cargo build --workspace` succeeds. `cargo test
+> --workspace` passes. Manual: hitting `GET /audits/:id/features/42`
+> (bare numeric) now returns 400; `GET /audits/:id/features/F42` returns
+> the feature as before.
+
+---
+
+## 11. Clean up path-shape warts
+
+> You are working in the Rust workspace at `/home/john/o11a-backend`. It
+> has four crates: `o11a-core` (library), `o11a-analyze` (bin),
+> `o11a-server` (bin), `o11a-web-backend` (HTML).
+>
+> A handful of route shapes show their history as collision-avoidance
+> hacks or older vocabulary. We're in alpha — clean them up so the API
+> reads uniformly.
+>
+> **Task:**
+>
+> 1. Fold `GET /api/v1/audits/:audit_id/requirements/topic/:topic_id`
+>    into `GET /api/v1/audits/:audit_id/requirements?for_topic=T42`.
+>    - Delete the `/requirements/topic/:topic_id` route entry.
+>    - Modify the existing `GET /requirements` handler (add if missing)
+>      to accept an optional `for_topic` query parameter. When present,
+>      return only requirements related to that topic using the logic
+>      that the old handler used (scan section_requirements, walk to
+>      features via behaviors, etc.).
+>
+> 2. `DELETE /api/v1/audits/:audit_id/conditions/id/:condition_id` →
+>    `DELETE /api/v1/audits/:audit_id/conditions/:condition_id`. The
+>    `/id/` segment is redundant since the path slot already implies an
+>    identifier. Update the route, the handler signature, and any
+>    client docs or specs in `docs/specs/`.
+>
+> 3. `GET /api/v1/audits/:audit_id/subjects/:topic_id/semantics` →
+>    `GET /api/v1/audits/:audit_id/topics/:topic_id/semantics`. The
+>    term "subject" is inconsistent with the "topic" vocabulary used
+>    everywhere else. Update route, handler path, and doc strings.
+>
+> 4. Grep the workspace and `docs/` tree for any references to the old
+>    URLs and update them. Example pattern: `grep -R
+>    "requirements/topic/\|conditions/id/\|subjects/" --include="*.{rs,md}"
+>    crates/ docs/`.
+>
+> **Verify:** `cargo build --workspace` and `cargo test --workspace`
+> succeed. Manual: each renamed endpoint responds on its new URL and
+> 404s on its old one.
+
+---
+
+## 12. Rename the event WebSocket and its event type
+
+> You are working in the Rust workspace at `/home/john/o11a-backend`. It
+> has four crates: `o11a-core` (library), `o11a-analyze` (bin),
+> `o11a-server` (bin), `o11a-web-backend` (HTML).
+>
+> The WebSocket at `/api/v1/audits/:audit_id/comments/ws` carries
+> several event kinds, not just comment activity: `ConversationUpdated`
+> (triggered by new comments), `StatusUpdated` (comment-status flips),
+> `VoteUpdated` (vote activity), and future kinds the audit UI will
+> want (e.g., pipeline-triggered refresh, user-created entity). The
+> URL and type names should reflect the general "audit event stream"
+> role.
+>
+> **Task:**
+>
+> 1. Rename the route: `/api/v1/audits/:audit_id/comments/ws` →
+>    `/api/v1/audits/:audit_id/events/ws`. Update
+>    `routes.rs` and `websocket.rs` (these may be in `o11a-core` or
+>    `o11a-server` depending on whether task 7 has been done).
+>
+> 2. Rename the Rust enum `CommentEvent` →
+>    `AuditEvent` throughout. Its declaration lives in
+>    `crates/o11a-core/src/collaborator/models.rs`.
+>
+> 3. Rename the variant `CommentEvent::ConversationUpdated` →
+>    `AuditEvent::TopicUpdated`. The serde tag stays `type` but the tag
+>    value changes from `conversation_updated` to `topic_updated`. This
+>    is a breaking wire change; document it in a short entry in
+>    `docs/follow_up_prompts.md` if a changelog exists, or note it in
+>    the commit message.
+>
+> 4. Rename the broadcast field on `AppState`:
+>    `comment_broadcast: broadcast::Sender<CommentEvent>` →
+>    `event_broadcast: broadcast::Sender<AuditEvent>`. Update every
+>    call site: the comment-creation handler, status handler, vote
+>    handlers, and the WebSocket relay.
+>
+> 5. Rename the web-backend re-exports and any doc strings that mention
+>    "comment events" or "comment websocket" to "audit events" /
+>    "event stream". Grep the tree for the old phrasing.
+>
+> **Verify:** `cargo build --workspace` and `cargo test --workspace`
+> succeed. Starting the server and connecting a WebSocket client to
+> the new URL should receive events in the new shape. The old URL
+> should 404.
+
+---
+
+## 13. Make pipeline-entity `author_id` and `created_at` optional in the JSON report
+
+> You are working in the Rust workspace at `/home/john/o11a-backend`. It
+> has four crates: `o11a-core` (library), `o11a-analyze` (bin — pipeline
+> runner that writes `audit.json`), `o11a-server` (bin), `o11a-web-backend`
+> (HTML rendering).
+>
+> Context: every `TopicMetadata::{FeatureTopic, RequirementTopic,
+> BehaviorTopic, FunctionalSemanticTopic}` variant currently carries
+> `author_id: i64` and `created_at: String` as required fields. For
+> pipeline-produced entities these are redundant — every entity from
+> one analyze run shares the same generation timestamp (already captured
+> at the top level of `audit.json` as `generated_at`) and was produced
+> by the batch rather than a specific actor. Carrying them per-entity
+> only makes sense when they're meaningful, i.e. for user-created and
+> server-agent-created entities, not for pipeline output.
+>
+> The new rule:
+> - `audit.json` omits `author_id` and `created_at` on each pipeline
+>   entity.
+> - On parse, the server assigns `AUTHOR_SYSTEM` (`1`) as the author
+>   and `None` as the creation time — "this came from the analyze
+>   batch, whose single top-level `generated_at` already tells you
+>   when."
+> - User- or server-agent-created entities (via the POST endpoints
+>   from tasks 5, 6, and 9) carry both `author_id` and `created_at`
+>   with real values.
+>
+> This is a breaking change to the on-disk JSON schema. Bump
+> `SCHEMA_VERSION` from `1` to `2` in `crates/o11a-core/src/report.rs`.
+>
+> **Task:**
+>
+> 1. In `crates/o11a-core/src/core/mod.rs`: change `created_at: String`
+>    → `created_at: Option<String>` on these four `TopicMetadata`
+>    variants: `FeatureTopic`, `RequirementTopic`, `BehaviorTopic`,
+>    `FunctionalSemanticTopic`. Do **not** change `created_at` on
+>    `CommentTopic` or any other variant — those are user-authored and
+>    always have a real timestamp.
+>
+> 2. In `crates/o11a-core/src/report.rs`:
+>    - Bump `SCHEMA_VERSION` to `2`.
+>    - Remove the `author_id` and `created_at` fields from
+>      `ReportFeature`, `ReportRequirement`, `ReportBehavior`, and
+>      `ReportFunctionalSemantic`.
+>    - In `build_report`: stop reading those fields off `TopicMetadata`.
+>    - In `apply_report`: when constructing each variant, set
+>      `author_id: o11a_core::collaborator::models::AUTHOR_SYSTEM` and
+>      `created_at: None`. The `AUTHOR_SYSTEM` constant equals `1`.
+>
+> 3. In `crates/o11a-core/src/collaborator/agent/pipeline.rs`: the
+>    pipeline no longer needs a `generated_at` value to stamp per-entity
+>    timestamps. If task 2 added a `generated_at: &str` parameter to
+>    `run_full_pipeline` and its step functions, remove it. Each
+>    pipeline-built `TopicMetadata` should use
+>    `author_id: AUTHOR_SYSTEM` and `created_at: None`.
+>
+> 4. In `crates/o11a-analyze/src/main.rs`: drop the `generated_at`
+>    argument passed to `run_full_pipeline`. Keep computing
+>    `generated_at` via `o11a_core::ids::now_iso8601()` and pass it
+>    directly to `build_report` — the report's top-level field is still
+>    needed and is set by the caller, not by the pipeline.
+>
+> 5. In the user-entity DB layer (task 5:
+>    `crates/o11a-core/src/collaborator/db/user_entities.rs`):
+>    `load_user_*` must return `TopicMetadata` entries with the real
+>    `author_id` from the row and `Some(created_at)` from the row.
+>    `create_user_*` already takes both as parameters — no change
+>    needed there, just confirm.
+>
+> 6. User-entity creation handlers (task 6): fill
+>    `created_at = Some(now_iso8601())` and the user-supplied
+>    `author_id` when constructing the `TopicMetadata`. If these
+>    handlers were written assuming `created_at: String`, update to
+>    `Some(String)`.
+>
+> 7. API response types (in `crates/o11a-server/src/api/handlers.rs`
+>    post-task-7, or `crates/o11a-core/src/api/handlers.rs` pre-move):
+>    the response shape for `TopicMetadataResponse` (and any per-kind
+>    response) should serialize `created_at` with
+>    `#[serde(skip_serializing_if = "Option::is_none")]` so absent
+>    values are genuinely absent in the JSON rather than `null`. This
+>    lets the client tell "never recorded" from "explicitly null."
+>
+> 8. Grep for any call site that unconditionally read `.created_at`
+>    from a pipeline-kind `TopicMetadata` — it now returns
+>    `&Option<String>`. Typical fix: `.as_deref().unwrap_or("")` for
+>    display-only paths, or propagate the optionality upstream.
+>
+> **Verify:** `cargo build --workspace` and `cargo test --workspace`
+> succeed.
+>
+> Run `cargo run -p o11a-analyze -- <project> <audit_id>`. Open the
+> resulting `audit.json`; inside `pipeline.features` (or
+> `pipeline.requirements`, etc.) entries should have **no**
+> `author_id` or `created_at` field. The top-level `schema_version`
+> should be `2`.
+>
+> Start the server against that report. `GET /api/v1/audits/:audit_id/features`
+> should return entries with `author_id: 1` and no `created_at` field.
+> POST a user feature via `/api/v1/audits/:audit_id/features`; the
+> created entry should round-trip back through GET with both
+> `author_id` and `created_at` populated.
+
+---
+
+## 14. Audit the follow-up work end to end
+
+> You are a third-party reviewer auditing recent architectural work in
+> the Rust workspace at `/home/john/o11a-backend`. You have no prior
+> context beyond this prompt. Your job is to verify that tasks 1–13 in
+> `docs/follow_up_prompts.md` were implemented correctly and that the
+> workspace is in a coherent end state. Produce a written report, do
+> not make code changes.
+>
+> ### Project at a glance
+>
+> The workspace has four crates:
+> - `crates/o11a-core` — library. Parsing (Solidity + NatSpec),
+>   analysis, agent tasks + pipeline, domain types (`AuditData`,
+>   `TopicMetadata`, `Topic`), persistence (SQLite for collaboration
+>   state), and the `report` module that defines `audit.json`'s schema.
+> - `crates/o11a-analyze` — binary. Runs the analysis pipeline once
+>   and writes `audit.json`. Expected to have no `sqlx` dependency.
+> - `crates/o11a-server` — binary. Loads `audit.json` + SQLite on
+>   startup, serves the HTTP API and WebSocket event stream.
+> - `crates/o11a-web-backend` — library. HTML rendering consumed by
+>   the server.
+>
+> Design invariants (all tasks should reinforce these):
+> - Pipeline output is immutable and lives in `audit.json`. The
+>   `o11a-analyze` binary writes it; the server reads it read-only at
+>   startup.
+> - User-created and user-triggered-agent-created entities live in
+>   SQLite alongside comments and votes. They share shape with pipeline
+>   entities but are distinguished by `author_id`.
+> - Topic IDs (`F`, `R`, `B`, `P`, `N`, `D`, `C`, `I`, `T` prefixes)
+>   are globally unique and allocated via process-wide atomic counters
+>   in `o11a_core::ids`.
+> - `o11a-core` is library-only; no HTTP routing types. HTTP lives in
+>   `o11a-server`.
+>
+> ### Audit checklist
+>
+> **Build hygiene.** Run and report the output status of:
+> - `cargo build --workspace`
+> - `cargo test --workspace`
+> - `cargo clippy --workspace --all-targets -- -D warnings` (non-blocking
+>   if clippy warnings are pre-existing, but note any new ones)
+> - `cargo fmt --all --check`
+>
+> Also count tests: `cargo test --workspace 2>&1 | grep "test result"`
+> should show ~99+ passing tests.
+>
+> **Per-task verification.** For each task 1–13, check:
+>
+> 1. **Atomic ID counters** (`crates/o11a-core/src/ids.rs`): confirm four
+>    `AtomicI32` counters exist for Feature / Requirement / Behavior /
+>    FunctionalSemantic. Confirm `allocate_*` uses `fetch_add` with
+>    `Relaxed` and `reseed_*` uses `store`. Confirm unit tests exist.
+>
+> 2. **Pipeline refactor** (`crates/o11a-core/src/collaborator/agent/pipeline.rs`):
+>    `grep -n "db::" pipeline.rs` should return no matches for the
+>    deleted functions (`create_feature`, `create_requirement`,
+>    `create_behavior`, `create_functional_semantic`, their link/delete
+>    helpers). `PipelineState` should have no `db` field. Note that
+>    task 13 subsequently removed the `generated_at` parameter from
+>    `run_full_pipeline`, so don't expect it on the signature.
+>
+> 3. **`o11a-analyze` simplification** (`crates/o11a-analyze/`): `Cargo.toml`
+>    should not list `sqlx`. `main.rs` should not mention pools or
+>    `init_schema`. Binary should compile with only `o11a-core`,
+>    `tokio`, and `serde_json` as deps.
+>
+> 4. **SQL schema replacement** (`crates/o11a-core/src/db/` or wherever
+>    `init_schema` lives): grep for `CREATE TABLE features`, `CREATE
+>    TABLE requirements`, `CREATE TABLE behaviors`, `CREATE TABLE
+>    semantic_links`, `CREATE TABLE feature_requirement_links`,
+>    `CREATE TABLE feature_behavior_links`. All should be absent.
+>    Their `user_*` replacements should exist with the column shapes
+>    described in task 4. `db::load_all_features` should be deleted;
+>    `server/src/main.rs` should no longer reference it.
+>
+> 5. **User-entity load step** (`crates/o11a-core/src/collaborator/db/user_entities.rs`
+>    or equivalent): functions `create_user_feature`,
+>    `create_user_requirement`, `create_user_behavior`,
+>    `create_user_functional_semantic`, their `load_*` pairs, and
+>    `apply_user_entities` should exist. Each `create_*` takes the
+>    already-allocated ID as a parameter (no DB autoincrement for
+>    these). `server/src/main.rs` should call `apply_user_entities`
+>    after `apply_report` and before `rebuild_feature_context`.
+>
+> 6. **User-entity HTTP endpoints**: four POST handlers exist for the
+>    four kinds. After task 9 is applied, their paths should be
+>    `/audits/:audit_id/features`, `/audits/:audit_id/requirements`,
+>    `/audits/:audit_id/behaviors`,
+>    `/audits/:audit_id/functional_semantics` (no `/user/` infix).
+>    Each handler calls `allocate_*_id`, persists via
+>    `db::user_entities::create_*`, and updates `DataContext`.
+>
+> 7. **`api/` + `websocket.rs` move**: neither
+>    `crates/o11a-core/src/api/` nor `crates/o11a-core/src/collaborator/websocket.rs`
+>    should exist. They live at `crates/o11a-server/src/api/` and
+>    `crates/o11a-server/src/websocket.rs`. `crates/o11a-core/Cargo.toml`
+>    ideally no longer depends on `axum` (acceptable if it still does
+>    for a transitional reason — flag it). `features_for_topic` lives
+>    in `o11a-core` (not in `o11a-server/src/api/handlers.rs`).
+>    `crates/o11a-web-backend/src/` should not import from
+>    `o11a_core::api::*`.
+>
+> 8. **Pipeline-trigger removal**: grep for the handler names —
+>    `analyze`, `pipeline_semantic_links`, `pipeline_requirements`,
+>    `pipeline_behaviors`, `pipeline_synthesize`. None should exist as
+>    route handlers. `run_pipeline_step` helper should also be gone.
+>
+> 9. **URL unification**: POST routes for user entities should be
+>    exactly `/api/v1/audits/:audit_id/{features,requirements,behaviors,functional_semantics}`.
+>    No `/user/` prefix anywhere.
+>
+> 10. **Topic-ID-only paths**: `grep -R "parse_path_id" crates/` should
+>     return no hits. `parse_topic_id` should be the only helper and
+>     should reject bare numeric IDs. Handler signatures should take
+>     `:topic_id: String` path params, not `:feature_id: i64` etc.
+>
+> 11. **Path hygiene**: grep for the old shapes — `"requirements/topic/"`,
+>     `"/conditions/id/"`, `"subjects/"` — and report any hits.
+>     `GET /requirements?for_topic=...` should be supported.
+>
+> 12. **WebSocket rename**: `grep -R "comments/ws\|CommentEvent\|comment_broadcast"
+>     crates/` should return no hits in production code (test fixtures
+>     are OK). The new names should appear uniformly:
+>     `/events/ws`, `AuditEvent`, `event_broadcast`,
+>     `AuditEvent::TopicUpdated`.
+>
+> 13. **Optional pipeline `created_at` + `AUTHOR_SYSTEM` provenance**:
+>     - `crates/o11a-core/src/report.rs` declares `SCHEMA_VERSION = 2`.
+>     - `ReportFeature` / `ReportRequirement` / `ReportBehavior` /
+>       `ReportFunctionalSemantic` have no `author_id` or `created_at`
+>       fields.
+>     - `TopicMetadata::{Feature,Requirement,Behavior,FunctionalSemantic}Topic`
+>       variants have `created_at: Option<String>` (but `CommentTopic`
+>       and others remain `String`).
+>     - In a freshly-generated `audit.json`, `jq '.pipeline.features[0]
+>       | keys'` does not list `"author_id"` or `"created_at"`.
+>     - Freshly-loaded server: `curl /audits/:id/features | jq '.[0]'`
+>       shows `author_id: 1` and no `created_at` key.
+>     - POST-then-GET of a user feature round-trips with both
+>       `author_id` (user's id) and `created_at` populated.
+>
+> ### Cross-cutting checks
+>
+> - **JSON schema stability**: `crates/o11a-core/src/report.rs` should
+>   declare `SCHEMA_VERSION = 2` after task 13 (bumped from 1 by the
+>   `author_id`/`created_at` removal on pipeline entities). If it reads
+>   `3` or higher, verify each bump was actually breaking and not just
+>   an accidental change.
+>
+> - **Dead code**: run `cargo build --workspace 2>&1 | grep -i warning`
+>   and report any `unused_*` warnings. These often point at leftover
+>   imports or functions from the deleted code paths.
+>
+> - **Dependency drift**: run `cargo tree -p o11a-core --depth 1` and
+>   confirm: no `axum`, no `tower*`, no `futures`. (If any remain,
+>   flag them — they were supposed to move to server in task 7.)
+>   `cargo tree -p o11a-analyze --depth 1`: no `sqlx`, no `axum`.
+>
+> - **Doc/comment drift**: grep `docs/` for mentions of deleted
+>   endpoints, old URL shapes, old event type names. Update or flag.
+>
+> - **End-to-end smoke test**, if feasible:
+>   1. `cargo run -p o11a-analyze -- <some project> <audit_id>` —
+>      should produce a valid `audit.json` at the project root.
+>      `jq '.schema_version' audit.json` → `2`.
+>      `jq '.pipeline.features[0] | keys' audit.json` → should **not**
+>      include `"author_id"` or `"created_at"`.
+>   2. `PROJECT_ROOT=<path> AUDIT_ID=<audit_id> cargo run -p o11a-server`
+>      — server should start, load the report, listen on port 3058.
+>   3. `curl http://localhost:3058/health` → 200 OK.
+>   4. `curl http://localhost:3058/api/v1/audits/<audit_id>/features |
+>      jq '.[0]'` → JSON object with `author_id: 1` (AUTHOR_SYSTEM)
+>      and no `created_at` key. Array may be empty if the pipeline
+>      didn't synthesize any features for that fixture.
+>   5. `curl -X POST http://localhost:3058/api/v1/audits/<audit_id>/features
+>      -H 'content-type: application/json' -d '{"name":"Test","description":"t","author_id":100}'` →
+>      returns `{topic_id: "F..."}` where the ID is above the max
+>      pipeline-assigned feature ID. A subsequent GET on that topic
+>      returns `author_id: 100` and a populated `created_at`.
+>
+> ### Report format
+>
+> Produce a concise report (under 800 words) with three sections:
+> - **PASS** — tasks that look correctly implemented. One line each.
+> - **ISSUES** — concrete problems found, each tied to a task number,
+>   with a file path and the specific concern.
+> - **FOLLOW-UPS** — nice-to-haves or drift that's not a bug but is
+>   worth cleaning up (e.g., stale doc strings, orphaned tests).
+>
+> Do not attempt to fix anything. Produce the report only.

@@ -225,10 +225,12 @@ pub struct CommentVoteSummary {
 // WebSocket event types
 // ============================================================================
 
-/// WebSocket event types for real-time updates
+/// Audit event types for the real-time event stream. Carries comment activity
+/// today and is the envelope for future audit-scoped events (pipeline refresh,
+/// user-created entity, etc.).
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type")]
-pub enum CommentEvent {
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AuditEvent {
   /// A conversation entry was added to a topic's conversation. Carries only
   /// topic identifiers — rendered representations are fetched on demand by
   /// the client, keeping this event payload free of any presentation format.
@@ -236,7 +238,7 @@ pub enum CommentEvent {
   /// - `comment_topic_id`: the new comment that triggered the update.
   /// - `invalidated_thread_ids`: parent comment topic IDs whose threads are
   ///   now stale and should be refetched by the client.
-  ConversationUpdated {
+  TopicUpdated {
     audit_id: String,
     topic_id: String,
     comment_topic_id: String,
@@ -259,12 +261,12 @@ pub enum CommentEvent {
   },
 }
 
-impl CommentEvent {
+impl AuditEvent {
   pub fn audit_id(&self) -> &str {
     match self {
-      CommentEvent::ConversationUpdated { audit_id, .. }
-      | CommentEvent::StatusUpdated { audit_id, .. }
-      | CommentEvent::VoteUpdated { audit_id, .. } => audit_id,
+      AuditEvent::TopicUpdated { audit_id, .. }
+      | AuditEvent::StatusUpdated { audit_id, .. }
+      | AuditEvent::VoteUpdated { audit_id, .. } => audit_id,
     }
   }
 }

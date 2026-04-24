@@ -7,24 +7,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-use crate::api::AppState;
-use crate::collaborator::{db, models::*};
-use crate::core::{
+use o11a_core::collaborator::{db, models::*};
+use o11a_core::core::{
   self, project,
   topic::{self, TopicKind, new_topic},
 };
-
-/// Parse a topic ID string from a URL path parameter into a numeric database ID.
-/// Accepts both prefixed (e.g. "F7") and bare numeric (e.g. "7") formats.
-fn parse_path_id(
-  input: &str,
-  expected_kind: TopicKind,
-) -> Result<i64, StatusCode> {
-  topic::parse_topic_id(input, expected_kind).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
-    StatusCode::BAD_REQUEST
-  })
-}
+use o11a_core::feature_lookup::features_for_topic;
+use o11a_core::state::AppState;
 
 // Health check handler
 pub async fn health_check() -> StatusCode {
@@ -283,7 +272,7 @@ pub async fn get_documents(
   for (topic, metadata) in &audit_data.topic_metadata {
     if matches!(
       metadata,
-      crate::core::TopicMetadata::DocumentationTopic { .. }
+      o11a_core::core::TopicMetadata::DocumentationTopic { .. }
     ) {
       documents.push(topic_metadata_to_response(topic, metadata));
     }
@@ -311,26 +300,26 @@ pub async fn get_contracts(
   // Iterate through all topic metadata and filter for contracts in scope files
   for (topic, metadata) in &audit_data.topic_metadata {
     let is_contract = match metadata {
-      crate::core::TopicMetadata::NamedTopic { kind, .. } => {
-        matches!(kind, crate::core::NamedTopicKind::Contract(_))
+      o11a_core::core::TopicMetadata::NamedTopic { kind, .. } => {
+        matches!(kind, o11a_core::core::NamedTopicKind::Contract(_))
       }
-      crate::core::TopicMetadata::UnnamedTopic { .. }
-      | crate::core::TopicMetadata::ControlFlow { .. }
-      | crate::core::TopicMetadata::TitledTopic { .. }
-      | crate::core::TopicMetadata::CommentTopic { .. }
-      | crate::core::TopicMetadata::FeatureTopic { .. }
-      | crate::core::TopicMetadata::RequirementTopic { .. }
-      | crate::core::TopicMetadata::BehaviorTopic { .. }
-      | crate::core::TopicMetadata::FunctionalSemanticTopic { .. }
-      | crate::core::TopicMetadata::ThreatTopic { .. }
-      | crate::core::TopicMetadata::InvariantTopic { .. }
-      | crate::core::TopicMetadata::DocumentationTopic { .. } => false,
+      o11a_core::core::TopicMetadata::UnnamedTopic { .. }
+      | o11a_core::core::TopicMetadata::ControlFlow { .. }
+      | o11a_core::core::TopicMetadata::TitledTopic { .. }
+      | o11a_core::core::TopicMetadata::CommentTopic { .. }
+      | o11a_core::core::TopicMetadata::FeatureTopic { .. }
+      | o11a_core::core::TopicMetadata::RequirementTopic { .. }
+      | o11a_core::core::TopicMetadata::BehaviorTopic { .. }
+      | o11a_core::core::TopicMetadata::FunctionalSemanticTopic { .. }
+      | o11a_core::core::TopicMetadata::ThreatTopic { .. }
+      | o11a_core::core::TopicMetadata::InvariantTopic { .. }
+      | o11a_core::core::TopicMetadata::DocumentationTopic { .. } => false,
     };
 
     if is_contract {
       // Check if the contract is in an in-scope file
       let is_in_scope = match metadata.scope() {
-        crate::core::Scope::Container { container } => {
+        o11a_core::core::Scope::Container { container } => {
           audit_data.in_scope_files.contains(container)
         }
         _ => false,
@@ -378,8 +367,10 @@ pub async fn get_qualified_names(
 pub async fn get_delimiter(
   State(state): State<AppState>,
   Path((audit_id, topic_id)): Path<(String, String)>,
-) -> Result<Json<Option<crate::solidity::delimiter::DelimiterInfo>>, StatusCode>
-{
+) -> Result<
+  Json<Option<o11a_core::solidity::delimiter::DelimiterInfo>>,
+  StatusCode,
+> {
   println!("GET /api/v1/audits/{}/delimiter/{}", audit_id, topic_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
@@ -398,7 +389,7 @@ pub async fn get_delimiter(
 
   let info = match node {
     core::Node::Solidity(solidity_node) => {
-      crate::solidity::delimiter::delimiter_info_for_node(solidity_node)
+      o11a_core::solidity::delimiter::delimiter_info_for_node(solidity_node)
     }
     core::Node::Documentation(_) | core::Node::Comment(_) => None,
   };
@@ -408,8 +399,9 @@ pub async fn get_delimiter(
 
 // Topic metadata response
 
-pub use crate::collaborator::scope_info::{
-  BlockAnnotationKindInfo, BlockAnnotationResponse, ContainingBlockLayerInfo, ScopeInfo,
+pub use o11a_core::collaborator::scope_info::{
+  BlockAnnotationKindInfo, BlockAnnotationResponse, ContainingBlockLayerInfo,
+  ScopeInfo,
 };
 
 /// Response type for a single reference
@@ -529,7 +521,8 @@ pub struct FeatureTopicResponse {
   pub name: String,
   pub description: String,
   pub author_id: i64,
-  pub created_at: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<String>,
 }
 
 /// Response for RequirementTopic metadata
@@ -538,7 +531,8 @@ pub struct RequirementTopicResponse {
   pub topic_id: String,
   pub description: String,
   pub author_id: i64,
-  pub created_at: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<String>,
 }
 
 /// Response for BehaviorTopic metadata
@@ -548,7 +542,8 @@ pub struct BehaviorTopicResponse {
   pub description: String,
   pub member_topic: String,
   pub author_id: i64,
-  pub created_at: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<String>,
 }
 
 /// Response for FunctionalSemanticTopic metadata
@@ -559,7 +554,8 @@ pub struct SemanticTopicResponse {
   pub declaration_topic: String,
   pub documentation_topics: Vec<String>,
   pub author_id: i64,
-  pub created_at: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<String>,
 }
 
 /// Response for ThreatTopic metadata
@@ -618,13 +614,13 @@ pub enum TopicMetadataResponse {
 
 // Helper function to convert TopicMetadata to TopicMetadataResponse
 fn topic_metadata_to_response(
-  topic: &crate::core::topic::Topic,
-  metadata: &crate::core::TopicMetadata,
+  topic: &o11a_core::core::topic::Topic,
+  metadata: &o11a_core::core::TopicMetadata,
 ) -> TopicMetadataResponse {
   let scope_info = ScopeInfo::from_scope(metadata.scope());
 
   match metadata {
-    crate::core::TopicMetadata::NamedTopic {
+    o11a_core::core::TopicMetadata::NamedTopic {
       name,
       kind,
       visibility,
@@ -634,13 +630,13 @@ fn topic_metadata_to_response(
     } => {
       // Format the kind and sub_kind for NamedTopic
       let (kind_str, sub_kind) = match kind {
-        crate::core::NamedTopicKind::Contract(contract_kind) => {
+        o11a_core::core::NamedTopicKind::Contract(contract_kind) => {
           ("Contract".to_string(), Some(format!("{:?}", contract_kind)))
         }
-        crate::core::NamedTopicKind::Function(function_kind) => {
+        o11a_core::core::NamedTopicKind::Function(function_kind) => {
           ("Function".to_string(), Some(format!("{:?}", function_kind)))
         }
-        crate::core::NamedTopicKind::StateVariable(mutability) => (
+        o11a_core::core::NamedTopicKind::StateVariable(mutability) => (
           "StateVariable".to_string(),
           Some(format!("{:?}", mutability)),
         ),
@@ -671,7 +667,7 @@ fn topic_metadata_to_response(
       })
     }
 
-    crate::core::TopicMetadata::TitledTopic { title, kind, .. } => {
+    o11a_core::core::TopicMetadata::TitledTopic { title, kind, .. } => {
       TopicMetadataResponse::Titled(TitledTopicResponse {
         topic_id: topic.id.clone(),
         title: title.clone(),
@@ -680,7 +676,7 @@ fn topic_metadata_to_response(
       })
     }
 
-    crate::core::TopicMetadata::UnnamedTopic { kind, .. } => {
+    o11a_core::core::TopicMetadata::UnnamedTopic { kind, .. } => {
       TopicMetadataResponse::Unnamed(UnnamedTopicResponse {
         topic_id: topic.id.clone(),
         kind: format!("{:?}", kind),
@@ -688,15 +684,15 @@ fn topic_metadata_to_response(
       })
     }
 
-    crate::core::TopicMetadata::DocumentationTopic { is_technical, .. } => {
-      TopicMetadataResponse::Documentation(DocumentationTopicResponse {
-        topic_id: topic.id.clone(),
-        scope: scope_info,
-        is_technical: *is_technical,
-      })
-    }
+    o11a_core::core::TopicMetadata::DocumentationTopic {
+      is_technical, ..
+    } => TopicMetadataResponse::Documentation(DocumentationTopicResponse {
+      topic_id: topic.id.clone(),
+      scope: scope_info,
+      is_technical: *is_technical,
+    }),
 
-    crate::core::TopicMetadata::ControlFlow {
+    o11a_core::core::TopicMetadata::ControlFlow {
       kind, condition, ..
     } => TopicMetadataResponse::ControlFlow(ControlFlowTopicResponse {
       topic_id: topic.id.clone(),
@@ -705,7 +701,7 @@ fn topic_metadata_to_response(
       condition: condition.id.clone(),
     }),
 
-    crate::core::TopicMetadata::CommentTopic {
+    o11a_core::core::TopicMetadata::CommentTopic {
       author_id,
       comment_type,
       target_topic,
@@ -722,7 +718,7 @@ fn topic_metadata_to_response(
       mentioned_topics: mentioned_topics.iter().map(|t| t.id.clone()).collect(),
     }),
 
-    crate::core::TopicMetadata::FeatureTopic {
+    o11a_core::core::TopicMetadata::FeatureTopic {
       name,
       description,
       author_id,
@@ -736,7 +732,7 @@ fn topic_metadata_to_response(
       created_at: created_at.clone(),
     }),
 
-    crate::core::TopicMetadata::RequirementTopic {
+    o11a_core::core::TopicMetadata::RequirementTopic {
       description,
       author_id,
       created_at,
@@ -748,7 +744,7 @@ fn topic_metadata_to_response(
       created_at: created_at.clone(),
     }),
 
-    crate::core::TopicMetadata::BehaviorTopic {
+    o11a_core::core::TopicMetadata::BehaviorTopic {
       description,
       member_topic,
       author_id,
@@ -762,7 +758,7 @@ fn topic_metadata_to_response(
       created_at: created_at.clone(),
     }),
 
-    crate::core::TopicMetadata::FunctionalSemanticTopic {
+    o11a_core::core::TopicMetadata::FunctionalSemanticTopic {
       description,
       declaration_topic,
       documentation_topics,
@@ -781,7 +777,7 @@ fn topic_metadata_to_response(
       created_at: created_at.clone(),
     }),
 
-    crate::core::TopicMetadata::ThreatTopic {
+    o11a_core::core::TopicMetadata::ThreatTopic {
       description,
       subject_topic,
       author_id,
@@ -797,7 +793,7 @@ fn topic_metadata_to_response(
       severity: severity.map(|s| s.as_str().to_string()),
     }),
 
-    crate::core::TopicMetadata::InvariantTopic {
+    o11a_core::core::TopicMetadata::InvariantTopic {
       description,
       threat_topic,
       author_id,
@@ -1043,14 +1039,12 @@ pub async fn create_comment(
     } else {
       Vec::new()
     };
-    let _ = state
-      .comment_broadcast
-      .send(CommentEvent::ConversationUpdated {
-        audit_id: audit_id.clone(),
-        topic_id,
-        comment_topic_id: comment_topic_id.clone(),
-        invalidated_thread_ids: thread_ids,
-      });
+    let _ = state.event_broadcast.send(AuditEvent::TopicUpdated {
+      audit_id: audit_id.clone(),
+      topic_id,
+      comment_topic_id: comment_topic_id.clone(),
+      invalidated_thread_ids: thread_ids,
+    });
   }
 
   Ok(Json(CommentCreatedResponse { comment_topic_id }))
@@ -1064,13 +1058,21 @@ pub async fn create_comment(
 /// Returns status for a single comment.
 pub async fn get_comment_status(
   State(state): State<AppState>,
-  Path((audit_id, comment_id)): Path<(String, i64)>,
+  Path((audit_id, comment_id)): Path<(String, String)>,
 ) -> Result<Json<CommentStatusResponse>, StatusCode> {
+  let comment_topic = topic::parse_topic_id(&comment_id, TopicKind::Comment)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  let comment_id_num = comment_topic
+    .numeric_id()
+    .expect("verified by parse_topic_id");
   println!(
     "GET /api/v1/audits/{}/comments/{}/status",
     audit_id, comment_id
   );
-  let response = db::get_comment_status(&state.db, comment_id)
+  let response = db::get_comment_status(&state.db, comment_id_num)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -1081,21 +1083,28 @@ pub async fn get_comment_status(
 /// Updates comment status.
 pub async fn update_comment_status(
   State(state): State<AppState>,
-  Path((audit_id, comment_id)): Path<(String, i64)>,
+  Path((audit_id, comment_id)): Path<(String, String)>,
   Json(payload): Json<UpdateStatusRequest>,
 ) -> Result<Json<CommentStatusResponse>, StatusCode> {
+  let comment_topic = topic::parse_topic_id(&comment_id, TopicKind::Comment)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  let comment_id_num = comment_topic
+    .numeric_id()
+    .expect("verified by parse_topic_id");
   println!(
     "PUT /api/v1/audits/{}/comments/{}/status",
     audit_id, comment_id
   );
   // Update status in database
-  let response = db::update_status(&state.db, comment_id, &payload.status)
+  let response = db::update_status(&state.db, comment_id_num, &payload.status)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
   // Update in-memory comment index on hide/unhide
   {
-    let comment_topic = new_topic(&format!("C{}", comment_id));
     let mut ctx = state.data_context.lock().map_err(|e| {
       eprintln!("Mutex poisoned in update_comment_status: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
@@ -1125,7 +1134,7 @@ pub async fn update_comment_status(
   }
 
   // Broadcast status update via WebSocket
-  let _ = state.comment_broadcast.send(CommentEvent::StatusUpdated {
+  let _ = state.event_broadcast.send(AuditEvent::StatusUpdated {
     audit_id: audit_id.clone(),
     comment_topic_id: response.comment_topic_id.clone(),
     status: response.status.clone(),
@@ -1142,17 +1151,25 @@ pub async fn update_comment_status(
 /// Returns vote summary for a comment.
 pub async fn get_vote_summary(
   State(state): State<AppState>,
-  Path((audit_id, comment_id)): Path<(String, i64)>,
+  Path((audit_id, comment_id)): Path<(String, String)>,
   Query(params): Query<OptionalUserIdQuery>,
 ) -> Result<Json<CommentVoteSummary>, StatusCode> {
+  let comment_topic = topic::parse_topic_id(&comment_id, TopicKind::Comment)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  let comment_id_num = comment_topic
+    .numeric_id()
+    .expect("verified by parse_topic_id");
   println!("GET /api/v1/audits/{}/votes/{}", audit_id, comment_id);
-  let vote_info = db::get_vote_info(&state.db, comment_id, params.user_id)
+  let vote_info = db::get_vote_info(&state.db, comment_id_num, params.user_id)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
   Ok(Json(CommentVoteSummary {
-    comment_id,
-    comment_topic_id: format!("C{}", comment_id),
+    comment_id: comment_id_num,
+    comment_topic_id: comment_topic.id.clone(),
     score: vote_info.score,
     upvotes: vote_info.upvotes,
     downvotes: vote_info.downvotes,
@@ -1189,26 +1206,34 @@ pub async fn get_unvoted_comment_ids(
 /// Casts or updates a vote.
 pub async fn cast_vote(
   State(state): State<AppState>,
-  Path((audit_id, comment_id)): Path<(String, i64)>,
+  Path((audit_id, comment_id)): Path<(String, String)>,
   Json(payload): Json<VoteRequest>,
 ) -> Result<Json<CommentVoteSummary>, StatusCode> {
+  let comment_topic = topic::parse_topic_id(&comment_id, TopicKind::Comment)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  let comment_id_num = comment_topic
+    .numeric_id()
+    .expect("verified by parse_topic_id");
   println!("POST /api/v1/audits/{}/votes/{}", audit_id, comment_id);
   let vote_value = payload.vote.to_i32();
 
-  db::upsert_vote(&state.db, comment_id, payload.user_id, vote_value)
+  db::upsert_vote(&state.db, comment_id_num, payload.user_id, vote_value)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
   // Return updated vote summary
   let vote_info =
-    db::get_vote_info(&state.db, comment_id, Some(payload.user_id))
+    db::get_vote_info(&state.db, comment_id_num, Some(payload.user_id))
       .await
       .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-  let comment_topic_id = format!("C{}", comment_id);
+  let comment_topic_id = comment_topic.id.clone();
 
   // Broadcast vote update via WebSocket
-  let _ = state.comment_broadcast.send(CommentEvent::VoteUpdated {
+  let _ = state.event_broadcast.send(AuditEvent::VoteUpdated {
     audit_id,
     comment_topic_id: comment_topic_id.clone(),
     score: vote_info.score,
@@ -1217,7 +1242,7 @@ pub async fn cast_vote(
   });
 
   Ok(Json(CommentVoteSummary {
-    comment_id,
+    comment_id: comment_id_num,
     comment_topic_id,
     score: vote_info.score,
     upvotes: vote_info.upvotes,
@@ -1230,25 +1255,33 @@ pub async fn cast_vote(
 /// Removes a user's vote.
 pub async fn remove_vote(
   State(state): State<AppState>,
-  Path((audit_id, comment_id)): Path<(String, i64)>,
+  Path((audit_id, comment_id)): Path<(String, String)>,
   Query(params): Query<UserIdQuery>,
 ) -> Result<StatusCode, StatusCode> {
+  let comment_topic = topic::parse_topic_id(&comment_id, TopicKind::Comment)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  let comment_id_num = comment_topic
+    .numeric_id()
+    .expect("verified by parse_topic_id");
   println!(
     "DELETE /api/v1/audits/{}/votes/{}?user_id={}",
     audit_id, comment_id, params.user_id
   );
-  db::delete_vote(&state.db, comment_id, params.user_id)
+  db::delete_vote(&state.db, comment_id_num, params.user_id)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
   // Get updated vote info and broadcast
-  let vote_info = db::get_vote_info(&state.db, comment_id, None)
+  let vote_info = db::get_vote_info(&state.db, comment_id_num, None)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-  let _ = state.comment_broadcast.send(CommentEvent::VoteUpdated {
+  let _ = state.event_broadcast.send(AuditEvent::VoteUpdated {
     audit_id,
-    comment_topic_id: format!("C{}", comment_id),
+    comment_topic_id: comment_topic.id.clone(),
     score: vote_info.score,
     upvotes: vote_info.upvotes,
     downvotes: vote_info.downvotes,
@@ -1273,7 +1306,7 @@ pub async fn get_agent_context(
   Path((audit_id, topic_id)): Path<(String, String)>,
   Query(params): Query<AgentContextQuery>,
 ) -> Result<
-  Json<crate::collaborator::agent::context::AgentTopicContext>,
+  Json<o11a_core::collaborator::agent::context::AgentTopicContext>,
   StatusCode,
 > {
   println!("GET /api/v1/audits/{}/agent_context/{}", audit_id, topic_id);
@@ -1286,7 +1319,7 @@ pub async fn get_agent_context(
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
   let response =
-    crate::collaborator::agent::context::build_agent_topic_context(
+    o11a_core::collaborator::agent::context::build_agent_topic_context(
       &topic_id,
       audit_data,
       params.include_expanded_context,
@@ -1321,7 +1354,7 @@ pub async fn get_features(
     .topic_metadata
     .iter()
     .filter_map(|(t, m)| {
-      if matches!(m, crate::core::TopicMetadata::FeatureTopic { .. }) {
+      if matches!(m, o11a_core::core::TopicMetadata::FeatureTopic { .. }) {
         Some(topic_metadata_to_response(t, m))
       } else {
         None
@@ -1332,18 +1365,20 @@ pub async fn get_features(
   Ok(Json(features))
 }
 
-/// GET /api/v1/audits/:audit_id/features/:feature_id/requirements
+/// GET /api/v1/audits/:audit_id/features/:topic_id/requirements
 pub async fn get_feature_requirements(
   State(state): State<AppState>,
-  Path((audit_id, feature_id)): Path<(String, String)>,
+  Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
-  let feature_id = parse_path_id(&feature_id, TopicKind::Feature)?;
+  let feature_topic = topic::parse_topic_id(&topic_id, TopicKind::Feature)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
   println!(
     "GET /api/v1/audits/{}/features/{}/requirements",
-    audit_id, feature_id
+    audit_id, topic_id
   );
-
-  let feature_topic = topic::new_feature_topic(feature_id as i32);
 
   let ctx = state.data_context.lock().map_err(|e| {
     eprintln!("Mutex poisoned in get_feature_requirements: {}", e);
@@ -1353,7 +1388,7 @@ pub async fn get_feature_requirements(
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
   if !matches!(
     audit_data.topic_metadata.get(&feature_topic),
-    Some(crate::core::TopicMetadata::FeatureTopic { .. })
+    Some(o11a_core::core::TopicMetadata::FeatureTopic { .. })
   ) {
     return Err(StatusCode::NOT_FOUND);
   }
@@ -1372,13 +1407,15 @@ pub async fn get_threat_invariants(
   State(state): State<AppState>,
   Path((audit_id, threat_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
-  let threat_id = parse_path_id(&threat_id, TopicKind::AttackVector)?;
+  let threat_topic = topic::parse_topic_id(&threat_id, TopicKind::AttackVector)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
   println!(
     "GET /api/v1/audits/{}/threats/{}/invariants",
     audit_id, threat_id
   );
-
-  let threat_topic = topic::new_attack_vector_topic(threat_id as i32);
 
   let ctx = state.data_context.lock().map_err(|e| {
     eprintln!("Mutex poisoned in get_threat_invariants: {}", e);
@@ -1400,87 +1437,6 @@ pub async fn get_threat_invariants(
   Ok(Json(ids))
 }
 
-/// Trigger the agent to build features from documentation.
-/// Find feature topics for any topic by walking the appropriate chain:
-/// - Feature topic: returns itself
-/// - Requirement topic: reverse-lookups feature_requirement_links
-/// - Behavior topic: reverse-lookups feature_behavior_links
-/// - Code topic: walks to containing member → behaviors → feature_behavior_links
-pub fn features_for_topic(
-  t: &topic::Topic,
-  audit_data: &core::AuditData,
-) -> Vec<topic::Topic> {
-  let mut features = Vec::new();
-
-  match t.kind() {
-    Some(TopicKind::Feature) => {
-      if matches!(
-        audit_data.topic_metadata.get(t),
-        Some(core::TopicMetadata::FeatureTopic { .. })
-      ) {
-        features.push(t.clone());
-      }
-      return features;
-    }
-    Some(TopicKind::Requirement) => {
-      for (ft, req_topics) in &audit_data.feature_requirement_links {
-        if req_topics.contains(t) && !features.contains(ft) {
-          features.push(ft.clone());
-        }
-      }
-      return features;
-    }
-    Some(TopicKind::Behavior) => {
-      for (ft, beh_topics) in &audit_data.feature_behavior_links {
-        if beh_topics.contains(t) && !features.contains(ft) {
-          features.push(ft.clone());
-        }
-      }
-      return features;
-    }
-    _ => {}
-  }
-
-  // Code topic: determine the member topic (self if already a member, or walk up)
-  let member_topic = if let Some(metadata) = audit_data.topic_metadata.get(t) {
-    match metadata {
-      core::TopicMetadata::NamedTopic {
-        kind: core::NamedTopicKind::Function(_) | core::NamedTopicKind::Modifier,
-        ..
-      } => Some(t.clone()),
-      _ => match metadata.scope() {
-        core::Scope::Member { member, .. }
-        | core::Scope::ContainingBlock { member, .. } => Some(member.clone()),
-        _ => None,
-      },
-    }
-  } else {
-    None
-  };
-
-  let member_topic = match member_topic {
-    Some(mt) => mt,
-    None => return features,
-  };
-
-  // Find features via behaviors for this member
-  for (ft, beh_topics) in &audit_data.feature_behavior_links {
-    for bt in beh_topics {
-      if let Some(core::TopicMetadata::BehaviorTopic {
-        member_topic: bmt,
-        ..
-      }) = audit_data.topic_metadata.get(bt)
-      {
-        if *bmt == member_topic && !features.contains(ft) {
-          features.push(ft.clone());
-        }
-      }
-    }
-  }
-
-  features
-}
-
 /// Collect requirement topics for a set of feature topics.
 fn requirements_for_features(
   feature_topics: &[topic::Topic],
@@ -1499,149 +1455,18 @@ fn requirements_for_features(
   requirement_topics
 }
 
-fn pipeline_state(
-  state: &AppState,
-) -> crate::collaborator::agent::pipeline::PipelineState {
-  crate::collaborator::agent::pipeline::PipelineState {
-    data_context: state.data_context.clone(),
-  }
-}
-
-/// Spawn a pipeline step on a background task (required because pipeline
-/// functions hold std::sync::MutexGuard which is !Send, so they must run
-/// inside tokio::spawn to satisfy axum's Handler bounds).
-async fn run_pipeline_step<F, Fut>(
-  state: &AppState,
-  audit_id: String,
-  step_name: &str,
-  f: F,
-) -> Result<StatusCode, StatusCode>
-where
-  F: FnOnce(
-      crate::collaborator::agent::pipeline::PipelineState,
-      String,
-      String,
-    ) -> Fut
-    + Send
-    + 'static,
-  Fut: std::future::Future<Output = Result<(), String>> + Send,
-{
-  let ps = pipeline_state(state);
-  let name = step_name.to_string();
-  let generated_at = crate::ids::now_iso8601();
-  tokio::spawn(async move { f(ps, audit_id, generated_at).await })
-    .await
-    .map_err(|e| {
-      eprintln!("{} task panicked: {}", name, e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?
-    .map_err(|e| {
-      eprintln!("{} failed: {}", name, e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-  Ok(StatusCode::OK)
-}
-
-/// POST /api/v1/audits/:audit_id/analyze
-/// Runs the full analysis pipeline.
-pub async fn analyze(
-  State(state): State<AppState>,
-  Path(audit_id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-  println!("POST /api/v1/audits/{}/analyze", audit_id);
-  run_pipeline_step(&state, audit_id, "analyze", |ps, id, ts| async move {
-    crate::collaborator::agent::pipeline::run_full_pipeline(&ps, &id, &ts).await
-  })
-  .await
-}
-
-/// POST /api/v1/audits/:audit_id/pipeline/semantic_links
-/// Step 1: Connect documentation sections to code declarations, producing
-/// functional semantics with provenance. Must run before requirements so
-/// that inline code in docs is annotated with semantic meaning.
-pub async fn pipeline_semantic_links(
-  State(state): State<AppState>,
-  Path(audit_id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-  println!("POST /api/v1/audits/{}/pipeline/semantic_links", audit_id);
-  run_pipeline_step(
-    &state,
-    audit_id,
-    "build_semantic_links",
-    |ps, id, ts| async move {
-      crate::collaborator::agent::pipeline::build_semantic_links(&ps, &id, &ts)
-        .await
-    },
-  )
-  .await
-}
-
-/// POST /api/v1/audits/:audit_id/pipeline/requirements
-/// Step 2: Extract requirements from documentation, grouped by section.
-/// Docs are rendered with functional semantics injected into inline code
-/// references, so the LLM has project-specific meaning for declaration names.
-pub async fn pipeline_requirements(
-  State(state): State<AppState>,
-  Path(audit_id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-  println!("POST /api/v1/audits/{}/pipeline/requirements", audit_id);
-  run_pipeline_step(
-    &state,
-    audit_id,
-    "build_requirements",
-    |ps, id, ts| async move {
-      crate::collaborator::agent::pipeline::build_requirements(&ps, &id, &ts)
-        .await
-    },
-  )
-  .await
-}
-
-/// POST /api/v1/audits/:audit_id/pipeline/behaviors
-/// Step 3: Extract behaviors from source code with semantics in context.
-pub async fn pipeline_behaviors(
-  State(state): State<AppState>,
-  Path(audit_id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-  println!("POST /api/v1/audits/{}/pipeline/behaviors", audit_id);
-  run_pipeline_step(
-    &state,
-    audit_id,
-    "build_behaviors",
-    |ps, id, ts| async move {
-      crate::collaborator::agent::pipeline::build_behaviors(&ps, &id, &ts).await
-    },
-  )
-  .await
-}
-
-/// POST /api/v1/audits/:audit_id/pipeline/synthesize
-/// Step 4: Synthesize features by reconciling requirements with behaviors.
-pub async fn pipeline_synthesize(
-  State(state): State<AppState>,
-  Path(audit_id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-  println!("POST /api/v1/audits/{}/pipeline/synthesize", audit_id);
-  run_pipeline_step(
-    &state,
-    audit_id,
-    "synthesize_features",
-    |ps, id, ts| async move {
-      crate::collaborator::agent::pipeline::synthesize_features(&ps, &id, &ts)
-        .await
-    },
-  )
-  .await
-}
-
-/// GET /api/v1/audits/:audit_id/features/:feature_id
-/// Gets a single feature by its numeric ID.
+/// GET /api/v1/audits/:audit_id/features/:topic_id
+/// Gets a single feature by its topic ID.
 pub async fn get_feature(
   State(state): State<AppState>,
-  Path((audit_id, feature_id)): Path<(String, String)>,
+  Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  let feature_id = parse_path_id(&feature_id, TopicKind::Feature)?;
-  println!("GET /api/v1/audits/{}/features/{}", audit_id, feature_id);
+  let feature_topic = topic::parse_topic_id(&topic_id, TopicKind::Feature)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  println!("GET /api/v1/audits/{}/features/{}", audit_id, topic_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
     eprintln!("Mutex poisoned in get_feature: {}", e);
@@ -1649,7 +1474,6 @@ pub async fn get_feature(
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let feature_topic = topic::new_feature_topic(feature_id as i32);
   let metadata = audit_data
     .topic_metadata
     .get(&feature_topic)
@@ -1662,87 +1486,18 @@ pub async fn get_feature(
 // Documentation routes
 // ============================================
 
-/// GET /api/v1/audits/:audit_id/requirements/topic/:topic_id
-/// Returns requirement IDs linked to a topic.
-/// - Requirement topics: returns itself
-/// - Feature topics: returns all the feature's requirement_topics
-/// - Source topics (N-prefixed): looks up features via feature_behavior_links, then requirements
-/// - Documentation topics (D-prefixed): reverse-lookups requirements with this documentation_topic
-pub async fn get_topic_requirements(
-  State(state): State<AppState>,
-  Path((audit_id, topic_id)): Path<(String, String)>,
-) -> Result<Json<Vec<String>>, StatusCode> {
-  println!(
-    "GET /api/v1/audits/{}/requirements/topic/{}",
-    audit_id, topic_id
-  );
-
-  let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_topic_requirements: {}", e);
-    StatusCode::INTERNAL_SERVER_ERROR
-  })?;
-
-  let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let t = new_topic(&topic_id);
-
-  let mut requirement_topics: Vec<topic::Topic> = Vec::new();
-  match t.kind() {
-    Some(TopicKind::Requirement) => {
-      requirement_topics.push(t);
-    }
-    Some(TopicKind::Feature) => {
-      if let Some(req_topics) = audit_data.feature_requirement_links.get(&t) {
-        for rt in req_topics {
-          if !requirement_topics.contains(rt) {
-            requirement_topics.push(rt.clone());
-          }
-        }
-      }
-    }
-    _ => {
-      // Check source-to-feature links with scope walk, then collect requirements
-      let fts = features_for_topic(&t, audit_data);
-      for rt in requirements_for_features(&fts, audit_data) {
-        if !requirement_topics.contains(&rt) {
-          requirement_topics.push(rt);
-        }
-      }
-      // Check section_requirements index (D-section → requirements)
-      if let Some(section_reqs) = audit_data.section_requirements.get(&t) {
-        for rt in section_reqs {
-          if !requirement_topics.contains(rt) {
-            requirement_topics.push(rt.clone());
-          }
-        }
-      }
-      // Check documentation topic → requirements (leaf-level D-topics)
-      for (req_topic, req) in &audit_data.requirements {
-        if req.documentation_topics.contains(&t) {
-          if !requirement_topics.contains(req_topic) {
-            requirement_topics.push(req_topic.clone());
-          }
-        }
-      }
-    }
-  }
-
-  let requirement_ids: Vec<String> =
-    requirement_topics.iter().map(|rt| rt.id.clone()).collect();
-
-  Ok(Json(requirement_ids))
-}
-
-/// GET /api/v1/audits/:audit_id/requirements/:requirement_id
+/// GET /api/v1/audits/:audit_id/requirements/:topic_id
 /// Gets a single requirement.
 pub async fn get_requirement(
   State(state): State<AppState>,
-  Path((audit_id, requirement_id)): Path<(String, String)>,
+  Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  let requirement_id = parse_path_id(&requirement_id, TopicKind::Requirement)?;
-  println!(
-    "GET /api/v1/audits/{}/requirements/{}",
-    audit_id, requirement_id
-  );
+  let req_topic = topic::parse_topic_id(&topic_id, TopicKind::Requirement)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  println!("GET /api/v1/audits/{}/requirements/{}", audit_id, topic_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
     eprintln!("Mutex poisoned in get_requirement: {}", e);
@@ -1750,7 +1505,6 @@ pub async fn get_requirement(
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let req_topic = topic::new_requirement_topic(requirement_id as i32);
   let metadata = audit_data
     .topic_metadata
     .get(&req_topic)
@@ -1760,12 +1514,120 @@ pub async fn get_requirement(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct GetRequirementsQuery {
+  pub for_topic: Option<String>,
+}
+
+/// GET /api/v1/audits/:audit_id/requirements
+/// Returns all requirements for an audit (pipeline-produced and user-created).
+///
+/// When `?for_topic=T` is supplied, returns only requirements related to that
+/// topic:
+/// - Requirement topic: returns itself
+/// - Feature topic: returns the feature's requirement_topics
+/// - Source topic (N-prefixed): walks features via feature_behavior_links,
+///   then collects their requirements
+/// - Documentation topic (D-prefixed): returns requirements that reference
+///   this documentation topic (via section_requirements or
+///   documentation_topics)
+pub async fn get_requirements(
+  State(state): State<AppState>,
+  Path(audit_id): Path<String>,
+  Query(params): Query<GetRequirementsQuery>,
+) -> Result<Json<Vec<TopicMetadataResponse>>, StatusCode> {
+  println!(
+    "GET /api/v1/audits/{}/requirements{}",
+    audit_id,
+    params
+      .for_topic
+      .as_deref()
+      .map(|t| format!("?for_topic={}", t))
+      .unwrap_or_default()
+  );
+
+  let ctx = state.data_context.lock().map_err(|e| {
+    eprintln!("Mutex poisoned in get_requirements: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?;
+
+  let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+
+  if let Some(for_topic) = params.for_topic.as_deref() {
+    let t = new_topic(for_topic);
+    let mut requirement_topics: Vec<topic::Topic> = Vec::new();
+    match t.kind() {
+      Some(TopicKind::Requirement) => {
+        requirement_topics.push(t.clone());
+      }
+      Some(TopicKind::Feature) => {
+        if let Some(req_topics) = audit_data.feature_requirement_links.get(&t) {
+          for rt in req_topics {
+            if !requirement_topics.contains(rt) {
+              requirement_topics.push(rt.clone());
+            }
+          }
+        }
+      }
+      _ => {
+        let fts = features_for_topic(&t, audit_data);
+        for rt in requirements_for_features(&fts, audit_data) {
+          if !requirement_topics.contains(&rt) {
+            requirement_topics.push(rt);
+          }
+        }
+        if let Some(section_reqs) = audit_data.section_requirements.get(&t) {
+          for rt in section_reqs {
+            if !requirement_topics.contains(rt) {
+              requirement_topics.push(rt.clone());
+            }
+          }
+        }
+        for (req_topic, req) in &audit_data.requirements {
+          if req.documentation_topics.contains(&t)
+            && !requirement_topics.contains(req_topic)
+          {
+            requirement_topics.push(req_topic.clone());
+          }
+        }
+      }
+    }
+
+    let responses = requirement_topics
+      .iter()
+      .filter_map(|rt| {
+        let metadata = audit_data.topic_metadata.get(rt)?;
+        if matches!(metadata, core::TopicMetadata::RequirementTopic { .. }) {
+          Some(topic_metadata_to_response(rt, metadata))
+        } else {
+          None
+        }
+      })
+      .collect();
+    return Ok(Json(responses));
+  }
+
+  let requirements = audit_data
+    .topic_metadata
+    .iter()
+    .filter_map(|(t, m)| {
+      if matches!(m, core::TopicMetadata::RequirementTopic { .. }) {
+        Some(topic_metadata_to_response(t, m))
+      } else {
+        None
+      }
+    })
+    .collect();
+
+  Ok(Json(requirements))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct AddSourceTopicRequest {
   pub topic_id: String,
 }
 
 // ============================================
-// Subject property routes (functional semantics)
+// Topic property routes (functional semantics)
 // ============================================
 
 #[derive(Debug, Serialize)]
@@ -1775,8 +1637,8 @@ pub struct SubjectPropertyResponse {
   pub value: String,
   pub author_id: i64,
 }
-/// GET /api/v1/audits/:audit_id/subjects/:topic_id/semantics
-/// Returns all functional semantics for a subject from the in-memory state.
+/// GET /api/v1/audits/:audit_id/topics/:topic_id/semantics
+/// Returns all functional semantics for a topic from the in-memory state.
 pub async fn get_functional_semantics(
   State(state): State<AppState>,
   Path((audit_id, topic_id)): Path<(String, String)>,
@@ -1819,6 +1681,68 @@ pub async fn get_functional_semantics(
   Ok(Json(entries))
 }
 
+/// GET /api/v1/audits/:audit_id/functional_semantics
+/// Returns all functional semantics for an audit (pipeline + user).
+pub async fn get_all_functional_semantics(
+  State(state): State<AppState>,
+  Path(audit_id): Path<String>,
+) -> Result<Json<Vec<TopicMetadataResponse>>, StatusCode> {
+  println!("GET /api/v1/audits/{}/functional_semantics", audit_id);
+
+  let ctx = state.data_context.lock().map_err(|e| {
+    eprintln!("Mutex poisoned in get_all_functional_semantics: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?;
+
+  let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+
+  let entries = audit_data
+    .topic_metadata
+    .iter()
+    .filter_map(|(t, m)| {
+      if matches!(m, core::TopicMetadata::FunctionalSemanticTopic { .. }) {
+        Some(topic_metadata_to_response(t, m))
+      } else {
+        None
+      }
+    })
+    .collect();
+
+  Ok(Json(entries))
+}
+
+/// GET /api/v1/audits/:audit_id/functional_semantics/:topic_id
+/// Gets a single functional semantic by its topic ID.
+pub async fn get_functional_semantic(
+  State(state): State<AppState>,
+  Path((audit_id, topic_id)): Path<(String, String)>,
+) -> Result<Json<TopicMetadataResponse>, StatusCode> {
+  let sem_topic =
+    topic::parse_topic_id(&topic_id, TopicKind::FunctionalProperty).map_err(
+      |e| {
+        eprintln!("Invalid topic ID in path: {}", e);
+        StatusCode::BAD_REQUEST
+      },
+    )?;
+  println!(
+    "GET /api/v1/audits/{}/functional_semantics/{}",
+    audit_id, topic_id
+  );
+
+  let ctx = state.data_context.lock().map_err(|e| {
+    eprintln!("Mutex poisoned in get_functional_semantic: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?;
+
+  let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+  let metadata = audit_data
+    .topic_metadata
+    .get(&sem_topic)
+    .ok_or(StatusCode::NOT_FOUND)?;
+
+  Ok(Json(topic_metadata_to_response(&sem_topic, metadata)))
+}
+
 // ============================================
 // Impact analysis routes
 // ============================================
@@ -1851,8 +1775,25 @@ pub async fn create_threat_feature_link(
     audit_id, payload.threat_id, payload.feature_id
   );
 
-  let threat_id = parse_path_id(&payload.threat_id, TopicKind::AttackVector)?;
-  let feature_id = parse_path_id(&payload.feature_id, TopicKind::Feature)?;
+  let threat_topic =
+    topic::parse_topic_id(&payload.threat_id, TopicKind::AttackVector)
+      .map_err(|e| {
+        eprintln!("Invalid topic ID in payload: {}", e);
+        StatusCode::BAD_REQUEST
+      })?;
+  let feature_topic =
+    topic::parse_topic_id(&payload.feature_id, TopicKind::Feature).map_err(
+      |e| {
+        eprintln!("Invalid topic ID in payload: {}", e);
+        StatusCode::BAD_REQUEST
+      },
+    )?;
+  let threat_id = threat_topic
+    .numeric_id()
+    .expect("verified by parse_topic_id");
+  let feature_id = feature_topic
+    .numeric_id()
+    .expect("verified by parse_topic_id");
 
   let relation = core::ThreatFeatureRelation::from_str(&payload.relation)
     .ok_or(StatusCode::BAD_REQUEST)?;
@@ -1872,9 +1813,6 @@ pub async fn create_threat_feature_link(
     eprintln!("create_threat_feature_link failed: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
-
-  let threat_topic = topic::new_attack_vector_topic(threat_id as i32);
-  let feature_topic = topic::new_feature_topic(feature_id as i32);
 
   // Update in-memory state
   {
@@ -1928,8 +1866,22 @@ pub async fn delete_threat_feature_link(
   State(state): State<AppState>,
   Path((audit_id, threat_id, feature_id)): Path<(String, String, String)>,
 ) -> Result<StatusCode, StatusCode> {
-  let threat_id = parse_path_id(&threat_id, TopicKind::AttackVector)?;
-  let feature_id = parse_path_id(&feature_id, TopicKind::Feature)?;
+  let threat_topic = topic::parse_topic_id(&threat_id, TopicKind::AttackVector)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  let feature_topic = topic::parse_topic_id(&feature_id, TopicKind::Feature)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  let threat_id = threat_topic
+    .numeric_id()
+    .expect("verified by parse_topic_id");
+  let feature_id = feature_topic
+    .numeric_id()
+    .expect("verified by parse_topic_id");
   println!(
     "DELETE /api/v1/audits/{}/impact_analysis/{}/{}",
     audit_id, threat_id, feature_id
@@ -1941,9 +1893,6 @@ pub async fn delete_threat_feature_link(
       eprintln!("delete_threat_feature_link failed: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
-
-  let threat_topic = topic::new_attack_vector_topic(threat_id as i32);
-  let feature_topic = topic::new_feature_topic(feature_id as i32);
 
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
@@ -2098,8 +2047,10 @@ pub async fn create_condition(
   }))
 }
 
-/// GET /api/v1/audits/:audit_id/conditions/:subject_topic
-/// Returns all conditions for a subject.
+/// GET /api/v1/audits/:audit_id/conditions/:condition_id
+/// Returns all conditions for a subject. The path slot carries the subject's
+/// topic ID for this handler; numeric condition IDs are used by the DELETE
+/// variant on the same route.
 pub async fn get_subject_conditions(
   State(state): State<AppState>,
   Path((audit_id, subject_topic)): Path<(String, String)>,
@@ -2193,13 +2144,17 @@ pub async fn delete_condition(
 // Behavior routes
 // ============================================
 
-/// GET /api/v1/audits/:audit_id/behaviors/:behavior_id
+/// GET /api/v1/audits/:audit_id/behaviors/:topic_id
 pub async fn get_behavior(
   State(state): State<AppState>,
-  Path((audit_id, behavior_id)): Path<(String, String)>,
+  Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  let behavior_id = parse_path_id(&behavior_id, TopicKind::Behavior)?;
-  println!("GET /api/v1/audits/{}/behaviors/{}", audit_id, behavior_id);
+  let beh_topic = topic::parse_topic_id(&topic_id, TopicKind::Behavior)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  println!("GET /api/v1/audits/{}/behaviors/{}", audit_id, topic_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
     eprintln!("Mutex poisoned in get_behavior: {}", e);
@@ -2207,7 +2162,6 @@ pub async fn get_behavior(
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let beh_topic = topic::new_behavior_topic(behavior_id as i32);
   let metadata = audit_data
     .topic_metadata
     .get(&beh_topic)
@@ -2311,7 +2265,7 @@ pub async fn create_threat(
     .topic_metadata
     .insert(threat_topic.clone(), metadata.clone());
 
-  crate::core::rebuild_feature_context(audit_data);
+  o11a_core::core::rebuild_feature_context(audit_data);
 
   let response = topic_metadata_to_response(&threat_topic, &metadata);
   Ok(Json(response))
@@ -2322,15 +2276,20 @@ pub async fn delete_threat(
   State(state): State<AppState>,
   Path((audit_id, threat_id)): Path<(String, String)>,
 ) -> Result<StatusCode, StatusCode> {
-  let threat_id = parse_path_id(&threat_id, TopicKind::AttackVector)?;
+  let threat_topic = topic::parse_topic_id(&threat_id, TopicKind::AttackVector)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  let threat_id = threat_topic
+    .numeric_id()
+    .expect("verified by parse_topic_id");
   println!("DELETE /api/v1/audits/{}/threats/{}", audit_id, threat_id);
 
   db::delete_threat(&state.db, threat_id).await.map_err(|e| {
     eprintln!("delete_threat failed: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
-
-  let threat_topic = topic::new_attack_vector_topic(threat_id as i32);
 
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
@@ -2353,7 +2312,7 @@ pub async fn delete_threat(
     audit_data.topic_metadata.remove(&threat_topic);
     audit_data.topic_context.remove(&threat_topic);
 
-    crate::core::rebuild_feature_context(audit_data);
+    o11a_core::core::rebuild_feature_context(audit_data);
   }
 
   Ok(StatusCode::NO_CONTENT)
@@ -2364,7 +2323,11 @@ pub async fn get_threat(
   State(state): State<AppState>,
   Path((audit_id, threat_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  let threat_id = parse_path_id(&threat_id, TopicKind::AttackVector)?;
+  let threat_topic = topic::parse_topic_id(&threat_id, TopicKind::AttackVector)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
   println!("GET /api/v1/audits/{}/threats/{}", audit_id, threat_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
@@ -2373,7 +2336,6 @@ pub async fn get_threat(
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let threat_topic = topic::new_attack_vector_topic(threat_id as i32);
   let metadata = audit_data
     .topic_metadata
     .get(&threat_topic)
@@ -2398,13 +2360,18 @@ pub async fn create_invariant(
   Path((audit_id, threat_id)): Path<(String, String)>,
   Json(payload): Json<CreateInvariantRequest>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  let threat_id = parse_path_id(&threat_id, TopicKind::AttackVector)?;
+  let threat_topic = topic::parse_topic_id(&threat_id, TopicKind::AttackVector)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  let threat_id = threat_topic
+    .numeric_id()
+    .expect("verified by parse_topic_id");
   println!(
     "POST /api/v1/audits/{}/threats/{}/invariants",
     audit_id, threat_id
   );
-
-  let threat_topic = topic::new_attack_vector_topic(threat_id as i32);
 
   // Invariants inherit severity from their parent threat (may be None)
   let severity = {
@@ -2464,7 +2431,7 @@ pub async fn create_invariant(
     .topic_metadata
     .insert(inv_topic.clone(), metadata.clone());
 
-  crate::core::rebuild_feature_context(audit_data);
+  o11a_core::core::rebuild_feature_context(audit_data);
 
   let response = topic_metadata_to_response(&inv_topic, &metadata);
   Ok(Json(response))
@@ -2475,8 +2442,21 @@ pub async fn delete_invariant(
   State(state): State<AppState>,
   Path((audit_id, threat_id, invariant_id)): Path<(String, String, String)>,
 ) -> Result<StatusCode, StatusCode> {
-  let threat_id = parse_path_id(&threat_id, TopicKind::AttackVector)?;
-  let invariant_id = parse_path_id(&invariant_id, TopicKind::Invariant)?;
+  let threat_topic = topic::parse_topic_id(&threat_id, TopicKind::AttackVector)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  let inv_topic = topic::parse_topic_id(&invariant_id, TopicKind::Invariant)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  let threat_id = threat_topic
+    .numeric_id()
+    .expect("verified by parse_topic_id");
+  let invariant_id =
+    inv_topic.numeric_id().expect("verified by parse_topic_id");
   println!(
     "DELETE /api/v1/audits/{}/threats/{}/invariants/{}",
     audit_id, threat_id, invariant_id
@@ -2488,9 +2468,6 @@ pub async fn delete_invariant(
       eprintln!("delete_invariant failed: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
-
-  let inv_topic = topic::new_invariant_topic(invariant_id as i32);
-  let threat_topic = topic::new_attack_vector_topic(threat_id as i32);
 
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
@@ -2508,7 +2485,7 @@ pub async fn delete_invariant(
     audit_data.topic_metadata.remove(&inv_topic);
     audit_data.topic_context.remove(&inv_topic);
 
-    crate::core::rebuild_feature_context(audit_data);
+    o11a_core::core::rebuild_feature_context(audit_data);
   }
 
   Ok(StatusCode::NO_CONTENT)
@@ -2519,7 +2496,11 @@ pub async fn get_invariant(
   State(state): State<AppState>,
   Path((audit_id, invariant_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  let invariant_id = parse_path_id(&invariant_id, TopicKind::Invariant)?;
+  let inv_topic = topic::parse_topic_id(&invariant_id, TopicKind::Invariant)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
   println!(
     "GET /api/v1/audits/{}/invariants/{}",
     audit_id, invariant_id
@@ -2531,7 +2512,6 @@ pub async fn get_invariant(
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let inv_topic = topic::new_invariant_topic(invariant_id as i32);
   let metadata = audit_data
     .topic_metadata
     .get(&inv_topic)
@@ -2546,7 +2526,13 @@ pub async fn add_invariant_source_topic(
   Path((audit_id, invariant_id)): Path<(String, String)>,
   Json(payload): Json<AddSourceTopicRequest>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  let invariant_id = parse_path_id(&invariant_id, TopicKind::Invariant)?;
+  let inv_topic = topic::parse_topic_id(&invariant_id, TopicKind::Invariant)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  let invariant_id =
+    inv_topic.numeric_id().expect("verified by parse_topic_id");
   println!(
     "POST /api/v1/audits/{}/invariants/{}/source_topics",
     audit_id, invariant_id
@@ -2564,7 +2550,6 @@ pub async fn add_invariant_source_topic(
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
   let audit_data = ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let inv_topic = topic::new_invariant_topic(invariant_id as i32);
   let invariant = audit_data
     .invariants
     .get_mut(&inv_topic)
@@ -2588,7 +2573,13 @@ pub async fn remove_invariant_source_topic(
   State(state): State<AppState>,
   Path((audit_id, invariant_id, topic_id)): Path<(String, String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  let invariant_id = parse_path_id(&invariant_id, TopicKind::Invariant)?;
+  let inv_topic = topic::parse_topic_id(&invariant_id, TopicKind::Invariant)
+    .map_err(|e| {
+      eprintln!("Invalid topic ID in path: {}", e);
+      StatusCode::BAD_REQUEST
+    })?;
+  let invariant_id =
+    inv_topic.numeric_id().expect("verified by parse_topic_id");
   println!(
     "DELETE /api/v1/audits/{}/invariants/{}/source_topics/{}",
     audit_id, invariant_id, topic_id
@@ -2606,7 +2597,6 @@ pub async fn remove_invariant_source_topic(
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
   let audit_data = ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-  let inv_topic = topic::new_invariant_topic(invariant_id as i32);
   let invariant = audit_data
     .invariants
     .get_mut(&inv_topic)
@@ -2621,4 +2611,359 @@ pub async fn remove_invariant_source_topic(
     .ok_or(StatusCode::NOT_FOUND)?;
   let response = topic_metadata_to_response(&inv_topic, metadata);
   Ok(Json(response))
+}
+
+// ============================================
+// User entity creation
+// ============================================
+
+#[derive(Debug, Serialize)]
+pub struct CreatedResponse {
+  pub topic_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateUserFeatureRequest {
+  pub name: String,
+  pub description: String,
+  pub author_id: i64,
+  #[serde(default)]
+  pub requirement_topics: Vec<String>,
+  #[serde(default)]
+  pub behavior_topics: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateUserRequirementRequest {
+  pub description: String,
+  pub author_id: i64,
+  #[serde(default)]
+  pub section_topic: Option<String>,
+  #[serde(default)]
+  pub documentation_topics: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateUserBehaviorRequest {
+  pub description: String,
+  pub member_topic: String,
+  pub author_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateUserFunctionalSemanticRequest {
+  pub description: String,
+  pub declaration_topic: String,
+  pub author_id: i64,
+  #[serde(default)]
+  pub documentation_topics: Vec<String>,
+}
+
+/// POST /api/v1/audits/:audit_id/features
+pub async fn create_user_feature(
+  State(state): State<AppState>,
+  Path(audit_id): Path<String>,
+  Json(payload): Json<CreateUserFeatureRequest>,
+) -> Result<Json<CreatedResponse>, StatusCode> {
+  println!("POST /api/v1/audits/{}/features", audit_id);
+
+  let id = o11a_core::ids::allocate_feature_id();
+  let created_at = o11a_core::ids::now_iso8601();
+
+  db::user_entities::create_user_feature(
+    &state.db,
+    id,
+    &audit_id,
+    &payload.name,
+    &payload.description,
+    payload.author_id,
+    &created_at,
+  )
+  .await
+  .map_err(|e| {
+    eprintln!("create_user_feature failed: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?;
+
+  for rt in &payload.requirement_topics {
+    db::user_entities::add_user_feature_requirement_link(&state.db, id, rt)
+      .await
+      .map_err(|e| {
+        eprintln!("add_user_feature_requirement_link failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+      })?;
+  }
+  for bt in &payload.behavior_topics {
+    db::user_entities::add_user_feature_behavior_link(&state.db, id, bt)
+      .await
+      .map_err(|e| {
+        eprintln!("add_user_feature_behavior_link failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+      })?;
+  }
+
+  let feature_topic = topic::new_feature_topic(id);
+  let requirement_topics: Vec<topic::Topic> = payload
+    .requirement_topics
+    .iter()
+    .map(|s| topic::new_topic(s))
+    .collect();
+  let behavior_topics: Vec<topic::Topic> = payload
+    .behavior_topics
+    .iter()
+    .map(|s| topic::new_topic(s))
+    .collect();
+
+  {
+    let mut ctx = state.data_context.lock().map_err(|e| {
+      eprintln!("Mutex poisoned in create_user_feature: {}", e);
+      StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let audit_data =
+      ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    audit_data.topic_metadata.insert(
+      feature_topic.clone(),
+      core::TopicMetadata::FeatureTopic {
+        topic: feature_topic.clone(),
+        name: payload.name.clone(),
+        description: payload.description.clone(),
+        author_id: payload.author_id,
+        created_at: Some(created_at),
+      },
+    );
+
+    if !requirement_topics.is_empty() {
+      audit_data
+        .feature_requirement_links
+        .entry(feature_topic.clone())
+        .or_default()
+        .extend(requirement_topics);
+    }
+    if !behavior_topics.is_empty() {
+      audit_data
+        .feature_behavior_links
+        .entry(feature_topic.clone())
+        .or_default()
+        .extend(behavior_topics);
+    }
+
+    core::rebuild_feature_context(audit_data);
+  }
+
+  Ok(Json(CreatedResponse {
+    topic_id: feature_topic.id.clone(),
+  }))
+}
+
+/// POST /api/v1/audits/:audit_id/requirements
+pub async fn create_user_requirement(
+  State(state): State<AppState>,
+  Path(audit_id): Path<String>,
+  Json(payload): Json<CreateUserRequirementRequest>,
+) -> Result<Json<CreatedResponse>, StatusCode> {
+  println!("POST /api/v1/audits/{}/requirements", audit_id);
+
+  let id = o11a_core::ids::allocate_requirement_id();
+  let created_at = o11a_core::ids::now_iso8601();
+
+  db::user_entities::create_user_requirement(
+    &state.db,
+    id,
+    &audit_id,
+    &payload.description,
+    payload.section_topic.as_deref(),
+    payload.author_id,
+    &created_at,
+  )
+  .await
+  .map_err(|e| {
+    eprintln!("create_user_requirement failed: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?;
+
+  for dt in &payload.documentation_topics {
+    db::user_entities::add_user_requirement_documentation_topic(
+      &state.db, id, dt,
+    )
+    .await
+    .map_err(|e| {
+      eprintln!("add_user_requirement_documentation_topic failed: {}", e);
+      StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+  }
+
+  let req_topic = topic::new_requirement_topic(id);
+  let section_topic =
+    topic::new_topic(payload.section_topic.as_deref().unwrap_or(""));
+  let documentation_topics: Vec<topic::Topic> = payload
+    .documentation_topics
+    .iter()
+    .map(|s| topic::new_topic(s))
+    .collect();
+
+  {
+    let mut ctx = state.data_context.lock().map_err(|e| {
+      eprintln!("Mutex poisoned in create_user_requirement: {}", e);
+      StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let audit_data =
+      ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    audit_data.requirements.insert(
+      req_topic.clone(),
+      core::Requirement {
+        documentation_topics,
+      },
+    );
+
+    audit_data.topic_metadata.insert(
+      req_topic.clone(),
+      core::TopicMetadata::RequirementTopic {
+        topic: req_topic.clone(),
+        description: payload.description.clone(),
+        section_topic,
+        author_id: payload.author_id,
+        created_at: Some(created_at),
+      },
+    );
+
+    core::rebuild_feature_context(audit_data);
+  }
+
+  Ok(Json(CreatedResponse {
+    topic_id: req_topic.id.clone(),
+  }))
+}
+
+/// POST /api/v1/audits/:audit_id/behaviors
+pub async fn create_user_behavior(
+  State(state): State<AppState>,
+  Path(audit_id): Path<String>,
+  Json(payload): Json<CreateUserBehaviorRequest>,
+) -> Result<Json<CreatedResponse>, StatusCode> {
+  println!("POST /api/v1/audits/{}/behaviors", audit_id);
+
+  let id = o11a_core::ids::allocate_behavior_id();
+  let created_at = o11a_core::ids::now_iso8601();
+
+  db::user_entities::create_user_behavior(
+    &state.db,
+    id,
+    &audit_id,
+    &payload.description,
+    &payload.member_topic,
+    payload.author_id,
+    &created_at,
+  )
+  .await
+  .map_err(|e| {
+    eprintln!("create_user_behavior failed: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?;
+
+  let beh_topic = topic::new_behavior_topic(id);
+  let member_topic = topic::new_topic(&payload.member_topic);
+
+  {
+    let mut ctx = state.data_context.lock().map_err(|e| {
+      eprintln!("Mutex poisoned in create_user_behavior: {}", e);
+      StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let audit_data =
+      ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    audit_data.topic_metadata.insert(
+      beh_topic.clone(),
+      core::TopicMetadata::BehaviorTopic {
+        topic: beh_topic.clone(),
+        description: payload.description.clone(),
+        member_topic,
+        author_id: payload.author_id,
+        created_at: Some(created_at),
+      },
+    );
+
+    core::rebuild_feature_context(audit_data);
+  }
+
+  Ok(Json(CreatedResponse {
+    topic_id: beh_topic.id.clone(),
+  }))
+}
+
+/// POST /api/v1/audits/:audit_id/functional_semantics
+pub async fn create_user_functional_semantic(
+  State(state): State<AppState>,
+  Path(audit_id): Path<String>,
+  Json(payload): Json<CreateUserFunctionalSemanticRequest>,
+) -> Result<Json<CreatedResponse>, StatusCode> {
+  println!("POST /api/v1/audits/{}/functional_semantics", audit_id);
+
+  let id = o11a_core::ids::allocate_functional_semantic_id();
+  let created_at = o11a_core::ids::now_iso8601();
+
+  db::user_entities::create_user_functional_semantic(
+    &state.db,
+    id,
+    &audit_id,
+    &payload.description,
+    &payload.declaration_topic,
+    payload.author_id,
+    &created_at,
+  )
+  .await
+  .map_err(|e| {
+    eprintln!("create_user_functional_semantic failed: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?;
+
+  for dt in &payload.documentation_topics {
+    db::user_entities::add_user_functional_semantic_documentation_topic(
+      &state.db, id, dt,
+    )
+    .await
+    .map_err(|e| {
+      eprintln!(
+        "add_user_functional_semantic_documentation_topic failed: {}",
+        e
+      );
+      StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+  }
+
+  let sem_topic = topic::new_functional_property_topic(id);
+  let declaration_topic = topic::new_topic(&payload.declaration_topic);
+  let documentation_topics: Vec<topic::Topic> = payload
+    .documentation_topics
+    .iter()
+    .map(|s| topic::new_topic(s))
+    .collect();
+
+  {
+    let mut ctx = state.data_context.lock().map_err(|e| {
+      eprintln!("Mutex poisoned in create_user_functional_semantic: {}", e);
+      StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let audit_data =
+      ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    audit_data.topic_metadata.insert(
+      sem_topic.clone(),
+      core::TopicMetadata::FunctionalSemanticTopic {
+        topic: sem_topic.clone(),
+        description: payload.description.clone(),
+        declaration_topic,
+        documentation_topics,
+        author_id: payload.author_id,
+        created_at: Some(created_at),
+      },
+    );
+
+    core::rebuild_feature_context(audit_data);
+  }
+
+  Ok(Json(CreatedResponse {
+    topic_id: sem_topic.id.clone(),
+  }))
 }

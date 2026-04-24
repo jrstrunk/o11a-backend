@@ -1989,10 +1989,8 @@ dependencies = [
 name = "o11a-core"
 version = "0.1.0"
 dependencies = [
- "axum",
  "foundry-compilers",
  "foundry-compilers-artifacts",
- "futures",
  "markdown",
  "regex",
  "reqwest",
@@ -2000,8 +1998,6 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
- "tower",
- "tower-http",
 ]
 
 [[package]]
@@ -2009,10 +2005,15 @@ name = "o11a-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "futures",
  "o11a-core",
  "o11a-web-backend",
+ "serde",
  "serde_json",
+ "sqlx",
  "tokio",
+ "tower",
+ "tower-http",
 ]
 
 [[package]]

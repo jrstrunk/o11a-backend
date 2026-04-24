@@ -69,11 +69,11 @@ async fn run(
     data_context: data_context.clone(),
   };
 
-  let generated_at = o11a_core::ids::now_iso8601();
-
-  pipeline::run_full_pipeline(&pipeline_state, audit_id, &generated_at)
+  pipeline::run_full_pipeline(&pipeline_state, audit_id)
     .await
     .map_err(|e| format!("Pipeline failed: {}", e))?;
+
+  let generated_at = o11a_core::ids::now_iso8601();
 
   // Rebuild reverse indexes so the exported state is consistent.
   {
@@ -89,9 +89,9 @@ async fn run(
   let ctx = data_context
     .lock()
     .map_err(|e| format!("DataContext mutex poisoned: {}", e))?;
-  let audit_data = ctx
-    .get_audit(audit_id)
-    .ok_or_else(|| format!("Audit '{}' not present after pipeline run", audit_id))?;
+  let audit_data = ctx.get_audit(audit_id).ok_or_else(|| {
+    format!("Audit '{}' not present after pipeline run", audit_id)
+  })?;
 
   let report = report::build_report(audit_id, audit_data, generated_at);
   let json = serde_json::to_string_pretty(&report)
@@ -100,7 +100,11 @@ async fn run(
   if let Some(parent) = output_path.parent() {
     if !parent.as_os_str().is_empty() {
       std::fs::create_dir_all(parent).map_err(|e| {
-        format!("Failed to create output directory {}: {}", parent.display(), e)
+        format!(
+          "Failed to create output directory {}: {}",
+          parent.display(),
+          e
+        )
       })?;
     }
   }

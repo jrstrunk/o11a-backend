@@ -4,8 +4,10 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 
-use crate::api::{AppState, handlers};
-use crate::collaborator::websocket;
+use o11a_core::state::AppState;
+
+use crate::api::handlers;
+use crate::websocket;
 
 pub fn create_router(state: AppState) -> Router {
   Router::new()
@@ -71,64 +73,52 @@ pub fn create_router(state: AppState) -> Router {
       get(handlers::get_comment_status).put(handlers::update_comment_status),
     )
     // ============================================
-    // Feature & requirement routes (read-only)
+    // Feature, requirement, behavior, functional-semantic routes.
+    // GET lists pipeline + user entries together; POST creates a user entry.
     // ============================================
     .route(
       "/api/v1/audits/:audit_id/features",
-      get(handlers::get_features),
+      get(handlers::get_features).post(handlers::create_user_feature),
     )
     .route(
-      "/api/v1/audits/:audit_id/features/:feature_id/requirements",
+      "/api/v1/audits/:audit_id/features/:topic_id",
+      get(handlers::get_feature),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/features/:topic_id/requirements",
       get(handlers::get_feature_requirements),
     )
     .route(
-      "/api/v1/audits/:audit_id/requirements/:requirement_id",
+      "/api/v1/audits/:audit_id/requirements",
+      get(handlers::get_requirements).post(handlers::create_user_requirement),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/requirements/:topic_id",
       get(handlers::get_requirement),
     )
     .route(
-      "/api/v1/audits/:audit_id/requirements/topic/:topic_id",
-      get(handlers::get_topic_requirements),
-    )
-    // ============================================
-    // Pipeline routes
-    // ============================================
-    .route(
-      "/api/v1/audits/:audit_id/analyze",
-      post(handlers::analyze),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/pipeline/semantic_links",
-      post(handlers::pipeline_semantic_links),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/pipeline/requirements",
-      post(handlers::pipeline_requirements),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/pipeline/behaviors",
-      post(handlers::pipeline_behaviors),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/pipeline/synthesize",
-      post(handlers::pipeline_synthesize),
-    )
-    // ============================================
-    // Subject property routes (read-only)
-    // ============================================
-    .route(
-      "/api/v1/audits/:audit_id/subjects/:topic_id/semantics",
-      get(handlers::get_functional_semantics),
-    )
-    // ============================================
-    // Behavior routes (read-only)
-    // ============================================
-    .route(
       "/api/v1/audits/:audit_id/behaviors",
-      get(handlers::get_behaviors),
+      get(handlers::get_behaviors).post(handlers::create_user_behavior),
     )
     .route(
-      "/api/v1/audits/:audit_id/behaviors/:behavior_id",
+      "/api/v1/audits/:audit_id/behaviors/:topic_id",
       get(handlers::get_behavior),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/functional_semantics",
+      get(handlers::get_all_functional_semantics)
+        .post(handlers::create_user_functional_semantic),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/functional_semantics/:topic_id",
+      get(handlers::get_functional_semantic),
+    )
+    // ============================================
+    // Topic property routes (read-only)
+    // ============================================
+    .route(
+      "/api/v1/audits/:audit_id/topics/:topic_id/semantics",
+      get(handlers::get_functional_semantics),
     )
     // ============================================
     // Impact analysis routes
@@ -149,12 +139,8 @@ pub fn create_router(state: AppState) -> Router {
       post(handlers::create_condition),
     )
     .route(
-      "/api/v1/audits/:audit_id/conditions/:subject_topic",
-      get(handlers::get_subject_conditions),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/conditions/id/:condition_id",
-      delete(handlers::delete_condition),
+      "/api/v1/audits/:audit_id/conditions/:condition_id",
+      get(handlers::get_subject_conditions).delete(handlers::delete_condition),
     )
     // ============================================
     // Threat routes
@@ -190,10 +176,10 @@ pub fn create_router(state: AppState) -> Router {
       "/api/v1/audits/:audit_id/invariants/:invariant_id/source_topics/:topic_id",
       delete(handlers::remove_invariant_source_topic),
     )
-    // WebSocket for real-time comment updates
+    // WebSocket for the real-time audit event stream
     .route(
-      "/api/v1/audits/:audit_id/comments/ws",
-      get(websocket::comment_websocket),
+      "/api/v1/audits/:audit_id/events/ws",
+      get(websocket::event_websocket),
     )
     // ============================================
     // Vote routes
