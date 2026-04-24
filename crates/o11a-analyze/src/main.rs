@@ -23,6 +23,7 @@ use o11a_core::report;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 const OUTPUT_DIR_NAME: &str = "o11a";
 const REPORT_FILE_NAME: &str = "audit.json";
@@ -30,6 +31,14 @@ const ARTIFACT_FILE_NAME: &str = "audit.analysis.bin";
 
 #[tokio::main]
 async fn main() -> ExitCode {
+  tracing_subscriber::registry()
+    .with(fmt::layer().with_target(false))
+    .with(
+      EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info")),
+    )
+    .init();
+
   let args: Vec<String> = std::env::args().collect();
   if args.len() != 3 {
     eprintln!(
@@ -44,8 +53,8 @@ async fn main() -> ExitCode {
 
   let project_root = PathBuf::from(&args[1]);
   if !project_root.is_dir() {
-    eprintln!(
-      "Error: project root '{}' is not a directory",
+    tracing::error!(
+      "project root '{}' is not a directory",
       project_root.display()
     );
     return ExitCode::FAILURE;
@@ -56,14 +65,14 @@ async fn main() -> ExitCode {
   match run(&project_root, &audit_id).await {
     Ok(()) => ExitCode::SUCCESS,
     Err(e) => {
-      eprintln!("Error: {}", e);
+      tracing::error!("{}", e);
       ExitCode::FAILURE
     }
   }
 }
 
 async fn run(project_root: &Path, audit_id: &str) -> Result<(), String> {
-  println!("Loading project from {}", project_root.display());
+  tracing::info!("Loading project from {}", project_root.display());
   let data_context = domain::new_data_context();
   let data_context = Arc::new(Mutex::new(data_context));
 
@@ -109,7 +118,7 @@ async fn run(project_root: &Path, audit_id: &str) -> Result<(), String> {
   let report = report::build_report(audit_id, audit_data, generated_at.clone());
   let report_path = output_dir.join(REPORT_FILE_NAME);
   write_json_atomic(&report_path, &report)?;
-  println!("Wrote report to {}", report_path.display());
+  tracing::info!("Wrote report to {}", report_path.display());
 
   let artifact = AnalysisArtifact {
     schema_version: ARTIFACT_SCHEMA_VERSION,
@@ -122,7 +131,7 @@ async fn run(project_root: &Path, audit_id: &str) -> Result<(), String> {
   let artifact_path = output_dir.join(ARTIFACT_FILE_NAME);
   analysis_artifact::write_artifact(&artifact_path, &artifact)
     .map_err(|e| format!("Failed to write analysis artifact: {}", e))?;
-  println!("Wrote artifact to {}", artifact_path.display());
+  tracing::info!("Wrote artifact to {}", artifact_path.display());
 
   Ok(())
 }

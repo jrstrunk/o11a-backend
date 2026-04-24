@@ -49,30 +49,32 @@ pub struct PipelineState {
 /// inline code references like `pID` are annotated with their project-specific
 /// meaning (e.g., "participation identifier"), giving the LLM proper context
 /// to produce behavioral requirements without using declaration names.
+#[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
 pub async fn run_full_pipeline(
   state: &PipelineState,
   audit_id: &str,
 ) -> Result<(), PipelineError> {
-  println!("Starting full analysis pipeline for audit {}", audit_id);
+  tracing::info!("Starting full analysis pipeline for audit {}", audit_id);
 
-  println!("\n[1/4] Semantic Linking");
+  tracing::info!("[1/4] Semantic Linking");
   build_semantic_links(state, audit_id).await?;
 
-  println!("\n[2/4] Requirement Extraction");
+  tracing::info!("[2/4] Requirement Extraction");
   build_requirements(state, audit_id).await?;
 
-  println!("\n[3/4] Behavior Extraction");
+  tracing::info!("[3/4] Behavior Extraction");
   build_behaviors(state, audit_id).await?;
 
-  println!("\n[4/4] Feature Synthesis");
+  tracing::info!("[4/4] Feature Synthesis");
   synthesize_features(state, audit_id).await?;
 
-  println!("\nPipeline complete for audit {}", audit_id);
+  tracing::info!("Pipeline complete for audit {}", audit_id);
   Ok(())
 }
 
 /// Extract requirements from documentation, grouped by section.
 /// This is the first step of the new pipeline (Phase 1).
+#[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
 pub async fn build_requirements(
   state: &PipelineState,
   audit_id: &str,
@@ -89,14 +91,14 @@ pub async fn build_requirements(
     task::render_documentation_files(audit_data)
   };
 
-  println!(
-    "  Extracting requirements from {} documentation files",
+  tracing::info!(
+    "Extracting requirements from {} documentation files",
     documentation_files.len()
   );
   let parsed =
     task::extract_requirements_from_documentation(&documentation_files).await?;
-  println!(
-    "  Extracted {} requirements across {} sections",
+  tracing::info!(
+    "Extracted {} requirements across {} sections",
     parsed.requirements.len(),
     parsed.section_requirements.len()
   );
@@ -201,11 +203,12 @@ pub async fn build_requirements(
   audit_data.feature_behavior_links.clear();
   domain::rebuild_feature_context(audit_data);
 
-  println!("  Stored {} requirements in DataContext", req_count);
+  tracing::info!("Stored {} requirements in DataContext", req_count);
   Ok(())
 }
 
 /// Synthesize features by reconciling requirements with behaviors in a single LLM pass.
+#[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
 pub async fn synthesize_features(
   state: &PipelineState,
   audit_id: &str,
@@ -222,11 +225,11 @@ pub async fn synthesize_features(
     task::render_reconciliation_context(audit_data)
   };
 
-  println!("  Reconciling requirements and behaviors into features...");
+  tracing::info!("Reconciling requirements and behaviors into features...");
   let synthesized =
     task::synthesize_features(&requirements_json, &behaviors_json).await?;
   let feature_count = synthesized.feature_requirement_links.len();
-  println!("  Synthesized {} features", feature_count);
+  tracing::info!("Synthesized {} features", feature_count);
 
   // Re-key synthesized features with allocated F IDs.
   let task::SynthesizedFeatures {
@@ -315,12 +318,13 @@ pub async fn synthesize_features(
   audit_data.feature_behavior_links = new_feature_behavior_links;
 
   domain::rebuild_feature_context(audit_data);
-  println!("  Stored {} features in DataContext", feature_count);
+  tracing::info!("Stored {} features in DataContext", feature_count);
 
   Ok(())
 }
 
 /// Extract behaviors from source code with functional semantics in context.
+#[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
 pub async fn build_behaviors(
   state: &PipelineState,
   audit_id: &str,
@@ -340,11 +344,11 @@ pub async fn build_behaviors(
   };
 
   if contracts.is_empty() {
-    println!("  No contracts found, skipping behavior extraction");
+    tracing::info!("No contracts found, skipping behavior extraction");
     return Ok(());
   }
 
-  println!("  Extracting behaviors from {} contracts", contracts.len());
+  tracing::info!("Extracting behaviors from {} contracts", contracts.len());
 
   let mut handles = Vec::new();
   for contract in &contracts {
@@ -359,13 +363,13 @@ pub async fn build_behaviors(
   for handle in handles {
     match handle.await {
       Ok(Ok(parsed)) => all_behaviors.extend(parsed.behaviors),
-      Ok(Err(e)) => eprintln!("extract_behaviors failed: {}", e),
-      Err(e) => eprintln!("extract_behaviors panicked: {}", e),
+      Ok(Err(e)) => tracing::error!("extract_behaviors failed: {}", e),
+      Err(e) => tracing::error!("extract_behaviors panicked: {}", e),
     }
   }
 
-  println!(
-    "  Extracted {} behaviors from {} contracts",
+  tracing::info!(
+    "Extracted {} behaviors from {} contracts",
     all_behaviors.len(),
     contracts.len()
   );
@@ -406,8 +410,8 @@ pub async fn build_behaviors(
   audit_data.topic_metadata.extend(new_metadata);
   domain::rebuild_feature_context(audit_data);
 
-  println!(
-    "  Completed behavior extraction: {} behaviors",
+  tracing::info!(
+    "Completed behavior extraction: {} behaviors",
     all_behaviors.len()
   );
 
@@ -417,13 +421,14 @@ pub async fn build_behaviors(
 /// Build semantic links between documentation sections and code declarations.
 /// Three passes: section→contracts, section×contract→members, section×member→semantics.
 /// Each pass has a mechanical pre-step followed by LLM refinement.
+#[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
 pub async fn build_semantic_links(
   state: &PipelineState,
   audit_id: &str,
 ) -> Result<(), PipelineError> {
   use crate::collaborator::agent::context;
 
-  println!("  Building semantic links for audit {}", audit_id);
+  tracing::info!("Building semantic links for audit {}", audit_id);
 
   // Mechanical resolution (shared by passes 1 and 2)
   let (mechanical, sections, contracts) = {
@@ -444,8 +449,8 @@ pub async fn build_semantic_links(
     (mechanical, sections, contracts)
   };
 
-  println!(
-    "  Mechanical: {} sections, {} contracts, {} section-contract links, {} section-declaration links",
+  tracing::info!(
+    "Mechanical: {} sections, {} contracts, {} section-contract links, {} section-declaration links",
     sections.len(),
     contracts.len(),
     mechanical.section_to_contracts.len(),
@@ -453,7 +458,7 @@ pub async fn build_semantic_links(
   );
 
   if sections.is_empty() || contracts.is_empty() {
-    println!("  No sections or contracts found, skipping semantic linking");
+    tracing::info!("No sections or contracts found, skipping semantic linking");
     return Ok(());
   }
 
@@ -519,8 +524,8 @@ pub async fn build_semantic_links(
     }));
   }
 
-  println!(
-    "  Pass 1: {} sections with text, {} empty, {} LLM calls queued",
+  tracing::info!(
+    "Pass 1: {} sections with text, {} empty, {} LLM calls queued",
     sections_with_text,
     sections_empty,
     pass1_handles.len()
@@ -538,13 +543,13 @@ pub async fn build_semantic_links(
           }
         }
       }
-      Ok(Err(e)) => eprintln!("semantic_link pass1 failed: {}", e),
-      Err(e) => eprintln!("semantic_link pass1 panicked: {}", e),
+      Ok(Err(e)) => tracing::error!("semantic_link pass1 failed: {}", e),
+      Err(e) => tracing::error!("semantic_link pass1 panicked: {}", e),
     }
   }
 
-  println!(
-    "  Pass 1 complete: {} section-contract pairs",
+  tracing::info!(
+    "Pass 1 complete: {} section-contract pairs",
     section_contracts.values().map(|v| v.len()).sum::<usize>()
   );
 
@@ -633,15 +638,15 @@ pub async fn build_semantic_links(
           }
         }
       }
-      Ok(Err(e)) => eprintln!("semantic_link pass2 failed: {}", e),
-      Err(e) => eprintln!("semantic_link pass2 panicked: {}", e),
+      Ok(Err(e)) => tracing::error!("semantic_link pass2 failed: {}", e),
+      Err(e) => tracing::error!("semantic_link pass2 panicked: {}", e),
     }
   }
 
   let total_doc_groups: usize =
     section_doc_members.values().map(|dm| dm.len()).sum();
-  println!(
-    "  Pass 2 complete: {} doc-topic groups for pass3",
+  tracing::info!(
+    "Pass 2 complete: {} doc-topic groups for pass3",
     total_doc_groups
   );
 
@@ -753,17 +758,17 @@ pub async fn build_semantic_links(
     }));
   }
 
-  println!("  Pass 3: {} LLM calls queued", pass3_handles.len());
+  tracing::info!("Pass 3: {} LLM calls queued", pass3_handles.len());
 
   for handle in pass3_handles {
     match handle.await {
       Ok(Ok(result)) => all_links.extend(result.links),
-      Ok(Err(e)) => eprintln!("semantic_link pass3 failed: {}", e),
-      Err(e) => eprintln!("semantic_link pass3 panicked: {}", e),
+      Ok(Err(e)) => tracing::error!("semantic_link pass3 failed: {}", e),
+      Err(e) => tracing::error!("semantic_link pass3 panicked: {}", e),
     }
   }
 
-  println!("  Pass 3 complete: {} semantic links", all_links.len());
+  tracing::info!("Pass 3 complete: {} semantic links", all_links.len());
 
   // Resolve transitive topics before condensation so that semantics from
   // interface stubs are grouped with their base implementation. After this
@@ -798,8 +803,8 @@ pub async fn build_semantic_links(
     }
     decls.len()
   };
-  println!(
-    "  Condensing semantics: {} links across {} declarations",
+  tracing::info!(
+    "Condensing semantics: {} links across {} declarations",
     all_links.len(),
     unique_declarations
   );
@@ -835,8 +840,8 @@ pub async fn build_semantic_links(
     }
   }
 
-  println!(
-    "  Condensation: {} declarations need condensing, {} passed through",
+  tracing::info!(
+    "Condensation: {} declarations need condensing, {} passed through",
     condense_count,
     by_declaration.len() - condense_count
   );
@@ -867,7 +872,7 @@ pub async fn build_semantic_links(
         }
       }
       Ok((decl_topic, original_links, Err(e))) => {
-        eprintln!(
+        tracing::error!(
           "condense_semantics failed for {}: {}, keeping originals",
           decl_topic.id(),
           e
@@ -875,12 +880,12 @@ pub async fn build_semantic_links(
         all_links.extend(original_links);
       }
       Err(e) => {
-        eprintln!("condense_semantics task panicked: {}", e);
+        tracing::error!("condense_semantics task panicked: {}", e);
       }
     }
   }
 
-  println!("  After condensation: {} semantic links", all_links.len());
+  tracing::info!("After condensation: {} semantic links", all_links.len());
 
   // Update in-memory state
   let mut ctx = state
@@ -923,8 +928,8 @@ pub async fn build_semantic_links(
   // Rebuild the declaration_semantics reverse index from topic_metadata.
   domain::rebuild_feature_context(audit_data);
 
-  println!(
-    "  Stored {} semantic links across {} declarations",
+  tracing::info!(
+    "Stored {} semantic links across {} declarations",
     link_count,
     audit_data.declaration_semantics.len()
   );

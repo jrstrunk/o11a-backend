@@ -23,10 +23,10 @@ pub async fn get_source_text(
   State(state): State<FrontendState>,
   Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, StatusCode> {
-  println!("GET /api/v1/audits/{}/source_text/{}", audit_id, topic_id);
+  tracing::debug!("GET /api/v1/audits/{}/source_text/{}", audit_id, topic_id);
 
   let ctx = state.app.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_source_text: {}", e);
+    tracing::error!("Mutex poisoned in get_source_text: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -34,7 +34,7 @@ pub async fn get_source_text(
 
   {
     let cache = state.source_text_cache.lock().map_err(|e| {
-      eprintln!("Source text cache poisoned: {}", e);
+      tracing::warn!("Source text cache poisoned: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     if let Some(inner) = cache.get(&audit_id)
@@ -47,13 +47,13 @@ pub async fn get_source_text(
   let topic = new_topic(&topic_id);
   let source_text = crate::topic_view::render_source_text(&topic, audit_data)
     .ok_or_else(|| {
-    eprintln!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
+    tracing::warn!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
     StatusCode::NOT_FOUND
   })?;
 
   {
     let mut cache = state.source_text_cache.lock().map_err(|e| {
-      eprintln!("Source text cache poisoned: {}", e);
+      tracing::warn!("Source text cache poisoned: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     cache
@@ -77,17 +77,17 @@ pub async fn get_topic_view(
   State(state): State<FrontendState>,
   Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<crate::topic_view::TopicViewResponse>, StatusCode> {
-  println!("GET /api/v1/audits/{}/topic_view/{}", audit_id, topic_id);
+  tracing::debug!("GET /api/v1/audits/{}/topic_view/{}", audit_id, topic_id);
 
   let ctx = state.app.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_topic_view: {}", e);
+    tracing::error!("Mutex poisoned in get_topic_view: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
   let mut source_text_cache = state.source_text_cache.lock().map_err(|e| {
-    eprintln!("Source text cache poisoned: {}", e);
+    tracing::warn!("Source text cache poisoned: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
   let cache = source_text_cache.entry(audit_id.clone()).or_default();
@@ -97,7 +97,7 @@ pub async fn get_topic_view(
 
   let cached = {
     let topic_view_cache = state.topic_view_cache.lock().map_err(|e| {
-      eprintln!("Topic view cache poisoned: {}", e);
+      tracing::warn!("Topic view cache poisoned: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     topic_view_cache
@@ -114,7 +114,7 @@ pub async fn get_topic_view(
     &prefix,
   )
   .ok_or_else(|| {
-    eprintln!(
+    tracing::warn!(
       "Metadata for topic '{}' not found in audit '{}'",
       topic_id, audit_id
     );
@@ -129,7 +129,7 @@ pub async fn get_topic_view(
     };
 
     let mut topic_view_cache = state.topic_view_cache.lock().map_err(|e| {
-      eprintln!("Topic view cache poisoned: {}", e);
+      tracing::warn!("Topic view cache poisoned: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     topic_view_cache
@@ -162,17 +162,17 @@ pub async fn get_conversation(
   State(state): State<FrontendState>,
   Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<crate::topic_view::ConversationResponse>, StatusCode> {
-  println!("GET /api/v1/audits/{}/conversation/{}", audit_id, topic_id);
+  tracing::debug!("GET /api/v1/audits/{}/conversation/{}", audit_id, topic_id);
 
   let ctx = state.app.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_conversation: {}", e);
+    tracing::error!("Mutex poisoned in get_conversation: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
   let mut source_text_cache = state.source_text_cache.lock().map_err(|e| {
-    eprintln!("Source text cache poisoned: {}", e);
+    tracing::warn!("Source text cache poisoned: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
   let cache = source_text_cache.entry(audit_id.clone()).or_default();
@@ -180,7 +180,7 @@ pub async fn get_conversation(
   let response =
     crate::topic_view::build_conversation(&topic_id, audit_data, cache)
       .ok_or_else(|| {
-        eprintln!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
+        tracing::warn!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
         StatusCode::NOT_FOUND
       })?;
 
@@ -197,24 +197,24 @@ pub async fn get_thread(
   State(state): State<FrontendState>,
   Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, StatusCode> {
-  println!("GET /api/v1/audits/{}/thread/{}", audit_id, topic_id);
+  tracing::debug!("GET /api/v1/audits/{}/thread/{}", audit_id, topic_id);
 
   let ctx = state.app.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_thread: {}", e);
+    tracing::error!("Mutex poisoned in get_thread: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
   let mut source_text_cache = state.source_text_cache.lock().map_err(|e| {
-    eprintln!("Source text cache poisoned: {}", e);
+    tracing::warn!("Source text cache poisoned: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
   let cache = source_text_cache.entry(audit_id.clone()).or_default();
 
   let html = crate::topic_view::build_thread(&topic_id, audit_data, cache)
     .ok_or_else(|| {
-      eprintln!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
+      tracing::warn!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
       StatusCode::NOT_FOUND
     })?;
 
@@ -241,10 +241,10 @@ pub async fn get_documentation_panel(
   Path(audit_id): Path<String>,
   Json(payload): Json<DocumentationPanelRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-  println!("POST /api/v1/audits/{}/documentation", audit_id);
+  tracing::debug!("POST /api/v1/audits/{}/documentation", audit_id);
 
   let ctx = state.app.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_documentation_panel: {}", e);
+    tracing::error!("Mutex poisoned in get_documentation_panel: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -273,7 +273,7 @@ pub async fn get_documentation_panel(
   let show_features_as_headers = !has_direct_feature_input;
 
   let mut source_text_cache = state.source_text_cache.lock().map_err(|e| {
-    eprintln!("Source text cache poisoned: {}", e);
+    tracing::warn!("Source text cache poisoned: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
   let cache = source_text_cache.entry(audit_id.clone()).or_default();

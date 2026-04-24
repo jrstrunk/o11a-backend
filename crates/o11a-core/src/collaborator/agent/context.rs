@@ -2926,7 +2926,7 @@ pub fn render_section_text(
   let title = match audit_data.topic_metadata.get(&doc_topic) {
     Some(TopicMetadata::TitledTopic { title, .. }) => Some(title.as_str()),
     _ => {
-      eprintln!(
+      tracing::warn!(
         "render_section_text: no TitledTopic metadata for {} (node_id={})",
         section_topic.id(),
         node_id
@@ -2938,7 +2938,7 @@ pub fn render_section_text(
   // Render the section content from the documentation AST
   let doc_node = find_doc_node_by_id(audit_data, node_id);
   if doc_node.is_none() {
-    eprintln!(
+    tracing::warn!(
       "render_section_text: find_doc_node_by_id returned None for node_id={}",
       node_id
     );

@@ -64,7 +64,7 @@ pub fn run_analysis(
     }
   }
 
-  println!("Analyzing Solidity project at: {}", project_root.display());
+  tracing::info!("Analyzing Solidity project at: {}", project_root.display());
 
   // Analyze Solidity project and populate AuditData
   {
@@ -75,7 +75,7 @@ pub fn run_analysis(
       .map_err(AnalysisError::Solidity)?;
   }
 
-  println!("Analyzing documentation files...");
+  tracing::info!("Analyzing documentation files...");
 
   // Analyze documentation and augment AuditData
   {
@@ -91,7 +91,7 @@ pub fn run_analysis(
     .map_err(AnalysisError::Documentation)?;
   }
 
-  println!("Done loading audit: {}", audit_id);
+  tracing::info!("Done loading audit: {}", audit_id);
 
   Ok(())
 }
