@@ -17,6 +17,8 @@ use o11a_core::feature_lookup::features_for_topic;
 use o11a_core::report::{self, AuditReport};
 use o11a_core::state::AppState;
 
+use crate::api::error::artifact_error_response;
+
 // Health check handler
 pub async fn health_check() -> StatusCode {
   println!("GET /health");
@@ -205,33 +207,22 @@ pub async fn create_audit(
   let artifact_path = project_root.join("o11a").join("audit.analysis.bin");
   let report_path = project_root.join("o11a").join("audit.json");
 
-  let artifact = match analysis_artifact::read_artifact(&artifact_path) {
-    Ok(a) => a,
-    Err(ArtifactError::VersionMismatch { found, expected }) => {
-      eprintln!(
-        "create_audit: artifact at {} has schema {} (server expects {})",
-        artifact_path.display(),
-        found,
-        expected
-      );
-      return Err(StatusCode::CONFLICT);
-    }
-    Err(e) => {
-      eprintln!(
-        "create_audit: failed to read {}: {}",
-        artifact_path.display(),
-        e
-      );
-      return Err(StatusCode::BAD_REQUEST);
-    }
-  };
+  let artifact = analysis_artifact::read_artifact(&artifact_path).map_err(|e| {
+    eprintln!(
+      "create_audit: failed to read {}: {}",
+      artifact_path.display(),
+      e
+    );
+    artifact_error_response(e).0
+  })?;
 
   if artifact.audit_id != payload.audit_id {
-    eprintln!(
-      "create_audit: artifact is for '{}' but request is for '{}'",
-      artifact.audit_id, payload.audit_id
-    );
-    return Err(StatusCode::BAD_REQUEST);
+    let err = ArtifactError::AuditIdMismatch {
+      expected: payload.audit_id.clone(),
+      found: artifact.audit_id.clone(),
+    };
+    eprintln!("create_audit: {}", err);
+    return Err(artifact_error_response(err).0);
   }
 
   let report_body = std::fs::read_to_string(&report_path).map_err(|e| {

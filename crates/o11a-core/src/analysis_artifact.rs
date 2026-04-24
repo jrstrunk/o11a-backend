@@ -174,41 +174,19 @@ pub fn apply_snapshot(audit_data: &mut AuditData, snap: AuditDataSnapshot) {
   audit_data.declaration_semantics.clear();
 }
 
-/// Errors that can occur when reading or decoding an artifact.
-#[derive(Debug)]
+/// Errors that can occur when reading, writing, or decoding an artifact.
+#[derive(Debug, thiserror::Error)]
 pub enum ArtifactError {
-  Io(std::io::Error),
-  Decode(String),
+  #[error("I/O error: {0}")]
+  Io(#[from] std::io::Error),
+  #[error("decode error: {0}")]
+  Decode(#[from] bincode::error::DecodeError),
+  #[error("encode error: {0}")]
+  Encode(#[from] bincode::error::EncodeError),
+  #[error("artifact schema version mismatch: found {found}, expected {expected}")]
   VersionMismatch { found: u32, expected: u32 },
-}
-
-impl std::fmt::Display for ArtifactError {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    match self {
-      ArtifactError::Io(e) => write!(f, "I/O error: {}", e),
-      ArtifactError::Decode(msg) => write!(f, "decode error: {}", msg),
-      ArtifactError::VersionMismatch { found, expected } => write!(
-        f,
-        "artifact schema version mismatch: found {}, expected {}",
-        found, expected
-      ),
-    }
-  }
-}
-
-impl std::error::Error for ArtifactError {
-  fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-    match self {
-      ArtifactError::Io(e) => Some(e),
-      _ => None,
-    }
-  }
-}
-
-impl From<std::io::Error> for ArtifactError {
-  fn from(e: std::io::Error) -> Self {
-    ArtifactError::Io(e)
-  }
+  #[error("artifact audit id mismatch: expected '{expected}', found '{found}'")]
+  AuditIdMismatch { expected: String, found: String },
 }
 
 /// Serialize an [`AnalysisArtifact`] to `path` atomically: writes to a
@@ -238,8 +216,7 @@ pub fn write_artifact(
     }
   };
 
-  let encoded = bincode::serde::encode_to_vec(artifact, bincode_config())
-    .map_err(|e| ArtifactError::Decode(format!("encode failed: {}", e)))?;
+  let encoded = bincode::serde::encode_to_vec(artifact, bincode_config())?;
 
   {
     let mut file = std::fs::File::create(&tmp_path)?;
@@ -257,8 +234,7 @@ pub fn write_artifact(
 pub fn read_artifact(path: &Path) -> Result<AnalysisArtifact, ArtifactError> {
   let bytes = std::fs::read(path)?;
   let (artifact, _read): (AnalysisArtifact, usize) =
-    bincode::serde::decode_from_slice(&bytes, bincode_config())
-      .map_err(|e| ArtifactError::Decode(e.to_string()))?;
+    bincode::serde::decode_from_slice(&bytes, bincode_config())?;
   if artifact.schema_version != ARTIFACT_SCHEMA_VERSION {
     return Err(ArtifactError::VersionMismatch {
       found: artifact.schema_version,

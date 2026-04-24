@@ -9,12 +9,27 @@
 //! callers (HTTP handlers, background tasks) can map to their own error
 //! types.
 
-use crate::collaborator::agent::task;
+use crate::collaborator::agent::task::{self, TaskError};
 use crate::collaborator::models::Author;
 use crate::domain::{self, DataContext, topic};
 use crate::ids;
 
 use std::sync::{Arc, Mutex};
+
+/// Errors produced by the analysis pipeline.
+#[derive(Debug, thiserror::Error)]
+pub enum PipelineError {
+  #[error("audit not found: {audit_id}")]
+  AuditNotFound { audit_id: String },
+  #[error("DataContext mutex poisoned: {0}")]
+  LockPoisoned(String),
+  #[error("agent task failed: {0}")]
+  AgentTask(#[from] TaskError),
+  #[error("database error: {0}")]
+  Database(#[from] sqlx::Error),
+  #[error("{0}")]
+  Other(String),
+}
 
 /// Shared state needed by pipeline functions — mirrors the relevant fields of
 /// `AppState` without depending on the HTTP layer.
@@ -37,7 +52,7 @@ pub struct PipelineState {
 pub async fn run_full_pipeline(
   state: &PipelineState,
   audit_id: &str,
-) -> Result<(), String> {
+) -> Result<(), PipelineError> {
   println!("Starting full analysis pipeline for audit {}", audit_id);
 
   println!("\n[1/4] Semantic Linking");
@@ -61,15 +76,16 @@ pub async fn run_full_pipeline(
 pub async fn build_requirements(
   state: &PipelineState,
   audit_id: &str,
-) -> Result<(), String> {
+) -> Result<(), PipelineError> {
   let documentation_files = {
     let ctx = state
       .data_context
       .lock()
-      .map_err(|e| format!("Mutex poisoned in build_requirements: {}", e))?;
-    let audit_data = ctx
-      .get_audit(audit_id)
-      .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data =
+      ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+        audit_id: audit_id.to_string(),
+      })?;
     task::render_documentation_files(audit_data)
   };
 
@@ -159,12 +175,14 @@ pub async fn build_requirements(
     }
   }
 
-  let mut ctx = state.data_context.lock().map_err(|e| {
-    format!("Mutex poisoned in build_requirements (store): {}", e)
-  })?;
-  let audit_data = ctx
-    .get_audit_mut(audit_id)
-    .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+  let mut ctx = state
+    .data_context
+    .lock()
+    .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+  let audit_data =
+    ctx.get_audit_mut(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+      audit_id: audit_id.to_string(),
+    })?;
 
   // Clear old feature/requirement metadata — requirements are being
   // replaced and features will be re-synthesized against the new set.
@@ -191,15 +209,16 @@ pub async fn build_requirements(
 pub async fn synthesize_features(
   state: &PipelineState,
   audit_id: &str,
-) -> Result<(), String> {
+) -> Result<(), PipelineError> {
   let (requirements_json, behaviors_json) = {
     let ctx = state
       .data_context
       .lock()
-      .map_err(|e| format!("Mutex poisoned in synthesize_features: {}", e))?;
-    let audit_data = ctx
-      .get_audit(audit_id)
-      .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data =
+      ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+        audit_id: audit_id.to_string(),
+      })?;
     task::render_reconciliation_context(audit_data)
   };
 
@@ -276,12 +295,14 @@ pub async fn synthesize_features(
     new_feature_behavior_links.insert(new_feat_topic, beh_topics);
   }
 
-  let mut ctx = state.data_context.lock().map_err(|e| {
-    format!("Mutex poisoned in synthesize_features (store): {}", e)
-  })?;
-  let audit_data = ctx
-    .get_audit_mut(audit_id)
-    .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+  let mut ctx = state
+    .data_context
+    .lock()
+    .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+  let audit_data =
+    ctx.get_audit_mut(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+      audit_id: audit_id.to_string(),
+    })?;
 
   audit_data
     .topic_metadata
@@ -303,17 +324,18 @@ pub async fn synthesize_features(
 pub async fn build_behaviors(
   state: &PipelineState,
   audit_id: &str,
-) -> Result<(), String> {
+) -> Result<(), PipelineError> {
   use crate::collaborator::agent::context;
 
   let contracts = {
     let ctx = state
       .data_context
       .lock()
-      .map_err(|e| format!("Mutex poisoned in build_behaviors: {}", e))?;
-    let audit_data = ctx
-      .get_audit(audit_id)
-      .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data =
+      ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+        audit_id: audit_id.to_string(),
+      })?;
     context::collect_contracts_for_behavior_extraction(audit_data)
   };
 
@@ -370,10 +392,11 @@ pub async fn build_behaviors(
   let mut ctx = state
     .data_context
     .lock()
-    .map_err(|e| format!("Mutex poisoned in build_behaviors (store): {}", e))?;
-  let audit_data = ctx
-    .get_audit_mut(audit_id)
-    .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+    .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+  let audit_data =
+    ctx.get_audit_mut(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+      audit_id: audit_id.to_string(),
+    })?;
 
   // Clear old behaviors
   audit_data
@@ -397,7 +420,7 @@ pub async fn build_behaviors(
 pub async fn build_semantic_links(
   state: &PipelineState,
   audit_id: &str,
-) -> Result<(), String> {
+) -> Result<(), PipelineError> {
   use crate::collaborator::agent::context;
 
   println!("  Building semantic links for audit {}", audit_id);
@@ -407,10 +430,11 @@ pub async fn build_semantic_links(
     let ctx = state
       .data_context
       .lock()
-      .map_err(|e| format!("Mutex poisoned in build_semantic_links: {}", e))?;
-    let audit_data = ctx
-      .get_audit(audit_id)
-      .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data =
+      ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+        audit_id: audit_id.to_string(),
+      })?;
 
     let mechanical = context::mechanical_semantic_links(audit_data);
     let sections = task::collect_documentation_sections(audit_data);
@@ -467,10 +491,11 @@ pub async fn build_semantic_links(
       let ctx = state
         .data_context
         .lock()
-        .map_err(|e| format!("Mutex poisoned (pass1): {}", e))?;
-      let audit_data = ctx
-        .get_audit(audit_id)
-        .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+        .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+      let audit_data =
+        ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
       context::render_section_text(section_topic, audit_data)
         .unwrap_or_default()
     };
@@ -530,10 +555,11 @@ pub async fn build_semantic_links(
       let ctx = state
         .data_context
         .lock()
-        .map_err(|e| format!("Mutex poisoned (pass2): {}", e))?;
-      let audit_data = ctx
-        .get_audit(audit_id)
-        .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+        .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+      let audit_data =
+        ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
       let stxt = context::render_section_text(section_topic, audit_data)
         .unwrap_or_default();
 
@@ -631,10 +657,11 @@ pub async fn build_semantic_links(
       let ctx = state
         .data_context
         .lock()
-        .map_err(|e| format!("Mutex poisoned (pass3): {}", e))?;
-      let audit_data = ctx
-        .get_audit(audit_id)
-        .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+        .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+      let audit_data =
+        ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
       context::render_section_text(section_topic, audit_data)
         .unwrap_or_default()
     };
@@ -644,10 +671,11 @@ pub async fn build_semantic_links(
         let ctx = state
           .data_context
           .lock()
-          .map_err(|e| format!("Mutex poisoned (pass3 batch): {}", e))?;
-        let audit_data = ctx
-          .get_audit(audit_id)
-          .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+          .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+        let audit_data =
+          ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+            audit_id: audit_id.to_string(),
+          })?;
 
         let decls = context::render_batched_member_declarations_for_semantics(
           member_topics,
@@ -687,10 +715,11 @@ pub async fn build_semantic_links(
       let ctx = state
         .data_context
         .lock()
-        .map_err(|e| format!("Mutex poisoned (pass3 contract): {}", e))?;
-      let audit_data = ctx
-        .get_audit(audit_id)
-        .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+        .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+      let audit_data =
+        ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
 
       let stxt = context::render_section_text(section_topic, audit_data)
         .unwrap_or_default();
@@ -740,15 +769,14 @@ pub async fn build_semantic_links(
   // interface stubs are grouped with their base implementation. After this
   // step, all links carry the base (non-transitive) declaration topic.
   {
-    let ctx = state.data_context.lock().map_err(|e| {
-      format!(
-        "Mutex poisoned in build_semantic_links (resolve transitive): {}",
-        e
-      )
-    })?;
-    let audit_data = ctx
-      .get_audit(audit_id)
-      .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+    let ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data =
+      ctx.get_audit(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+        audit_id: audit_id.to_string(),
+      })?;
 
     for link in &mut all_links {
       if let Some(base) = audit_data
@@ -855,12 +883,14 @@ pub async fn build_semantic_links(
   println!("  After condensation: {} semantic links", all_links.len());
 
   // Update in-memory state
-  let mut ctx = state.data_context.lock().map_err(|e| {
-    format!("Mutex poisoned in build_semantic_links (store): {}", e)
-  })?;
-  let audit_data = ctx
-    .get_audit_mut(audit_id)
-    .ok_or_else(|| format!("Audit not found: {}", audit_id))?;
+  let mut ctx = state
+    .data_context
+    .lock()
+    .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+  let audit_data =
+    ctx.get_audit_mut(audit_id).ok_or_else(|| PipelineError::AuditNotFound {
+      audit_id: audit_id.to_string(),
+    })?;
 
   // Clear old functional-semantic metadata so repeated runs don't accumulate.
   audit_data.topic_metadata.retain(|_, m| {

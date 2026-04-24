@@ -68,7 +68,7 @@ async fn run(project_root: &Path, audit_id: &str) -> Result<(), String> {
   let data_context = Arc::new(Mutex::new(data_context));
 
   analysis::run_analysis(project_root, audit_id, &data_context)
-    .map_err(|e| format!("Failed to load project: {}", e))?;
+    .map_err(|e| e.to_string())?;
 
   let pipeline_state = PipelineState {
     data_context: data_context.clone(),

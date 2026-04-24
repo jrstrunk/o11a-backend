@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use super::log as agent_log;
+use super::task::TaskError;
 
 /// Maximum number of concurrent LLM API requests across all tasks.
 /// All calls to `chat_completion` acquire a permit before sending a request,
@@ -110,7 +111,7 @@ pub async fn chat_completion(
   prompt: &str,
   dry_run_label: Option<&str>,
   response_schema: Option<&JsonSchema>,
-) -> Result<String, String> {
+) -> Result<String, TaskError> {
   if let Ok(base_path) = std::env::var("AGENT_DRY_RUN") {
     let path = match dry_run_label {
       Some(label) => {
@@ -139,8 +140,7 @@ pub async fn chat_completion(
        === USER PROMPT ===\n{}",
       model, system_message, prompt
     );
-    std::fs::write(&path, &output)
-      .map_err(|e| format!("Failed to write dry run to '{}': {}", path, e))?;
+    std::fs::write(&path, &output)?;
     println!("Dry run prompt written to: {}", path);
     // Return the schema's empty-shape sentinel so downstream parsing sees a
     // well-formed response and the pipeline continues with empty results,
@@ -154,7 +154,7 @@ pub async fn chat_completion(
   }
 
   let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
-    "OPENROUTER_API_KEY environment variable not set".to_string()
+    TaskError::MissingEnv("OPENROUTER_API_KEY".to_string())
   })?;
 
   let model = match task_size {
@@ -195,7 +195,7 @@ pub async fn chat_completion(
   let _permit = REQUEST_SEMAPHORE
     .acquire()
     .await
-    .map_err(|_| "Request semaphore closed".to_string())?;
+    .map_err(|_| TaskError::Other("Request semaphore closed".to_string()))?;
 
   let client = reqwest::Client::new();
 
@@ -222,7 +222,7 @@ pub async fn chat_completion(
             Some(prompt),
             None,
           );
-          return Err(format!("Request failed: {}", e));
+          return Err(TaskError::HttpError(e));
         }
         let wait_secs = 2u64.pow(attempts - 1).min(60);
         agent_log::warn(
@@ -247,10 +247,7 @@ pub async fn chat_completion(
     let status = response.status();
 
     if status.is_success() {
-      let resp_body = response
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+      let resp_body = response.text().await?;
 
       // Some providers return HTTP 200 with an error object in the body
       // (e.g. 504 timeouts wrapped as `{"error": {"message": "...", "code": 504}}`).
@@ -297,10 +294,10 @@ pub async fn chat_completion(
           Some(prompt),
           Some(&resp_body),
         );
-        return Err(format!(
+        return Err(TaskError::Other(format!(
           "API error in 200 response ({}): {}",
           err_code, err_msg
-        ));
+        )));
       }
 
       break resp_body;
@@ -321,7 +318,10 @@ pub async fn chat_completion(
         Some(prompt),
         Some(&resp_body),
       );
-      return Err(format!("API error ({}): {}", status, resp_body));
+      return Err(TaskError::Other(format!(
+        "API error ({}): {}",
+        status, resp_body
+      )));
     }
 
     // Parse Retry-After header (seconds), fall back to exponential backoff.
@@ -362,7 +362,10 @@ pub async fn chat_completion(
         Some(prompt),
         Some(&raw_body),
       );
-      format!("Failed to parse response: {}", e)
+      TaskError::JsonParse {
+        label: "API response".to_string(),
+        source: e,
+      }
     })?;
 
   let choice = parsed.choices.into_iter().next().ok_or_else(|| {
@@ -374,7 +377,7 @@ pub async fn chat_completion(
       Some(prompt),
       Some(&raw_body),
     );
-    "No choices in response".to_string()
+    TaskError::MissingField("choices")
   })?;
 
   // Detect truncated responses — the model hit its output token limit
@@ -388,7 +391,9 @@ pub async fn chat_completion(
       Some(prompt),
       Some(&raw_body),
     );
-    return Err("Response truncated: model hit output token limit".to_string());
+    return Err(TaskError::Other(
+      "Response truncated: model hit output token limit".to_string(),
+    ));
   }
 
   let message = choice.message;
@@ -428,7 +433,7 @@ pub async fn chat_completion(
     Some(prompt),
     Some(&raw_body),
   );
-  Err("API response has no usable content".to_string())
+  Err(TaskError::MissingField("content"))
 }
 
 /// Deserialize a schema-constrained LLM response into `T`.
@@ -441,7 +446,7 @@ pub fn parse_response<T: serde::de::DeserializeOwned>(
   response: &str,
   label: &str,
   prompt: &str,
-) -> Result<T, String> {
+) -> Result<T, TaskError> {
   serde_json::from_str(response).map_err(|e| {
     agent_log::error(
       "response_parse_error",
@@ -451,6 +456,9 @@ pub fn parse_response<T: serde::de::DeserializeOwned>(
       Some(prompt),
       Some(response),
     );
-    format!("Failed to parse {}: {}", label, e)
+    TaskError::JsonParse {
+      label: label.to_string(),
+      source: e,
+    }
   })
 }

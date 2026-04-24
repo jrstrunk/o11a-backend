@@ -43,6 +43,27 @@ use crate::collaborator::agent::router::{self, JsonSchema, TaskSize};
 use crate::collaborator::models::Author;
 use crate::domain::{self, AST, AuditData, Requirement, topic};
 
+/// Errors produced by LLM-driven agent tasks.
+#[derive(Debug, thiserror::Error)]
+pub enum TaskError {
+  #[error("HTTP error: {0}")]
+  HttpError(#[from] reqwest::Error),
+  #[error("JSON parse error in {label}: {source}")]
+  JsonParse {
+    label: String,
+    #[source]
+    source: serde_json::Error,
+  },
+  #[error("missing env var: {0}")]
+  MissingEnv(String),
+  #[error("missing field: {0}")]
+  MissingField(&'static str),
+  #[error("I/O error: {0}")]
+  Io(#[from] std::io::Error),
+  #[error("{0}")]
+  Other(String),
+}
+
 /// Raw requirement as returned by the LLM (no topic ID yet).
 #[derive(Deserialize)]
 struct LLMRequirement {
@@ -230,7 +251,7 @@ pub struct ParsedRequirements {
 fn parse_requirements_response(
   response: &str,
   prompt: &str,
-) -> Result<ParsedRequirements, String> {
+) -> Result<ParsedRequirements, TaskError> {
   let wrapper: LLMRequirementsResponse =
     router::parse_response(response, "requirements", prompt)?;
   let raw_sections = wrapper.sections;
@@ -289,9 +310,9 @@ fn parse_requirements_response(
 /// Extract requirements from documentation files via LLM, grouped by section.
 pub async fn extract_requirements_from_documentation(
   documentation_files: &[String],
-) -> Result<ParsedRequirements, String> {
+) -> Result<ParsedRequirements, TaskError> {
   if documentation_files.is_empty() {
-    return Err("No documentation found in audit".to_string());
+    return Err(TaskError::Other("No documentation found in audit".to_string()));
   }
 
   if documentation_files.len() == 1 {
@@ -341,7 +362,9 @@ pub async fn extract_requirements_from_documentation(
   }
 
   if per_doc_results.is_empty() {
-    return Err("All document requirement extractions failed".to_string());
+    return Err(TaskError::Other(
+      "All document requirement extractions failed".to_string(),
+    ));
   }
 
   if per_doc_results.len() == 1 {
@@ -597,7 +620,7 @@ pub async fn semantic_link_pass1(
   section_text: &str,
   contracts_json: &str,
   confirmed_contracts: &[topic::Topic],
-) -> Result<SemanticLinkPass1Result, String> {
+) -> Result<SemanticLinkPass1Result, TaskError> {
   let confirmed_str = if confirmed_contracts.is_empty() {
     String::new()
   } else {
@@ -639,7 +662,7 @@ pub async fn semantic_link_pass2(
   section_text: &str,
   contract_json: &str,
   confirmed_members: &[topic::Topic],
-) -> Result<SemanticLinkPass2Result, String> {
+) -> Result<SemanticLinkPass2Result, TaskError> {
   let confirmed_str = if confirmed_members.is_empty() {
     String::new()
   } else {
@@ -694,7 +717,7 @@ pub async fn semantic_link_pass3(
   declarations_json: &str,
   source_code: &str,
   fallback_doc_topic: &topic::Topic,
-) -> Result<SemanticLinkPass3Result, String> {
+) -> Result<SemanticLinkPass3Result, TaskError> {
   let prompt = format!(
     "{}Documentation section:\n{}\n\nDeclarations needing semantics:\n{}\n\nSource code (for disambiguation only):\n{}",
     SEMANTIC_LINK_PASS3_PROMPT, section_text, declarations_json, source_code
@@ -851,7 +874,7 @@ pub struct CondensedSemantic {
 pub async fn condense_semantics(
   declaration_topic: &str,
   semantics: &[String],
-) -> Result<Vec<CondensedSemantic>, String> {
+) -> Result<Vec<CondensedSemantic>, TaskError> {
   let semantics_list = semantics
     .iter()
     .enumerate()
@@ -1120,7 +1143,7 @@ pub fn render_reconciliation_context(
 pub async fn synthesize_features(
   requirements_json: &str,
   behaviors_json: &str,
-) -> Result<SynthesizedFeatures, String> {
+) -> Result<SynthesizedFeatures, TaskError> {
   let prompt = format!(
     "{}Requirements:\n{}\n\nBehaviors:\n{}",
     SYNTHESIZE_FEATURES_PROMPT, requirements_json, behaviors_json
@@ -1264,7 +1287,7 @@ pub struct ParsedBehaviors {
 pub async fn extract_behaviors_from_contract(
   contract_json: &str,
   contract_name: &str,
-) -> Result<ParsedBehaviors, String> {
+) -> Result<ParsedBehaviors, TaskError> {
   let prompt =
     format!("{}Contract:\n{}", EXTRACT_BEHAVIORS_PROMPT, contract_json);
 
@@ -1374,9 +1397,11 @@ pub struct NormalizedDocumentation {
 /// content that the caller can write back to disk.
 pub async fn normalize_documentation(
   documentation_files: &[DocumentationFile],
-) -> Result<NormalizedDocumentation, String> {
+) -> Result<NormalizedDocumentation, TaskError> {
   if documentation_files.is_empty() {
-    return Err("No documentation files to normalize".to_string());
+    return Err(TaskError::Other(
+      "No documentation files to normalize".to_string(),
+    ));
   }
 
   let mut handles = Vec::new();
@@ -1413,7 +1438,9 @@ pub async fn normalize_documentation(
   }
 
   if files.is_empty() {
-    return Err("All documentation normalizations failed".to_string());
+    return Err(TaskError::Other(
+      "All documentation normalizations failed".to_string(),
+    ));
   }
 
   Ok(NormalizedDocumentation { files })
