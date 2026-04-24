@@ -7,10 +7,10 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 
-use crate::api::AppState;
+use o11a_core::state::AppState;
 
-/// WebSocket handler for comment streaming
-pub async fn comment_websocket(
+/// WebSocket handler for the audit event stream
+pub async fn event_websocket(
   ws: WebSocketUpgrade,
   Path(audit_id): Path<String>,
   State(state): State<AppState>,
@@ -21,8 +21,8 @@ pub async fn comment_websocket(
 async fn handle_socket(socket: WebSocket, audit_id: String, state: AppState) {
   let (mut sender, mut receiver) = socket.split();
 
-  // Subscribe to comment broadcast channel
-  let mut rx = state.comment_broadcast.subscribe();
+  // Subscribe to the audit event broadcast channel
+  let mut rx = state.event_broadcast.subscribe();
 
   // Spawn task to forward broadcasts to this client
   let audit_id_clone = audit_id.clone();

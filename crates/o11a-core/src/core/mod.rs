@@ -1559,7 +1559,10 @@ pub enum TopicMetadata {
     name: String,
     description: String,
     author_id: i64,
-    created_at: String,
+    /// `None` for pipeline-produced entities — the per-batch
+    /// `generated_at` on the audit report already locates them in time.
+    /// `Some` when authored by a user or a server-side agent.
+    created_at: Option<String>,
   },
   /// A behavioral requirement extracted from documentation. Links to features
   /// are in feature_requirement_links.
@@ -1569,7 +1572,8 @@ pub enum TopicMetadata {
     /// The D-prefixed documentation section this requirement was extracted from
     section_topic: topic::Topic,
     author_id: i64,
-    created_at: String,
+    /// `None` for pipeline-produced entities — see FeatureTopic for rationale.
+    created_at: Option<String>,
   },
   /// A behavior observed during code review, belonging to one code member.
   BehaviorTopic {
@@ -1578,7 +1582,8 @@ pub enum TopicMetadata {
     /// The N-prefixed code member (function/modifier/contract) this behavior belongs to
     member_topic: topic::Topic,
     author_id: i64,
-    created_at: String,
+    /// `None` for pipeline-produced entities — see FeatureTopic for rationale.
+    created_at: Option<String>,
   },
   /// A functional semantic — what a code declaration represents in the context
   /// of the project. Derived from one or more documentation sections.
@@ -1591,7 +1596,8 @@ pub enum TopicMetadata {
     /// D-prefixed documentation topics this semantic was derived from.
     documentation_topics: Vec<topic::Topic>,
     author_id: i64,
-    created_at: String,
+    /// `None` for pipeline-produced entities — see FeatureTopic for rationale.
+    created_at: Option<String>,
   },
   /// A threat on a non-pure source code subject
   ThreatTopic {
@@ -1774,13 +1780,15 @@ impl TopicMetadata {
   pub fn created_at(&self) -> Option<&str> {
     match self {
       TopicMetadata::CommentTopic { created_at, .. }
-      | TopicMetadata::FeatureTopic { created_at, .. }
-      | TopicMetadata::RequirementTopic { created_at, .. }
-      | TopicMetadata::BehaviorTopic { created_at, .. }
-      | TopicMetadata::FunctionalSemanticTopic { created_at, .. }
       | TopicMetadata::ThreatTopic { created_at, .. }
       | TopicMetadata::InvariantTopic { created_at, .. } => {
         Some(created_at.as_str())
+      }
+      TopicMetadata::FeatureTopic { created_at, .. }
+      | TopicMetadata::RequirementTopic { created_at, .. }
+      | TopicMetadata::BehaviorTopic { created_at, .. }
+      | TopicMetadata::FunctionalSemanticTopic { created_at, .. } => {
+        created_at.as_deref()
       }
       _ => None,
     }

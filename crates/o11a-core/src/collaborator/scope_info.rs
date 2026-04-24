@@ -25,8 +25,12 @@ pub enum BlockAnnotationKindInfo {
 impl BlockAnnotationKindInfo {
   pub fn from_core(kind: &core::BlockAnnotationKind) -> Self {
     match kind {
-      core::BlockAnnotationKind::If(core::ControlFlowBranch::True) => Self::IfTrue,
-      core::BlockAnnotationKind::If(core::ControlFlowBranch::False) => Self::IfFalse,
+      core::BlockAnnotationKind::If(core::ControlFlowBranch::True) => {
+        Self::IfTrue
+      }
+      core::BlockAnnotationKind::If(core::ControlFlowBranch::False) => {
+        Self::IfFalse
+      }
       core::BlockAnnotationKind::For => Self::For,
       core::BlockAnnotationKind::While => Self::While,
       core::BlockAnnotationKind::DoWhile => Self::DoWhile,
@@ -37,8 +41,12 @@ impl BlockAnnotationKindInfo {
 
   pub fn to_core(&self) -> core::BlockAnnotationKind {
     match self {
-      Self::IfTrue => core::BlockAnnotationKind::If(core::ControlFlowBranch::True),
-      Self::IfFalse => core::BlockAnnotationKind::If(core::ControlFlowBranch::False),
+      Self::IfTrue => {
+        core::BlockAnnotationKind::If(core::ControlFlowBranch::True)
+      }
+      Self::IfFalse => {
+        core::BlockAnnotationKind::If(core::ControlFlowBranch::False)
+      }
       Self::For => core::BlockAnnotationKind::For,
       Self::While => core::BlockAnnotationKind::While,
       Self::DoWhile => core::BlockAnnotationKind::DoWhile,
@@ -99,7 +107,10 @@ impl ScopeInfo {
         containing_blocks: vec![],
         signature_container: None,
       },
-      core::Scope::Component { container, component } => ScopeInfo {
+      core::Scope::Component {
+        container,
+        component,
+      } => ScopeInfo {
         scope_type: "Component".to_string(),
         container: Some(container.file_path.clone()),
         component: Some(component.id.clone()),

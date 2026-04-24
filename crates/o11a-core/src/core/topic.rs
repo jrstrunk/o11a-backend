@@ -63,28 +63,55 @@ impl Topic {
   }
 }
 
-/// Parse a topic ID string (e.g. "F7", "R12", "B3") and extract the numeric
-/// database ID, validating the expected kind. Also accepts bare numeric IDs
-/// for backward compatibility (e.g. "7" is treated the same as "F7" when
-/// the expected kind is Feature).
+#[derive(Debug)]
+pub struct ParseError {
+  pub input: String,
+  pub message: String,
+}
+
+impl std::fmt::Display for ParseError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "invalid topic ID '{}': {}", self.input, self.message)
+  }
+}
+
+impl std::error::Error for ParseError {}
+
+/// All path parameters that identify a topic use the prefixed form
+/// exclusively (e.g. `F42`, `R7`, `B13`, `P99`, `N-100`, `D34`, `C2`,
+/// `I4`, `T1`). Bare numeric IDs are not accepted.
 pub fn parse_topic_id(
   input: &str,
   expected_kind: TopicKind,
-) -> Result<i64, String> {
+) -> Result<Topic, ParseError> {
   let topic = Topic {
     id: input.to_string(),
   };
   match topic.kind() {
-    Some(kind) if kind == expected_kind => topic
-      .numeric_id()
-      .ok_or_else(|| format!("Invalid numeric ID in topic: {}", input)),
-    Some(kind) => Err(format!(
-      "Expected {:?} topic but got {:?}: {}",
-      expected_kind, kind, input
-    )),
-    None => input
-      .parse::<i64>()
-      .map_err(|_| format!("Invalid topic ID: {}", input)),
+    Some(kind) if kind == expected_kind => {
+      if topic.numeric_id().is_some() {
+        Ok(topic)
+      } else {
+        Err(ParseError {
+          input: input.to_string(),
+          message: "missing or non-integer numeric suffix".to_string(),
+        })
+      }
+    }
+    Some(kind) => Err(ParseError {
+      input: input.to_string(),
+      message: format!(
+        "expected {:?} prefix but got {:?}",
+        expected_kind, kind
+      ),
+    }),
+    None => Err(ParseError {
+      input: input.to_string(),
+      message: format!(
+        "missing prefix; expected a {:?} topic in prefixed form",
+        expected_kind
+      ),
+    }),
   }
 }
 

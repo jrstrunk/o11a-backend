@@ -87,15 +87,18 @@ pub async fn init_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .execute(pool)
   .await?;
 
-  // ── Features ────────────────────────────────────────────────────────────
+  // ── User features ───────────────────────────────────────────────────────
+  // Mutable, user-authored companion to the pipeline's `features` output
+  // (which now lives in `audit.json`). Column shapes mirror
+  // `TopicMetadata::FeatureTopic`.
   sqlx::query(
     r#"
-    CREATE TABLE IF NOT EXISTS features (
+    CREATE TABLE IF NOT EXISTS user_features (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         audit_id TEXT NOT NULL,
         name TEXT NOT NULL,
         description TEXT NOT NULL,
-        author_id INTEGER NOT NULL DEFAULT 0,
+        author_id INTEGER NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
     "#,
@@ -104,20 +107,40 @@ pub async fn init_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .await?;
 
   sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_features_audit ON features(audit_id)",
+    "CREATE INDEX IF NOT EXISTS idx_user_features_audit ON user_features(audit_id)",
   )
   .execute(pool)
   .await?;
 
-  // ── Requirements ────────────────────────────────────────────────────────
+  // ── User requirements ───────────────────────────────────────────────────
+  // Column shapes mirror `TopicMetadata::RequirementTopic`.
   sqlx::query(
     r#"
-    CREATE TABLE IF NOT EXISTS requirements (
+    CREATE TABLE IF NOT EXISTS user_requirements (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        audit_id TEXT NOT NULL,
         description TEXT NOT NULL,
         section_topic TEXT,
-        author_id INTEGER NOT NULL DEFAULT 0,
+        author_id INTEGER NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    "#,
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_user_requirements_audit ON user_requirements(audit_id)",
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    r#"
+    CREATE TABLE IF NOT EXISTS user_requirement_documentation_topics (
+        user_requirement_id INTEGER NOT NULL,
+        documentation_topic TEXT NOT NULL,
+        PRIMARY KEY (user_requirement_id, documentation_topic)
     )
     "#,
   )
@@ -139,25 +162,6 @@ pub async fn init_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
   sqlx::query(
     "CREATE INDEX IF NOT EXISTS idx_req_source_topics_req ON requirement_source_topics(requirement_id)",
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    r#"
-    CREATE TABLE IF NOT EXISTS requirement_documentation_topics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        requirement_id INTEGER NOT NULL,
-        topic_id TEXT NOT NULL,
-        UNIQUE(requirement_id, topic_id)
-    )
-    "#,
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_req_doc_topics_req ON requirement_documentation_topics(requirement_id)",
   )
   .execute(pool)
   .await?;
@@ -231,38 +235,37 @@ pub async fn init_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .execute(pool)
   .await?;
 
-  // ── Semantic links ──────────────────────────────────────────────────────
+  // ── User functional semantics ───────────────────────────────────────────
+  // Column shapes mirror `TopicMetadata::FunctionalSemanticTopic`.
   sqlx::query(
     r#"
-    CREATE TABLE IF NOT EXISTS semantic_links (
+    CREATE TABLE IF NOT EXISTS user_functional_semantics (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         audit_id TEXT NOT NULL,
+        description TEXT NOT NULL,
         declaration_topic TEXT NOT NULL,
-        semantic_text TEXT NOT NULL,
-        author_id INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        UNIQUE(audit_id, declaration_topic, semantic_text)
+        author_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
     "#,
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_user_functional_semantics_audit ON user_functional_semantics(audit_id)",
   )
   .execute(pool)
   .await?;
 
   sqlx::query(
     r#"
-    CREATE TABLE IF NOT EXISTS semantic_link_docs (
-        semantic_link_id INTEGER NOT NULL,
+    CREATE TABLE IF NOT EXISTS user_functional_semantic_documentation_topics (
+        user_functional_semantic_id INTEGER NOT NULL,
         documentation_topic TEXT NOT NULL,
-        UNIQUE(semantic_link_id, documentation_topic),
-        FOREIGN KEY (semantic_link_id) REFERENCES semantic_links(id) ON DELETE CASCADE
+        PRIMARY KEY (user_functional_semantic_id, documentation_topic)
     )
     "#,
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_semantic_links_audit ON semantic_links(audit_id)",
   )
   .execute(pool)
   .await?;
@@ -342,15 +345,16 @@ pub async fn init_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .execute(pool)
   .await?;
 
-  // ── Behaviors ───────────────────────────────────────────────────────────
+  // ── User behaviors ──────────────────────────────────────────────────────
+  // Column shapes mirror `TopicMetadata::BehaviorTopic`.
   sqlx::query(
     r#"
-    CREATE TABLE IF NOT EXISTS behaviors (
+    CREATE TABLE IF NOT EXISTS user_behaviors (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         audit_id TEXT NOT NULL,
-        member_topic TEXT NOT NULL,
         description TEXT NOT NULL,
-        author_id INTEGER NOT NULL DEFAULT 0,
+        member_topic TEXT NOT NULL,
+        author_id INTEGER NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
     "#,
@@ -359,68 +363,35 @@ pub async fn init_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .await?;
 
   sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_behaviors_audit ON behaviors(audit_id)",
+    "CREATE INDEX IF NOT EXISTS idx_user_behaviors_audit ON user_behaviors(audit_id)",
   )
   .execute(pool)
   .await?;
 
+  // ── User feature-requirement links ──────────────────────────────────────
+  // `requirement_topic` may reference either a pipeline or a user requirement.
   sqlx::query(
     r#"
-    CREATE TABLE IF NOT EXISTS behavior_source_topics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        behavior_id INTEGER NOT NULL,
-        topic_id TEXT NOT NULL,
-        UNIQUE(behavior_id, topic_id)
+    CREATE TABLE IF NOT EXISTS user_feature_requirement_links (
+        user_feature_id INTEGER NOT NULL,
+        requirement_topic TEXT NOT NULL,
+        PRIMARY KEY (user_feature_id, requirement_topic)
     )
     "#,
   )
   .execute(pool)
   .await?;
 
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_beh_source_topics_beh ON behavior_source_topics(behavior_id)",
-  )
-  .execute(pool)
-  .await?;
-
-  // ── Feature-requirement links ───────────────────────────────────────────
+  // ── User feature-behavior links ─────────────────────────────────────────
+  // `behavior_topic` may reference either a pipeline or a user behavior.
   sqlx::query(
     r#"
-    CREATE TABLE IF NOT EXISTS feature_requirement_links (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        audit_id TEXT NOT NULL,
-        feature_id INTEGER NOT NULL,
-        requirement_id INTEGER NOT NULL,
-        UNIQUE(feature_id, requirement_id)
+    CREATE TABLE IF NOT EXISTS user_feature_behavior_links (
+        user_feature_id INTEGER NOT NULL,
+        behavior_topic TEXT NOT NULL,
+        PRIMARY KEY (user_feature_id, behavior_topic)
     )
     "#,
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_frl_audit ON feature_requirement_links(audit_id)",
-  )
-  .execute(pool)
-  .await?;
-
-  // ── Feature-behavior links ──────────────────────────────────────────────
-  sqlx::query(
-    r#"
-    CREATE TABLE IF NOT EXISTS feature_behavior_links (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        audit_id TEXT NOT NULL,
-        feature_id INTEGER NOT NULL,
-        behavior_id INTEGER NOT NULL,
-        UNIQUE(feature_id, behavior_id)
-    )
-    "#,
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_fbl_audit ON feature_behavior_links(audit_id)",
   )
   .execute(pool)
   .await?;

@@ -7,11 +7,11 @@ use axum::{
 use serde::Deserialize;
 
 use crate::state::{CachedTopicView, FrontendState};
-use o11a_core::api::handlers::features_for_topic;
 use o11a_core::core::{
   self,
   topic::{self, TopicKind, new_topic},
 };
+use o11a_core::feature_lookup::features_for_topic;
 
 // ============================================================================
 // Source text handler (HTML)

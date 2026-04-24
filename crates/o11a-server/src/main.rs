@@ -1,10 +1,15 @@
-use o11a_core::api::{AppState, routes};
+mod api;
+mod websocket;
+
 use o11a_core::collaborator::db as collab_db;
 use o11a_core::core::{self, project};
 use o11a_core::db;
 use o11a_core::report::{self, AuditReport};
+use o11a_core::state::AppState;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use crate::api::routes;
 
 #[tokio::main]
 async fn main() {
@@ -54,46 +59,69 @@ async fn main() {
   project::load_project(project_root, &audit_id, &data_context)
     .expect("Unable to load project");
 
-  // Load pipeline output from audit.json if present. This is the new
-  // handoff from `o11a-analyze`. If the file is missing, the pipeline
-  // output will come from the SQLite fallback below.
+  // Load pipeline output from audit.json. This is the handoff from
+  // `o11a-analyze`; without it the server has no pipeline data to serve,
+  // so the server refuses to start.
   let report_path = audit_report_path(project_root);
-  let loaded_from_report = match load_report(&report_path) {
-    Ok(Some(report)) => {
-      let mut ctx = data_context.lock().unwrap();
-      if let Some(audit_data) = ctx.get_audit_mut(&audit_id) {
-        match report::apply_report(&audit_id, audit_data, &report) {
-          Ok(()) => {
-            println!(
-              "Applied audit report from {} (schema v{}, generated {})",
-              report_path.display(),
-              report.schema_version,
-              report.generated_at
-            );
-            true
-          }
-          Err(e) => {
-            eprintln!("Warning: failed to apply audit report: {}", e);
-            false
-          }
-        }
-      } else {
-        eprintln!("Warning: audit '{}' not initialized after load_project", audit_id);
-        false
-      }
-    }
+  let report = match load_report(&report_path) {
+    Ok(Some(report)) => report,
     Ok(None) => {
-      println!(
-        "No audit report at {}; falling back to pipeline data in SQLite.",
+      eprintln!(
+        "error: no audit report found at {}. Run `o11a-analyze` first to produce audit.json.",
         report_path.display()
       );
-      false
+      std::process::exit(1);
     }
     Err(e) => {
-      eprintln!("Warning: could not read audit report at {}: {}", report_path.display(), e);
-      false
+      eprintln!(
+        "error: could not read audit report at {}: {}",
+        report_path.display(),
+        e
+      );
+      std::process::exit(1);
     }
   };
+
+  {
+    let mut ctx = data_context.lock().unwrap();
+    let audit_data = ctx.get_audit_mut(&audit_id).unwrap_or_else(|| {
+      eprintln!(
+        "error: audit '{}' not initialized after load_project",
+        audit_id
+      );
+      std::process::exit(1);
+    });
+    if let Err(e) = report::apply_report(&audit_id, audit_data, &report) {
+      eprintln!("error: failed to apply audit report: {}", e);
+      std::process::exit(1);
+    }
+    println!(
+      "Applied audit report from {} (schema v{}, generated {})",
+      report_path.display(),
+      report.schema_version,
+      report.generated_at
+    );
+  }
+
+  // Hydrate user-created entities from the collaboration DB. This runs after
+  // `apply_report` has reseeded the ID counters, so user IDs and pipeline IDs
+  // share the same `i32` space without collision.
+  {
+    let mut ctx = data_context.lock().unwrap();
+    let audit_data = ctx.get_audit_mut(&audit_id).unwrap_or_else(|| {
+      eprintln!(
+        "error: audit '{}' not initialized before user-entity load",
+        audit_id
+      );
+      std::process::exit(1);
+    });
+    if let Err(e) =
+      collab_db::apply_user_entities(&pool, &audit_id, audit_data).await
+    {
+      eprintln!("error: failed to load user-created entities: {}", e);
+      std::process::exit(1);
+    }
+  }
 
   // Load and parse all comments (collaboration state, unaffected by the
   // JSON handoff).
@@ -110,26 +138,7 @@ async fn main() {
 
   println!("Loaded {} comments", comment_count);
 
-  // Load features/requirements/behaviors from SQLite only if the JSON
-  // report was not available. This path is retained for transitional
-  // compatibility and will be removed once pipeline output is written
-  // exclusively to audit.json.
-  if !loaded_from_report {
-    println!("Loading pipeline data from SQLite (legacy path)...");
-    let feature_count = {
-      let mut ctx = data_context.lock().unwrap();
-      collab_db::load_all_features(&pool, &mut ctx)
-        .await
-        .unwrap_or_else(|e| {
-          eprintln!("Warning: Failed to load features: {}", e);
-          0
-        })
-    };
-    println!("Loaded {} features from SQLite", feature_count);
-  }
-
-  // Always rebuild reverse indexes after pipeline data is in place,
-  // regardless of whether it came from JSON or SQLite.
+  // Rebuild reverse indexes after pipeline data is in place.
   {
     let mut ctx = data_context.lock().unwrap();
     for audit_data in ctx.audits.values_mut() {
@@ -151,7 +160,8 @@ async fn main() {
   // crate serves the HTML-returning endpoints. They run in the same process
   // and share the same `AppState` (the frontend wraps it with rendering
   // caches). Merging keeps a single listener socket.
-  let frontend_state = o11a_web_backend::state::FrontendState::new(state.clone());
+  let frontend_state =
+    o11a_web_backend::state::FrontendState::new(state.clone());
   let app = routes::create_router(state)
     .merge(o11a_web_backend::routes::create_router(frontend_state));
 
@@ -177,8 +187,8 @@ fn audit_report_path(project_root: &Path) -> PathBuf {
   project_root.join("audit.json")
 }
 
-/// Load the audit report from `path`, returning `Ok(None)` when the file
-/// does not exist so callers can transparently fall back to SQLite.
+/// Load the audit report from `path`. Returns `Ok(None)` when the file
+/// is absent so the caller can produce its own error message.
 fn load_report(path: &Path) -> Result<Option<AuditReport>, String> {
   match std::fs::read_to_string(path) {
     Ok(body) => {
@@ -188,5 +198,20 @@ fn load_report(path: &Path) -> Result<Option<AuditReport>, String> {
     }
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
     Err(e) => Err(e.to_string()),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn router_construction_does_not_panic() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+      .connect("sqlite::memory:")
+      .await
+      .expect("in-memory sqlite pool");
+    let state = AppState::new(pool, core::new_data_context());
+    let _ = routes::create_router(state);
   }
 }

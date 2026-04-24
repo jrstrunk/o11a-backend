@@ -10,7 +10,7 @@
 //! types.
 
 use crate::collaborator::agent::task;
-use crate::collaborator::models::AUTHOR_AGENT_LARGE;
+use crate::collaborator::models::AUTHOR_SYSTEM;
 use crate::core::{self, DataContext, topic};
 use crate::ids;
 
@@ -37,21 +37,20 @@ pub struct PipelineState {
 pub async fn run_full_pipeline(
   state: &PipelineState,
   audit_id: &str,
-  generated_at: &str,
 ) -> Result<(), String> {
   println!("Starting full analysis pipeline for audit {}", audit_id);
 
   println!("\n[1/4] Semantic Linking");
-  build_semantic_links(state, audit_id, generated_at).await?;
+  build_semantic_links(state, audit_id).await?;
 
   println!("\n[2/4] Requirement Extraction");
-  build_requirements(state, audit_id, generated_at).await?;
+  build_requirements(state, audit_id).await?;
 
   println!("\n[3/4] Behavior Extraction");
-  build_behaviors(state, audit_id, generated_at).await?;
+  build_behaviors(state, audit_id).await?;
 
   println!("\n[4/4] Feature Synthesis");
-  synthesize_features(state, audit_id, generated_at).await?;
+  synthesize_features(state, audit_id).await?;
 
   println!("\nPipeline complete for audit {}", audit_id);
   Ok(())
@@ -62,7 +61,6 @@ pub async fn run_full_pipeline(
 pub async fn build_requirements(
   state: &PipelineState,
   audit_id: &str,
-  generated_at: &str,
 ) -> Result<(), String> {
   let documentation_files = {
     let ctx = state
@@ -146,7 +144,6 @@ pub async fn build_requirements(
     if let core::TopicMetadata::RequirementTopic {
       description,
       section_topic,
-      author_id,
       ..
     } = metadata
     {
@@ -156,8 +153,8 @@ pub async fn build_requirements(
           topic: new_req_topic,
           description,
           section_topic,
-          author_id,
-          created_at: generated_at.to_string(),
+          author_id: AUTHOR_SYSTEM,
+          created_at: None,
         },
       );
     }
@@ -195,7 +192,6 @@ pub async fn build_requirements(
 pub async fn synthesize_features(
   state: &PipelineState,
   audit_id: &str,
-  generated_at: &str,
 ) -> Result<(), String> {
   let (requirements_json, behaviors_json) = {
     let ctx = state
@@ -242,10 +238,7 @@ pub async fn synthesize_features(
       .or_insert_with(|| topic::new_feature_topic(ids::allocate_feature_id()))
       .clone();
     if let core::TopicMetadata::FeatureTopic {
-      name,
-      description,
-      author_id,
-      ..
+      name, description, ..
     } = metadata
     {
       new_topic_metadata.insert(
@@ -254,8 +247,8 @@ pub async fn synthesize_features(
           topic: new_feat_topic,
           name,
           description,
-          author_id,
-          created_at: generated_at.to_string(),
+          author_id: AUTHOR_SYSTEM,
+          created_at: None,
         },
       );
     }
@@ -312,7 +305,6 @@ pub async fn synthesize_features(
 pub async fn build_behaviors(
   state: &PipelineState,
   audit_id: &str,
-  generated_at: &str,
 ) -> Result<(), String> {
   use crate::collaborator::agent::context;
 
@@ -370,8 +362,8 @@ pub async fn build_behaviors(
         topic: beh_topic,
         description: description.clone(),
         member_topic: member_topic.clone(),
-        author_id: AUTHOR_AGENT_LARGE,
-        created_at: generated_at.to_string(),
+        author_id: AUTHOR_SYSTEM,
+        created_at: None,
       },
     );
   }
@@ -407,7 +399,6 @@ pub async fn build_behaviors(
 pub async fn build_semantic_links(
   state: &PipelineState,
   audit_id: &str,
-  generated_at: &str,
 ) -> Result<(), String> {
   use crate::collaborator::agent::context;
 
@@ -884,8 +875,9 @@ pub async fn build_semantic_links(
   // declaration_topic is always the base.
   let link_count = all_links.len();
   for link in all_links {
-    let sem_topic =
-      topic::new_functional_property_topic(ids::allocate_functional_semantic_id());
+    let sem_topic = topic::new_functional_property_topic(
+      ids::allocate_functional_semantic_id(),
+    );
 
     audit_data.topic_metadata.insert(
       sem_topic.clone(),
@@ -894,8 +886,8 @@ pub async fn build_semantic_links(
         description: link.description,
         declaration_topic: link.declaration_topic,
         documentation_topics: link.documentation_topics,
-        author_id: AUTHOR_AGENT_LARGE,
-        created_at: generated_at.to_string(),
+        author_id: AUTHOR_SYSTEM,
+        created_at: None,
       },
     );
   }

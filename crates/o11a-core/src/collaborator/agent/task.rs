@@ -262,7 +262,7 @@ fn parse_requirements_response(
           description: raw_req.description,
           section_topic: section_topic.clone(),
           author_id: AUTHOR_AGENT_LARGE,
-          created_at: String::new(),
+          created_at: None,
         },
       );
 
@@ -1168,7 +1168,7 @@ pub async fn synthesize_features(
         name: raw.name,
         description: raw.description,
         author_id: AUTHOR_AGENT_LARGE,
-        created_at: String::new(),
+        created_at: None,
       },
     );
   }

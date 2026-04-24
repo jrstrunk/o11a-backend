@@ -1,4 +1,4 @@
-use crate::collaborator::CommentEvent;
+use crate::collaborator::AuditEvent;
 use crate::core::DataContext;
 use sqlx::SqlitePool;
 use std::sync::{Arc, Mutex};
@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 pub struct AppState {
   pub db: SqlitePool,
   pub data_context: Arc<Mutex<DataContext>>,
-  pub comment_broadcast: broadcast::Sender<CommentEvent>,
+  pub event_broadcast: broadcast::Sender<AuditEvent>,
 }
 
 impl AppState {
@@ -17,7 +17,7 @@ impl AppState {
     Self {
       db,
       data_context: Arc::new(Mutex::new(data_context)),
-      comment_broadcast: tx,
+      event_broadcast: tx,
     }
   }
 }

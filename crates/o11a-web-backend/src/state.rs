@@ -1,4 +1,4 @@
-use o11a_core::api::AppState;
+use o11a_core::state::AppState;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

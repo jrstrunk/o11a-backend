@@ -3460,7 +3460,7 @@ mod tests {
         declaration_topic: event_topic.clone(),
         documentation_topics: vec![],
         author_id: 0,
-        created_at: String::new(),
+        created_at: None,
       },
     );
     audit_data
