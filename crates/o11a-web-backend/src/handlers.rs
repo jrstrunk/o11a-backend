@@ -7,7 +7,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::state::{CachedTopicView, FrontendState};
-use o11a_core::core::{
+use o11a_core::domain::{
   self,
   topic::{self, new_topic},
 };
@@ -295,7 +295,7 @@ pub async fn get_documentation_panel(
     }
 
     if matches!(t, topic::Topic::FunctionalProperty(_))
-      && let Some(core::TopicMetadata::FunctionalSemanticTopic {
+      && let Some(domain::TopicMetadata::FunctionalSemanticTopic {
         documentation_topics,
         ..
       }) = audit_data.topic_metadata.get(&t)
@@ -309,8 +309,8 @@ pub async fn get_documentation_panel(
 
     if let Some(metadata) = audit_data.topic_metadata.get(&t) {
       let member = match metadata.scope() {
-        core::Scope::Member { member, .. }
-        | core::Scope::ContainingBlock { member, .. } => Some(*member),
+        domain::Scope::Member { member, .. }
+        | domain::Scope::ContainingBlock { member, .. } => Some(*member),
         _ => None,
       };
       if let Some(mt) = member
@@ -322,7 +322,7 @@ pub async fn get_documentation_panel(
   }
 
   for t in &related_topics {
-    if let Some(core::TopicMetadata::NamedTopic { doc_references, .. }) =
+    if let Some(domain::TopicMetadata::NamedTopic { doc_references, .. }) =
       audit_data.topic_metadata.get(t)
     {
       for mt in doc_references {
@@ -334,7 +334,7 @@ pub async fn get_documentation_panel(
 
     if let Some(sem_topics) = audit_data.declaration_semantics.get(t) {
       for sem_topic in sem_topics {
-        if let Some(core::TopicMetadata::FunctionalSemanticTopic {
+        if let Some(domain::TopicMetadata::FunctionalSemanticTopic {
           documentation_topics,
           ..
         }) = audit_data.topic_metadata.get(sem_topic)

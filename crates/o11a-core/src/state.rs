@@ -1,5 +1,5 @@
 use crate::collaborator::AuditEvent;
-use crate::core::DataContext;
+use crate::domain::DataContext;
 use sqlx::SqlitePool;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;

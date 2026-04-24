@@ -1,4 +1,4 @@
-use crate::core::{self, AuditData, topic};
+use crate::domain::{self, AuditData, topic};
 
 /// Find feature topics for any topic by walking the appropriate chain:
 /// - Feature topic: returns itself
@@ -15,7 +15,7 @@ pub fn features_for_topic(
     topic::Topic::Feature(_) => {
       if matches!(
         audit_data.topic_metadata.get(t),
-        Some(core::TopicMetadata::FeatureTopic { .. })
+        Some(domain::TopicMetadata::FeatureTopic { .. })
       ) {
         features.push(*t);
       }
@@ -43,13 +43,13 @@ pub fn features_for_topic(
   // Code topic: determine the member topic (self if already a member, or walk up)
   let member_topic = if let Some(metadata) = audit_data.topic_metadata.get(t) {
     match metadata {
-      core::TopicMetadata::NamedTopic {
-        kind: core::NamedTopicKind::Function(_) | core::NamedTopicKind::Modifier,
+      domain::TopicMetadata::NamedTopic {
+        kind: domain::NamedTopicKind::Function(_) | domain::NamedTopicKind::Modifier,
         ..
       } => Some(*t),
       _ => match metadata.scope() {
-        core::Scope::Member { member, .. }
-        | core::Scope::ContainingBlock { member, .. } => Some(*member),
+        domain::Scope::Member { member, .. }
+        | domain::Scope::ContainingBlock { member, .. } => Some(*member),
         _ => None,
       },
     }
@@ -65,7 +65,7 @@ pub fn features_for_topic(
   // Find features via behaviors for this member
   for (ft, beh_topics) in &audit_data.feature_behavior_links {
     for bt in beh_topics {
-      if let Some(core::TopicMetadata::BehaviorTopic {
+      if let Some(domain::TopicMetadata::BehaviorTopic {
         member_topic: bmt, ..
       }) = audit_data.topic_metadata.get(bt)
         && *bmt == member_topic

@@ -10,8 +10,8 @@
 //! types.
 
 use crate::collaborator::agent::task;
-use crate::collaborator::models::AUTHOR_SYSTEM;
-use crate::core::{self, DataContext, topic};
+use crate::collaborator::models::Author;
+use crate::domain::{self, DataContext, topic};
 use crate::ids;
 
 use std::sync::{Arc, Mutex};
@@ -99,11 +99,11 @@ pub async fn build_requirements(
     std::collections::HashMap::new();
   let mut new_requirements: std::collections::BTreeMap<
     topic::Topic,
-    core::Requirement,
+    domain::Requirement,
   > = std::collections::BTreeMap::new();
   let mut new_topic_metadata: std::collections::BTreeMap<
     topic::Topic,
-    core::TopicMetadata,
+    domain::TopicMetadata,
   > = std::collections::BTreeMap::new();
   let mut new_section_requirements: std::collections::BTreeMap<
     topic::Topic,
@@ -140,7 +140,7 @@ pub async fn build_requirements(
       Some(t) => *t,
       None => continue,
     };
-    if let core::TopicMetadata::RequirementTopic {
+    if let domain::TopicMetadata::RequirementTopic {
       description,
       section_topic,
       ..
@@ -148,11 +148,11 @@ pub async fn build_requirements(
     {
       new_topic_metadata.insert(
         new_req_topic,
-        core::TopicMetadata::RequirementTopic {
+        domain::TopicMetadata::RequirementTopic {
           topic: new_req_topic,
           description,
           section_topic,
-          author_id: AUTHOR_SYSTEM,
+          author: Author::System,
           created_at: None,
         },
       );
@@ -171,8 +171,8 @@ pub async fn build_requirements(
   audit_data.topic_metadata.retain(|_, m| {
     !matches!(
       m,
-      core::TopicMetadata::FeatureTopic { .. }
-        | core::TopicMetadata::RequirementTopic { .. }
+      domain::TopicMetadata::FeatureTopic { .. }
+        | domain::TopicMetadata::RequirementTopic { .. }
     )
   });
 
@@ -181,7 +181,7 @@ pub async fn build_requirements(
   audit_data.topic_metadata.extend(new_topic_metadata);
   audit_data.feature_requirement_links.clear();
   audit_data.feature_behavior_links.clear();
-  core::rebuild_feature_context(audit_data);
+  domain::rebuild_feature_context(audit_data);
 
   println!("  Stored {} requirements in DataContext", req_count);
   Ok(())
@@ -220,7 +220,7 @@ pub async fn synthesize_features(
     std::collections::HashMap::new();
   let mut new_topic_metadata: std::collections::BTreeMap<
     topic::Topic,
-    core::TopicMetadata,
+    domain::TopicMetadata,
   > = std::collections::BTreeMap::new();
   let mut new_feature_requirement_links: std::collections::BTreeMap<
     topic::Topic,
@@ -235,17 +235,17 @@ pub async fn synthesize_features(
     let new_feat_topic = *id_remap
       .entry(old_feat_topic)
       .or_insert_with(|| topic::new_feature_topic(ids::allocate_feature_id()));
-    if let core::TopicMetadata::FeatureTopic {
+    if let domain::TopicMetadata::FeatureTopic {
       name, description, ..
     } = metadata
     {
       new_topic_metadata.insert(
         new_feat_topic,
-        core::TopicMetadata::FeatureTopic {
+        domain::TopicMetadata::FeatureTopic {
           topic: new_feat_topic,
           name,
           description,
-          author_id: AUTHOR_SYSTEM,
+          author: Author::System,
           created_at: None,
         },
       );
@@ -285,7 +285,7 @@ pub async fn synthesize_features(
 
   audit_data
     .topic_metadata
-    .retain(|_, m| !matches!(m, core::TopicMetadata::FeatureTopic { .. }));
+    .retain(|_, m| !matches!(m, domain::TopicMetadata::FeatureTopic { .. }));
   audit_data.feature_requirement_links.clear();
   audit_data.feature_behavior_links.clear();
 
@@ -293,7 +293,7 @@ pub async fn synthesize_features(
   audit_data.feature_requirement_links = new_feature_requirement_links;
   audit_data.feature_behavior_links = new_feature_behavior_links;
 
-  core::rebuild_feature_context(audit_data);
+  domain::rebuild_feature_context(audit_data);
   println!("  Stored {} features in DataContext", feature_count);
 
   Ok(())
@@ -356,11 +356,11 @@ pub async fn build_behaviors(
 
     new_metadata.insert(
       beh_topic,
-      core::TopicMetadata::BehaviorTopic {
+      domain::TopicMetadata::BehaviorTopic {
         topic: beh_topic,
         description: description.clone(),
         member_topic: *member_topic,
-        author_id: AUTHOR_SYSTEM,
+        author: Author::System,
         created_at: None,
       },
     );
@@ -378,10 +378,10 @@ pub async fn build_behaviors(
   // Clear old behaviors
   audit_data
     .topic_metadata
-    .retain(|_, m| !matches!(m, core::TopicMetadata::BehaviorTopic { .. }));
+    .retain(|_, m| !matches!(m, domain::TopicMetadata::BehaviorTopic { .. }));
 
   audit_data.topic_metadata.extend(new_metadata);
-  core::rebuild_feature_context(audit_data);
+  domain::rebuild_feature_context(audit_data);
 
   println!(
     "  Completed behavior extraction: {} behaviors",
@@ -622,7 +622,7 @@ pub async fn build_semantic_links(
   // ---- Pass 3: semantics extraction (doc-first, code for disambiguation) ----
   // Batched by doc child section: for each (section, doc_topic) group, gather
   // all matched members' declarations and source, send one pass3 call.
-  let mut all_links: Vec<core::SemanticLink> = Vec::new();
+  let mut all_links: Vec<domain::SemanticLink> = Vec::new();
   let mut pass3_handles = Vec::new();
 
   // (a) Member-scoped: batched by doc_topic groups from pass2
@@ -778,7 +778,7 @@ pub async fn build_semantic_links(
 
   let mut by_declaration: std::collections::BTreeMap<
     topic::Topic,
-    Vec<core::SemanticLink>,
+    Vec<domain::SemanticLink>,
   > = std::collections::BTreeMap::new();
   for link in all_links {
     by_declaration
@@ -788,7 +788,7 @@ pub async fn build_semantic_links(
   }
 
   let mut condense_handles = Vec::new();
-  let mut pass_through: Vec<core::SemanticLink> = Vec::new();
+  let mut pass_through: Vec<domain::SemanticLink> = Vec::new();
   let mut condense_count = 0usize;
   for (decl_topic, links) in &by_declaration {
     if links.len() <= 1 {
@@ -831,7 +831,7 @@ pub async fn build_semantic_links(
             doc_topics = original_links[0].documentation_topics.clone();
           }
 
-          all_links.push(core::SemanticLink {
+          all_links.push(domain::SemanticLink {
             documentation_topics: doc_topics,
             declaration_topic: decl_topic,
             description: entry.text,
@@ -864,7 +864,7 @@ pub async fn build_semantic_links(
 
   // Clear old functional-semantic metadata so repeated runs don't accumulate.
   audit_data.topic_metadata.retain(|_, m| {
-    !matches!(m, core::TopicMetadata::FunctionalSemanticTopic { .. })
+    !matches!(m, domain::TopicMetadata::FunctionalSemanticTopic { .. })
   });
 
   // Populate FunctionalSemanticTopic entries in topic_metadata with P-topic
@@ -879,19 +879,19 @@ pub async fn build_semantic_links(
 
     audit_data.topic_metadata.insert(
       sem_topic,
-      core::TopicMetadata::FunctionalSemanticTopic {
+      domain::TopicMetadata::FunctionalSemanticTopic {
         topic: sem_topic,
         description: link.description,
         declaration_topic: link.declaration_topic,
         documentation_topics: link.documentation_topics,
-        author_id: AUTHOR_SYSTEM,
+        author: Author::System,
         created_at: None,
       },
     );
   }
 
   // Rebuild the declaration_semantics reverse index from topic_metadata.
-  core::rebuild_feature_context(audit_data);
+  domain::rebuild_feature_context(audit_data);
 
   println!(
     "  Stored {} semantic links across {} declarations",

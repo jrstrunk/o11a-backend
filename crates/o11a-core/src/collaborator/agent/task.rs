@@ -40,8 +40,8 @@ use serde_json::json;
 
 use crate::collaborator::agent::context;
 use crate::collaborator::agent::router::{self, JsonSchema, TaskSize};
-use crate::collaborator::models::AUTHOR_AGENT_LARGE;
-use crate::core::{self, AST, AuditData, Requirement, topic};
+use crate::collaborator::models::Author;
+use crate::domain::{self, AST, AuditData, Requirement, topic};
 
 /// Raw requirement as returned by the LLM (no topic ID yet).
 #[derive(Deserialize)]
@@ -221,7 +221,7 @@ static REQUIREMENTS_SCHEMA: LazyLock<JsonSchema> =
 /// Result of parsing LLM requirements: requirements grouped by section, no features.
 pub struct ParsedRequirements {
   pub requirements: BTreeMap<topic::Topic, Requirement>,
-  pub topic_metadata: BTreeMap<topic::Topic, core::TopicMetadata>,
+  pub topic_metadata: BTreeMap<topic::Topic, domain::TopicMetadata>,
   /// Section D-topic → R-topic list, preserving document structure
   pub section_requirements: BTreeMap<topic::Topic, Vec<topic::Topic>>,
 }
@@ -257,11 +257,11 @@ fn parse_requirements_response(
 
       topic_metadata.insert(
         req_topic,
-        core::TopicMetadata::RequirementTopic {
+        domain::TopicMetadata::RequirementTopic {
           topic: req_topic,
           description: raw_req.description,
           section_topic,
-          author_id: AUTHOR_AGENT_LARGE,
+          author: Author::AgentLarge,
           created_at: None,
         },
       );
@@ -587,7 +587,7 @@ static SEMANTIC_PASS3_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| {
 
 /// Result of LLM pass 3: semantic links for a (section, member) pair.
 pub struct SemanticLinkPass3Result {
-  pub links: Vec<core::SemanticLink>,
+  pub links: Vec<domain::SemanticLink>,
 }
 
 /// LLM pass 1: For each section, identify relevant contracts.
@@ -724,7 +724,7 @@ pub async fn semantic_link_pass3(
         .map(|d| topic::new_topic(d))
         .collect();
 
-      core::SemanticLink {
+      domain::SemanticLink {
         documentation_topics: if doc_topics.is_empty() {
           vec![*fallback_doc_topic]
         } else {
@@ -751,14 +751,14 @@ pub fn collect_documentation_sections(
     .topic_metadata
     .iter()
     .filter_map(|(t, m)| {
-      if let core::TopicMetadata::TitledTopic {
-        kind: core::TitledTopicKind::DocumentationSection,
+      if let domain::TopicMetadata::TitledTopic {
+        kind: domain::TitledTopicKind::DocumentationSection,
         scope,
         ..
       } = m
       {
         // Only top-level sections (Container scope = document root children)
-        if matches!(scope, core::Scope::Container { .. }) {
+        if matches!(scope, domain::Scope::Container { .. }) {
           return Some(*t);
         }
       }
@@ -983,7 +983,7 @@ static FEATURES_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
 
 /// Result of feature synthesis.
 pub struct SynthesizedFeatures {
-  pub topic_metadata: BTreeMap<topic::Topic, core::TopicMetadata>,
+  pub topic_metadata: BTreeMap<topic::Topic, domain::TopicMetadata>,
   /// Feature → requirement links (F-topic → [R-topics])
   pub feature_requirement_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Feature → behavior links (F-topic → [B-topics])
@@ -1005,7 +1005,7 @@ fn render_requirements_for_reconciliation(audit_data: &AuditData) -> String {
     let reqs: Vec<serde_json::Value> = req_topics
       .iter()
       .filter_map(|rt| {
-        if let Some(core::TopicMetadata::RequirementTopic {
+        if let Some(domain::TopicMetadata::RequirementTopic {
           description, ..
         }) = audit_data.topic_metadata.get(rt)
         {
@@ -1040,7 +1040,7 @@ fn render_requirements_for_reconciliation(audit_data: &AuditData) -> String {
     .keys()
     .filter(|rt| !in_sections.contains(rt))
     .filter_map(|rt| {
-      if let Some(core::TopicMetadata::RequirementTopic {
+      if let Some(domain::TopicMetadata::RequirementTopic {
         description, ..
       }) = audit_data.topic_metadata.get(rt)
       {
@@ -1079,7 +1079,7 @@ fn render_behaviors_for_reconciliation(audit_data: &AuditData) -> String {
     let behs: Vec<serde_json::Value> = beh_topics
       .iter()
       .filter_map(|bt| {
-        if let Some(core::TopicMetadata::BehaviorTopic {
+        if let Some(domain::TopicMetadata::BehaviorTopic {
           description, ..
         }) = audit_data.topic_metadata.get(bt)
         {
@@ -1163,11 +1163,11 @@ pub async fn synthesize_features(
 
     topic_metadata.insert(
       feature_topic,
-      core::TopicMetadata::FeatureTopic {
+      domain::TopicMetadata::FeatureTopic {
         topic: feature_topic,
         name: raw.name,
         description: raw.description,
-        author_id: AUTHOR_AGENT_LARGE,
+        author: Author::AgentLarge,
         created_at: None,
       },
     );

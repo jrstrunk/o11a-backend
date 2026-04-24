@@ -1,4 +1,4 @@
-use o11a_core::core::{NamedTopicKind, VariableMutability, topic};
+use o11a_core::domain::{NamedTopicKind, VariableMutability, topic};
 
 /// Escapes HTML special characters
 pub fn html_escape(s: &str) -> String {

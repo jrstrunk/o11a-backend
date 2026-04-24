@@ -11,7 +11,7 @@
 //! implementation references without needing a separate reference transfer phase.
 
 use crate::solidity::parser::generate_node_id;
-use o11a_core::core::{ContractKind, ProjectPath};
+use o11a_core::domain::{ContractKind, ProjectPath};
 use o11a_core::solidity::ast::{
   ASTNode, SolidityAST, VariableVisibility, contract_members,
   get_definition_parameters, get_function_return_parameters,

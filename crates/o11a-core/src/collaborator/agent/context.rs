@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::collaborator::parser as comment_parser;
-use crate::core::{
+use crate::domain::{
   self, AuditData, BlockAnnotationKind, CommentType, ContractKind,
   ControlFlowStatementKind, FunctionKind, NamedTopicKind, NamedTopicVisibility,
   Node, Reference, SourceChild, SourceContext, TitledTopicKind, TopicMetadata,
@@ -242,7 +242,7 @@ fn lookup_topic_comments(
   include_untrusted: bool,
 ) -> Vec<String> {
   let resolved =
-    core::resolve_transitive_topic(topic, &audit_data.topic_metadata);
+    domain::resolve_transitive_topic(topic, &audit_data.topic_metadata);
   let comment_topics = audit_data
     .comment_index
     .get(&resolved)
@@ -360,8 +360,8 @@ fn get_condition_topic(node: &ASTNode) -> Option<topic::Topic> {
 
 fn annotation_kind_to_string(kind: &BlockAnnotationKind) -> &'static str {
   match kind {
-    BlockAnnotationKind::If(core::ControlFlowBranch::True) => "if_true",
-    BlockAnnotationKind::If(core::ControlFlowBranch::False) => "if_false",
+    BlockAnnotationKind::If(domain::ControlFlowBranch::True) => "if_true",
+    BlockAnnotationKind::If(domain::ControlFlowBranch::False) => "if_false",
     BlockAnnotationKind::For => "for",
     BlockAnnotationKind::While => "while",
     BlockAnnotationKind::DoWhile => "do_while",
@@ -1372,7 +1372,7 @@ fn flatten_inline_recursive(
             ..
           } = child.resolve(&audit_data.nodes)
           {
-            let texts = core::semantic_texts_for_declaration(audit_data, t);
+            let texts = domain::semantic_texts_for_declaration(audit_data, t);
             if !texts.is_empty() {
               text.push_str(" (");
               text.push_str(&texts.join("; "));
@@ -1398,7 +1398,7 @@ fn flatten_inline_recursive(
         if let Some(t) = referenced_topic {
           refs.push(json!({"name": value, "topic": t.id()}));
           // Inject functional semantic inline when outside of InlineCode
-          let texts = core::semantic_texts_for_declaration(audit_data, t);
+          let texts = domain::semantic_texts_for_declaration(audit_data, t);
           if !texts.is_empty() {
             text.push_str(" (");
             text.push_str(&texts.join("; "));
@@ -1631,7 +1631,7 @@ pub fn render_documentation_ast_snippet(
           ..
         } = child.resolve(&audit_data.nodes)
         {
-          let texts = core::semantic_texts_for_declaration(audit_data, t);
+          let texts = domain::semantic_texts_for_declaration(audit_data, t);
           if !texts.is_empty() {
             semantic_suffix = format!(" ({})", texts.join("; "));
             break;
@@ -1901,7 +1901,7 @@ fn convert_reference(
 /// that only the path to the target is included.
 fn build_documentation_section_context(
   topic: &topic::Topic,
-  scope: &core::Scope,
+  scope: &domain::Scope,
   audit_data: &AuditData,
 ) -> Vec<AgentSourceGroup> {
   let ancestors = scope.ancestor_topics();
@@ -1997,12 +1997,12 @@ pub fn build_agent_topic_context(
   // Resolve through transitive chain so signature topics find their
   // definition's comments and mentions.
   let resolved_topic =
-    core::resolve_transitive_topic(&topic, &audit_data.topic_metadata);
+    domain::resolve_transitive_topic(&topic, &audit_data.topic_metadata);
 
   let topic_id_string = topic_id.to_string();
   let name = resolve_topic_name(&topic, audit_data);
 
-  let empty_ctx: Vec<crate::core::SourceContext> = vec![];
+  let empty_ctx: Vec<crate::domain::SourceContext> = vec![];
   let topic_ctx = audit_data
     .topic_context
     .get(&resolved_topic)
@@ -2026,7 +2026,7 @@ pub fn build_agent_topic_context(
       let (kind_str, sub_kind) = named_kind_to_string(kind);
 
       let expanded = if include_expanded_context {
-        let empty_ctx: Vec<crate::core::SourceContext> = vec![];
+        let empty_ctx: Vec<crate::domain::SourceContext> = vec![];
         let expanded_ctx = audit_data
           .expanded_topic_context
           .get(&topic)
@@ -2318,9 +2318,9 @@ pub fn render_contract_for_behavior_extraction(
       continue;
     };
     let in_contract = match metadata.scope() {
-      core::Scope::Component { component, .. } => *component == contract_topic,
-      core::Scope::Member { component, .. } => *component == contract_topic,
-      core::Scope::ContainingBlock { component, .. } => {
+      domain::Scope::Component { component, .. } => *component == contract_topic,
+      domain::Scope::Member { component, .. } => *component == contract_topic,
+      domain::Scope::ContainingBlock { component, .. } => {
         *component == contract_topic
       }
       _ => false,
@@ -2330,7 +2330,7 @@ pub fn render_contract_for_behavior_extraction(
     }
     let name = metadata.name().unwrap_or("");
     for sem_topic in sem_topics {
-      if let Some(core::TopicMetadata::FunctionalSemanticTopic {
+      if let Some(domain::TopicMetadata::FunctionalSemanticTopic {
         description,
         ..
       }) = audit_data.topic_metadata.get(sem_topic)
@@ -2392,7 +2392,7 @@ pub fn collect_contracts_for_behavior_extraction(
       continue;
     }
     let sol_ast = match ast {
-      core::AST::Solidity(sol_ast) => sol_ast,
+      domain::AST::Solidity(sol_ast) => sol_ast,
       _ => continue,
     };
     for node in &sol_ast.nodes {
@@ -2439,8 +2439,8 @@ pub fn render_member_declarations_for_semantics(
   // Collect declarations scoped to this member
   for (decl_topic, metadata) in &audit_data.topic_metadata {
     let in_member = match metadata.scope() {
-      core::Scope::Member { member, .. } => member == member_topic,
-      core::Scope::ContainingBlock { member, .. } => member == member_topic,
+      domain::Scope::Member { member, .. } => member == member_topic,
+      domain::Scope::ContainingBlock { member, .. } => member == member_topic,
       _ => false,
     };
     if !in_member {
@@ -2529,7 +2529,7 @@ pub fn render_member_source_for_semantics(
   // Find the AST node for this member
   for ast in audit_data.asts.values() {
     let sol_ast = match ast {
-      core::AST::Solidity(sol_ast) => sol_ast,
+      domain::AST::Solidity(sol_ast) => sol_ast,
       _ => continue,
     };
     for contract_node in &sol_ast.nodes {
@@ -2572,7 +2572,7 @@ pub fn render_contract_declarations_for_semantics(
 
   for (decl_topic, metadata) in &audit_data.topic_metadata {
     let at_component = match metadata.scope() {
-      core::Scope::Component { component, .. } => component == contract_topic,
+      domain::Scope::Component { component, .. } => component == contract_topic,
       _ => false,
     };
     if !at_component {
@@ -2598,7 +2598,7 @@ pub fn render_contract_declaration_signatures(
 ) -> String {
   for ast in audit_data.asts.values() {
     let sol_ast = match ast {
-      core::AST::Solidity(sol_ast) => sol_ast,
+      domain::AST::Solidity(sol_ast) => sol_ast,
       _ => continue,
     };
     for contract_node in &sol_ast.nodes {
@@ -2646,10 +2646,10 @@ pub fn mechanical_section_to_members(
     if let Some(metadata) = audit_data.topic_metadata.get(decl_topic) {
       match metadata.scope() {
         // Declaration is inside a member — add the member
-        core::Scope::Member {
+        domain::Scope::Member {
           member, component, ..
         }
-        | core::Scope::ContainingBlock {
+        | domain::Scope::ContainingBlock {
           member, component, ..
         } if component == contract_topic => {
           if !members.contains(member) {
@@ -2657,18 +2657,18 @@ pub fn mechanical_section_to_members(
           }
         }
         // Declaration is at component level (state variable) — find members that use it
-        core::Scope::Component { component, .. }
+        domain::Scope::Component { component, .. }
           if component == contract_topic =>
         {
           // Check function properties for mutations and calls referencing this variable
           for (fn_topic, props) in &audit_data.function_properties {
             let (mutations, _calls) = match props {
-              core::FunctionModProperties::FunctionProperties {
+              domain::FunctionModProperties::FunctionProperties {
                 mutations,
                 calls,
                 ..
               } => (mutations, calls),
-              core::FunctionModProperties::ModifierProperties {
+              domain::FunctionModProperties::ModifierProperties {
                 mutations,
                 calls,
                 ..
@@ -2721,7 +2721,7 @@ pub fn mechanical_semantic_links(
 
   for ast in audit_data.asts.values() {
     let doc_ast = match ast {
-      core::AST::Documentation(doc_ast) => doc_ast,
+      domain::AST::Documentation(doc_ast) => doc_ast,
       _ => continue,
     };
 
@@ -2827,15 +2827,15 @@ fn collect_mechanical_links_recursive(
         if let Some(metadata) = audit_data.topic_metadata.get(ref_topic) {
           let contract_topic = match metadata {
             TopicMetadata::NamedTopic {
-              kind: core::NamedTopicKind::Contract(_),
+              kind: domain::NamedTopicKind::Contract(_),
               ..
             } => Some(*ref_topic),
             _ => match metadata.scope() {
-              core::Scope::Component { component, .. } => {
+              domain::Scope::Component { component, .. } => {
                 Some(*component)
               }
-              core::Scope::Member { component, .. } => Some(*component),
-              core::Scope::ContainingBlock { component, .. } => {
+              domain::Scope::Member { component, .. } => Some(*component),
+              domain::Scope::ContainingBlock { component, .. } => {
                 Some(*component)
               }
               _ => None,
@@ -2895,7 +2895,7 @@ pub fn render_contract_list_for_semantic_linking(
       continue;
     }
     let sol_ast = match ast {
-      core::AST::Solidity(sol_ast) => sol_ast,
+      domain::AST::Solidity(sol_ast) => sol_ast,
       _ => continue,
     };
     for node in &sol_ast.nodes {
@@ -2966,7 +2966,7 @@ fn find_doc_node_by_id(
   fn search_node<'a>(
     node: &'a crate::documentation::ast::DocumentationNode,
     target_id: i32,
-    nodes_map: &'a std::collections::BTreeMap<topic::Topic, core::Node>,
+    nodes_map: &'a std::collections::BTreeMap<topic::Topic, domain::Node>,
   ) -> Option<&'a crate::documentation::ast::DocumentationNode> {
     let resolved = node.resolve(nodes_map);
     if resolved.node_id() == target_id {
@@ -2982,7 +2982,7 @@ fn find_doc_node_by_id(
 
   for ast in audit_data.asts.values() {
     let doc_ast = match ast {
-      core::AST::Documentation(doc_ast) => doc_ast,
+      domain::AST::Documentation(doc_ast) => doc_ast,
       _ => continue,
     };
     for node in &doc_ast.nodes {
@@ -2999,7 +2999,7 @@ fn find_doc_node_by_id(
 mod tests {
   use super::*;
   use crate::collaborator::synthetic;
-  use crate::core::{
+  use crate::domain::{
     ContractKind, NamedTopicKind, NamedTopicVisibility, Scope,
   };
   use crate::solidity::ast::SourceLocation;
@@ -3106,7 +3106,7 @@ mod tests {
     // `render_contract_members_for_semantic_linking` includes in its JSON output for
     // the member.
     let mut audit_data =
-      core::new_audit_data("test".to_string(), HashSet::new(), None);
+      domain::new_audit_data("test".to_string(), HashSet::new(), None);
 
     let (contract_node, group_topic, event_topic) = make_single_member_contract(
       1,
@@ -3134,7 +3134,7 @@ mod tests {
       TopicMetadata::UnnamedTopic {
         topic: group_topic.clone(),
         scope: Scope::Global,
-        kind: core::UnnamedTopicKind::ContractMemberGroup,
+        kind: domain::UnnamedTopicKind::ContractMemberGroup,
         transitive_topic: Some(event_topic.clone()),
       },
     );
@@ -3146,7 +3146,7 @@ mod tests {
       &event_topic,
       "Fires when the admin approves",
       CommentType::DevTechnical,
-      crate::collaborator::models::AUTHOR_DEV_TECHNICAL,
+      crate::collaborator::models::Author::DevTechnical,
       &mut audit_data,
     );
 
@@ -3183,7 +3183,7 @@ mod tests {
     // NOT flatten the group — it should emit the wrapper with the comment
     // attached so the agent sees the group header alongside its members.
     let mut audit_data =
-      core::new_audit_data("test".to_string(), HashSet::new(), None);
+      domain::new_audit_data("test".to_string(), HashSet::new(), None);
 
     let contract_id = 1;
     let contract_sig_id = 2;
@@ -3243,7 +3243,7 @@ mod tests {
       TopicMetadata::UnnamedTopic {
         topic: group_topic.clone(),
         scope: Scope::Global,
-        kind: core::UnnamedTopicKind::ContractMemberGroup,
+        kind: domain::UnnamedTopicKind::ContractMemberGroup,
         transitive_topic: None,
       },
     );
@@ -3254,7 +3254,7 @@ mod tests {
       &group_topic,
       "Admin lifecycle events",
       CommentType::DevTechnical,
-      crate::collaborator::models::AUTHOR_DEV_TECHNICAL,
+      crate::collaborator::models::Author::DevTechnical,
       &mut audit_data,
     );
 
@@ -3305,7 +3305,7 @@ mod tests {
     // That renderer only emits function/modifier members, so we use a
     // FunctionDefinition here.
     let mut audit_data =
-      core::new_audit_data("test".to_string(), HashSet::new(), None);
+      domain::new_audit_data("test".to_string(), HashSet::new(), None);
 
     let contract_id = 1;
     let contract_sig_id = 2;
@@ -3329,7 +3329,7 @@ mod tests {
         node_id: function_sig_id,
         src_location: dummy_src_location(),
         documentation: None,
-        kind: crate::core::FunctionKind::Function,
+        kind: crate::domain::FunctionKind::Function,
         modifiers: Box::new(ASTNode::ModifierList {
           node_id: modifiers_id,
           src_location: dummy_src_location(),
@@ -3393,7 +3393,7 @@ mod tests {
       TopicMetadata::UnnamedTopic {
         topic: group_topic.clone(),
         scope: Scope::Global,
-        kind: core::UnnamedTopicKind::ContractMemberGroup,
+        kind: domain::UnnamedTopicKind::ContractMemberGroup,
         transitive_topic: Some(event_topic.clone()),
       },
     );
@@ -3402,12 +3402,12 @@ mod tests {
       TopicMetadata::NamedTopic {
         topic: event_topic.clone(),
         scope: Scope::Component {
-          container: crate::core::ProjectPath {
+          container: crate::domain::ProjectPath {
             file_path: "test.sol".to_string(),
           },
           component: contract_topic.clone(),
         },
-        kind: NamedTopicKind::Function(crate::core::FunctionKind::Function),
+        kind: NamedTopicKind::Function(crate::domain::FunctionKind::Function),
         name: "doThing".to_string(),
         visibility: NamedTopicVisibility::Public,
         is_mutable: false,
@@ -3425,7 +3425,7 @@ mod tests {
       &event_topic,
       "Admin-only entry point",
       CommentType::DevTechnical,
-      crate::collaborator::models::AUTHOR_DEV_TECHNICAL,
+      crate::collaborator::models::Author::DevTechnical,
       &mut audit_data,
     );
 
@@ -3434,7 +3434,7 @@ mod tests {
       &event_topic,
       "Auditor: confirmed role-restricted",
       CommentType::Info,
-      0,
+      crate::collaborator::models::Author::System,
       &mut audit_data,
     );
 
@@ -3447,7 +3447,7 @@ mod tests {
         description: "Only callable by the admin role".to_string(),
         declaration_topic: event_topic.clone(),
         documentation_topics: vec![],
-        author_id: 0,
+        author: crate::collaborator::models::Author::System,
         created_at: None,
       },
     );

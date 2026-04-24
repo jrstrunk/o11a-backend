@@ -1,6 +1,6 @@
 use crate::code_refs as doc_parser;
-use crate::core;
-use crate::core::topic::Topic;
+use crate::domain;
+use crate::domain::topic::Topic;
 use serde::{Deserialize, Serialize};
 
 /// Inline-only AST node for comment content.
@@ -23,7 +23,7 @@ pub enum CommentNode {
   CodeIdentifier {
     value: String,
     referenced_topic: Option<Topic>,
-    kind: Option<core::NamedTopicKind>,
+    kind: Option<domain::NamedTopicKind>,
     referenced_name: Option<String>,
   },
   CodeText {
@@ -52,7 +52,7 @@ pub enum CommentNode {
 /// Anything that doesn't match these patterns is preserved as-is in Text nodes.
 pub fn parse_comment(
   content: &str,
-  audit_data: &core::AuditData,
+  audit_data: &domain::AuditData,
 ) -> (Vec<Topic>, Vec<CommentNode>) {
   let nodes = scan_inline_nodes(content, audit_data);
   let nodes = doc_parser::split_text_code_references(
@@ -99,7 +99,7 @@ fn collect_mentions(node: &CommentNode, out: &mut Vec<Topic>) {
 /// Scans input text left-to-right, producing inline CommentNode tokens.
 fn scan_inline_nodes(
   input: &str,
-  audit_data: &core::AuditData,
+  audit_data: &domain::AuditData,
 ) -> Vec<CommentNode> {
   let mut nodes = Vec::new();
   let mut text_buf = String::new();
@@ -261,7 +261,7 @@ fn scan_link(input: &str, start: usize) -> Option<(&str, &str, usize)> {
 /// Reuses shared tokenization helpers from the documentation parser.
 fn tokenize_comment_code(
   code: &str,
-  audit_data: &core::AuditData,
+  audit_data: &domain::AuditData,
 ) -> Vec<CommentNode> {
   let mut tokens = Vec::new();
   let mut chars = code.char_indices().peekable();

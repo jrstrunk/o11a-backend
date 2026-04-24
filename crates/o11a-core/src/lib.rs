@@ -1,7 +1,7 @@
 pub mod analysis_artifact;
 pub mod code_refs;
 pub mod collaborator;
-pub mod core;
+pub mod domain;
 pub mod db;
 pub mod documentation;
 pub mod feature_lookup;

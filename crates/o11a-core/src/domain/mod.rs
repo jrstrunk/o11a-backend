@@ -1551,7 +1551,7 @@ pub enum TopicMetadata {
     scope: Scope,
     target_topic: topic::Topic,
     comment_type: CommentType,
-    author_id: i64,
+    author: crate::collaborator::models::Author,
     created_at: String,
     mentioned_topics: Vec<topic::Topic>,
   },
@@ -1560,7 +1560,7 @@ pub enum TopicMetadata {
     topic: topic::Topic,
     name: String,
     description: String,
-    author_id: i64,
+    author: crate::collaborator::models::Author,
     /// `None` for pipeline-produced entities — the per-batch
     /// `generated_at` on the audit report already locates them in time.
     /// `Some` when authored by a user or a server-side agent.
@@ -1573,7 +1573,7 @@ pub enum TopicMetadata {
     description: String,
     /// The D-prefixed documentation section this requirement was extracted from
     section_topic: topic::Topic,
-    author_id: i64,
+    author: crate::collaborator::models::Author,
     /// `None` for pipeline-produced entities — see FeatureTopic for rationale.
     created_at: Option<String>,
   },
@@ -1583,7 +1583,7 @@ pub enum TopicMetadata {
     description: String,
     /// The N-prefixed code member (function/modifier/contract) this behavior belongs to
     member_topic: topic::Topic,
-    author_id: i64,
+    author: crate::collaborator::models::Author,
     /// `None` for pipeline-produced entities — see FeatureTopic for rationale.
     created_at: Option<String>,
   },
@@ -1597,7 +1597,7 @@ pub enum TopicMetadata {
     declaration_topic: topic::Topic,
     /// D-prefixed documentation topics this semantic was derived from.
     documentation_topics: Vec<topic::Topic>,
-    author_id: i64,
+    author: crate::collaborator::models::Author,
     /// `None` for pipeline-produced entities — see FeatureTopic for rationale.
     created_at: Option<String>,
   },
@@ -1607,7 +1607,7 @@ pub enum TopicMetadata {
     description: String,
     /// The non-pure subject this threat belongs to
     subject_topic: topic::Topic,
-    author_id: i64,
+    author: crate::collaborator::models::Author,
     created_at: String,
     /// Severity is assigned during impact analysis; None means pending
     severity: Option<ThreatSeverity>,
@@ -1617,7 +1617,7 @@ pub enum TopicMetadata {
     topic: topic::Topic,
     description: String,
     threat_topic: topic::Topic,
-    author_id: i64,
+    author: crate::collaborator::models::Author,
     created_at: String,
     /// Inherited from parent threat; None when threat severity is pending
     severity: Option<ThreatSeverity>,
@@ -1742,17 +1742,21 @@ impl TopicMetadata {
     }
   }
 
-  pub fn author_id(&self) -> Option<i64> {
+  pub fn author(&self) -> Option<crate::collaborator::models::Author> {
     match self {
-      TopicMetadata::CommentTopic { author_id, .. }
-      | TopicMetadata::FeatureTopic { author_id, .. }
-      | TopicMetadata::RequirementTopic { author_id, .. }
-      | TopicMetadata::BehaviorTopic { author_id, .. }
-      | TopicMetadata::FunctionalSemanticTopic { author_id, .. }
-      | TopicMetadata::ThreatTopic { author_id, .. }
-      | TopicMetadata::InvariantTopic { author_id, .. } => Some(*author_id),
+      TopicMetadata::CommentTopic { author, .. }
+      | TopicMetadata::FeatureTopic { author, .. }
+      | TopicMetadata::RequirementTopic { author, .. }
+      | TopicMetadata::BehaviorTopic { author, .. }
+      | TopicMetadata::FunctionalSemanticTopic { author, .. }
+      | TopicMetadata::ThreatTopic { author, .. }
+      | TopicMetadata::InvariantTopic { author, .. } => Some(*author),
       _ => None,
     }
+  }
+
+  pub fn author_id(&self) -> Option<i64> {
+    self.author().map(|a| a.as_i64())
   }
 
   /// Returns the description text for variants that have one. Maps to

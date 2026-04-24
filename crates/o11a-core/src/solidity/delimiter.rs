@@ -4,7 +4,7 @@
 //! (for `if`, `for`, `while`, `do-while`) without requiring any HTML
 //! knowledge inside this crate.
 
-use crate::core::topic::{self, new_node_topic};
+use crate::domain::topic::{self, new_node_topic};
 use crate::solidity::ast::ASTNode;
 use serde::Serialize;
 

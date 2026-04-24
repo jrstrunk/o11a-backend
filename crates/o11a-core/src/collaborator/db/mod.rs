@@ -1,6 +1,6 @@
 use crate::collaborator::models::*;
 use crate::collaborator::parser;
-use crate::core::{self, DataContext, topic};
+use crate::domain::{self, DataContext, topic};
 use sqlx::SqlitePool;
 
 pub mod user_entities;
@@ -34,7 +34,7 @@ pub fn ingest_comment(
 
   audit_data
     .nodes
-    .insert(comment_topic, core::Node::Comment(nodes));
+    .insert(comment_topic, domain::Node::Comment(nodes));
 
   let mut mentioned_topics: Vec<topic::Topic> = mentions.clone();
   mentioned_topics.sort_unstable();
@@ -42,10 +42,10 @@ pub fn ingest_comment(
 
   audit_data.topic_metadata.insert(
     comment_topic,
-    core::TopicMetadata::CommentTopic {
+    domain::TopicMetadata::CommentTopic {
       topic: comment_topic,
-      author_id: comment.author_id,
-      comment_type: core::CommentType::parse_str(&comment.comment_type)
+      author: comment.author_id,
+      comment_type: domain::CommentType::parse_str(&comment.comment_type)
         .unwrap_or_else(|| {
           panic!(
             "Unknown comment type '{}' in comment {}",
@@ -439,7 +439,7 @@ pub struct ConditionRow {
   pub subject_topic: String,
   pub condition_type: String,
   pub description: String,
-  pub author_id: i64,
+  pub author_id: Author,
   pub created_at: String,
 }
 
@@ -459,7 +459,7 @@ pub async fn create_condition(
   subject_topic: &str,
   condition_type: &str,
   description: &str,
-  author_id: i64,
+  author_id: Author,
 ) -> Result<ConditionRow, sqlx::Error> {
   let result = sqlx::query(
     r#"
@@ -565,7 +565,7 @@ pub struct ThreatRow {
   pub audit_id: String,
   pub subject_topic: String,
   pub description: String,
-  pub author_id: i64,
+  pub author_id: Author,
   pub created_at: String,
   pub severity: Option<String>,
 }
@@ -576,7 +576,7 @@ pub async fn create_threat(
   audit_id: &str,
   subject_topic: &str,
   description: &str,
-  author_id: i64,
+  author_id: Author,
   severity: Option<&str>,
 ) -> Result<ThreatRow, sqlx::Error> {
   let result = sqlx::query(
@@ -677,7 +677,7 @@ pub struct InvariantRow {
   pub id: i64,
   pub threat_id: i64,
   pub description: String,
-  pub author_id: i64,
+  pub author_id: Author,
   pub created_at: String,
   pub severity: Option<String>,
 }
@@ -687,7 +687,7 @@ pub async fn create_invariant(
   pool: &SqlitePool,
   threat_id: i64,
   description: &str,
-  author_id: i64,
+  author_id: Author,
   severity: Option<&str>,
 ) -> Result<InvariantRow, sqlx::Error> {
   let result = sqlx::query(

@@ -5,8 +5,8 @@ pub mod delimiter;
 // keeps working.
 pub use ast::*;
 
-// Re-export core types
-pub use crate::core::{
+// Re-export domain types
+pub use crate::domain::{
   ContractKind, DataContext, FunctionKind, FunctionModProperties,
   NamedTopicKind, Scope, TopicMetadata, UnnamedTopicKind,
 };

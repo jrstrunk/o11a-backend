@@ -1,11 +1,12 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sqlx::FromRow;
 
 pub use crate::collaborator::scope_info::ScopeInfo;
-pub use crate::core::CommentType;
-use crate::core::topic;
+pub use crate::domain::CommentType;
+use crate::domain::topic;
 
-/// Reserved author IDs
+/// Reserved author IDs — retained for DB migrations and direct integer
+/// comparisons against stored rows. New code should prefer `Author` variants.
 pub const AUTHOR_SYSTEM: i64 = 1;
 pub const AUTHOR_DEV_TECHNICAL: i64 = 2;
 pub const AUTHOR_DEV_DOCUMENTATION: i64 = 3;
@@ -13,6 +14,122 @@ pub const AUTHOR_AGENT_MICRO: i64 = 4;
 pub const AUTHOR_AGENT_SMALL: i64 = 5;
 pub const AUTHOR_AGENT_MEDIUM: i64 = 6;
 pub const AUTHOR_AGENT_LARGE: i64 = 7;
+
+/// Typed authorship marker.
+///
+/// Wire format is preserved: serializes as a plain `i64` and decodes from an
+/// SQL `INTEGER` column. Reserved variants (`1..=7`) stay in sync with the
+/// `AUTHOR_*` constants; user IDs (`>= 8`) live in `Author::User(n)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Author {
+  System,
+  DevTechnical,
+  DevDocumentation,
+  AgentMicro,
+  AgentSmall,
+  AgentMedium,
+  AgentLarge,
+  User(u64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidAuthorId(pub i64);
+
+impl std::fmt::Display for InvalidAuthorId {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "invalid author id: {}", self.0)
+  }
+}
+
+impl std::error::Error for InvalidAuthorId {}
+
+impl Author {
+  pub fn as_i64(self) -> i64 {
+    match self {
+      Author::System => AUTHOR_SYSTEM,
+      Author::DevTechnical => AUTHOR_DEV_TECHNICAL,
+      Author::DevDocumentation => AUTHOR_DEV_DOCUMENTATION,
+      Author::AgentMicro => AUTHOR_AGENT_MICRO,
+      Author::AgentSmall => AUTHOR_AGENT_SMALL,
+      Author::AgentMedium => AUTHOR_AGENT_MEDIUM,
+      Author::AgentLarge => AUTHOR_AGENT_LARGE,
+      Author::User(n) => n as i64,
+    }
+  }
+
+  pub fn from_id(id: i64) -> Result<Self, InvalidAuthorId> {
+    match id {
+      AUTHOR_SYSTEM => Ok(Author::System),
+      AUTHOR_DEV_TECHNICAL => Ok(Author::DevTechnical),
+      AUTHOR_DEV_DOCUMENTATION => Ok(Author::DevDocumentation),
+      AUTHOR_AGENT_MICRO => Ok(Author::AgentMicro),
+      AUTHOR_AGENT_SMALL => Ok(Author::AgentSmall),
+      AUTHOR_AGENT_MEDIUM => Ok(Author::AgentMedium),
+      AUTHOR_AGENT_LARGE => Ok(Author::AgentLarge),
+      n if n >= 8 => Ok(Author::User(n as u64)),
+      n => Err(InvalidAuthorId(n)),
+    }
+  }
+}
+
+/// Fallible parser — alias for `Author::from_id` for readability at boundaries.
+pub fn parse_author(i: i64) -> Result<Author, InvalidAuthorId> {
+  Author::from_id(i)
+}
+
+impl From<Author> for i64 {
+  fn from(a: Author) -> Self {
+    a.as_i64()
+  }
+}
+
+impl TryFrom<i64> for Author {
+  type Error = InvalidAuthorId;
+  fn try_from(v: i64) -> Result<Self, Self::Error> {
+    Author::from_id(v)
+  }
+}
+
+impl Serialize for Author {
+  fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_i64(self.as_i64())
+  }
+}
+
+impl<'de> Deserialize<'de> for Author {
+  fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+    let n = i64::deserialize(d)?;
+    Author::from_id(n).map_err(serde::de::Error::custom)
+  }
+}
+
+impl sqlx::Type<sqlx::Sqlite> for Author {
+  fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+    <i64 as sqlx::Type<sqlx::Sqlite>>::type_info()
+  }
+
+  fn compatible(ty: &sqlx::sqlite::SqliteTypeInfo) -> bool {
+    <i64 as sqlx::Type<sqlx::Sqlite>>::compatible(ty)
+  }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for Author {
+  fn decode(
+    value: sqlx::sqlite::SqliteValueRef<'r>,
+  ) -> Result<Self, sqlx::error::BoxDynError> {
+    let n = <i64 as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
+    Ok(Author::from_id(n)?)
+  }
+}
+
+impl<'q> sqlx::Encode<'q, sqlx::Sqlite> for Author {
+  fn encode_by_ref(
+    &self,
+    buf: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'q>>,
+  ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+    <i64 as sqlx::Encode<'_, sqlx::Sqlite>>::encode_by_ref(&self.as_i64(), buf)
+  }
+}
 
 /// Comment status - controls visibility and state
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,7 +223,7 @@ pub struct Comment {
 
   // Immutable fields
   pub content_markdown: String, // Raw markdown content
-  pub author_id: i64,           // 1=system, 2=agent, 3+=users
+  pub author_id: Author,        // Reserved variants = 1..=7, users >= 8.
   pub comment_type: String,     // Stored as string, convert to CommentType
   pub created_at: String,
 
@@ -169,7 +286,7 @@ fn default_comment_type() -> CommentType {
 pub struct CreateCommentRequest {
   pub topic_id: String, // Topic to comment on (N123, D45, or C99 for replies)
   pub content: String,  // Markdown content
-  pub author_id: i64,   // 1=system, 2=agent, 3+=users
+  pub author_id: Author,
   #[serde(default = "default_comment_type")]
   pub comment_type: CommentType, // Defaults to Note when omitted
 }
@@ -267,6 +384,62 @@ impl AuditEvent {
       AuditEvent::TopicUpdated { audit_id, .. }
       | AuditEvent::StatusUpdated { audit_id, .. }
       | AuditEvent::VoteUpdated { audit_id, .. } => audit_id,
+    }
+  }
+}
+
+#[cfg(test)]
+mod author_tests {
+  use super::*;
+
+  #[test]
+  fn author_serializes_as_integer() {
+    let cases = [
+      (Author::System, "1"),
+      (Author::DevTechnical, "2"),
+      (Author::DevDocumentation, "3"),
+      (Author::AgentMicro, "4"),
+      (Author::AgentSmall, "5"),
+      (Author::AgentMedium, "6"),
+      (Author::AgentLarge, "7"),
+      (Author::User(42), "42"),
+    ];
+    for (author, expected) in cases {
+      assert_eq!(serde_json::to_string(&author).unwrap(), expected);
+    }
+  }
+
+  #[test]
+  fn author_deserializes_from_integer() {
+    for n in [1i64, 2, 3, 4, 5, 6, 7, 8, 42, 1_000_000] {
+      let s = n.to_string();
+      let author: Author = serde_json::from_str(&s).unwrap();
+      assert_eq!(author.as_i64(), n);
+    }
+  }
+
+  #[test]
+  fn author_rejects_invalid_ids() {
+    assert!(Author::from_id(0).is_err());
+    assert!(Author::from_id(-1).is_err());
+    assert!(serde_json::from_str::<Author>("0").is_err());
+    assert!(serde_json::from_str::<Author>("-5").is_err());
+  }
+
+  #[test]
+  fn author_roundtrips_through_id() {
+    for variant in [
+      Author::System,
+      Author::DevTechnical,
+      Author::DevDocumentation,
+      Author::AgentMicro,
+      Author::AgentSmall,
+      Author::AgentMedium,
+      Author::AgentLarge,
+      Author::User(8),
+      Author::User(9999),
+    ] {
+      assert_eq!(Author::from_id(variant.as_i64()).unwrap(), variant);
     }
   }
 }

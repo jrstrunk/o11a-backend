@@ -6,9 +6,10 @@
 //! `o11a-analyze`) and core's collaboration tests rely on it; the
 //! comment parser the function calls is also in core.
 
+use crate::collaborator::models::Author;
 use crate::collaborator::parser as comment_parser;
-use crate::core::topic;
-use crate::core::{AuditData, CommentType, Node, Scope, TopicMetadata};
+use crate::domain::topic;
+use crate::domain::{AuditData, CommentType, Node, Scope, TopicMetadata};
 use std::sync::atomic::{AtomicI32, Ordering};
 
 /// Global counter for synthetic developer documentation comment IDs.
@@ -27,7 +28,7 @@ pub fn create_synthetic_dev_comment(
   target_topic: &topic::Topic,
   doc_text: &str,
   comment_type: CommentType,
-  author_id: i64,
+  author: Author,
   audit_data: &mut AuditData,
 ) {
   let comment_id = next_dev_doc_comment_id();
@@ -58,7 +59,7 @@ pub fn create_synthetic_dev_comment(
       topic: comment_topic,
       target_topic: *target_topic,
       comment_type,
-      author_id,
+      author,
       created_at: String::new(), // Synthetic — no real timestamp
       scope,
       mentioned_topics: mentioned_topics.clone(),

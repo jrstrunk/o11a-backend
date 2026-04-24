@@ -1,7 +1,7 @@
 use crate::documentation::parser;
-use o11a_core::core;
-use o11a_core::core::topic;
-use o11a_core::core::{
+use o11a_core::domain;
+use o11a_core::domain::topic;
+use o11a_core::domain::{
   AST, AuditData, DataContext, Node, Scope, TitledTopicKind, TopicMetadata,
   UnnamedTopicKind, insert_into_context,
 };
@@ -16,7 +16,7 @@ pub fn analyze(
   project_root: &Path,
   audit_id: &str,
   data_context: &mut DataContext,
-  document_files: &[core::DocumentFileEntry],
+  document_files: &[domain::DocumentFileEntry],
 ) -> Result<(), String> {
   // Get the audit data
   let audit_data = data_context
@@ -24,7 +24,7 @@ pub fn analyze(
     .ok_or_else(|| format!("Audit '{}' not found", audit_id))?;
 
   // Build a set of technical document paths for root kind lookup
-  let technical_paths: std::collections::HashSet<&core::ProjectPath> =
+  let technical_paths: std::collections::HashSet<&domain::ProjectPath> =
     document_files
       .iter()
       .filter(|e| e.is_technical)
@@ -32,7 +32,7 @@ pub fn analyze(
       .collect();
 
   // Extract just the project paths for the parser
-  let paths: Vec<core::ProjectPath> = document_files
+  let paths: Vec<domain::ProjectPath> = document_files
     .iter()
     .map(|e| e.project_path.clone())
     .collect();
@@ -82,7 +82,7 @@ pub fn analyze(
   // populate_ancestry in the solidity analyzer. Only NamedTopics participate
   // in name_index lookup, so referenced_topic can only be a NamedTopic here.
   for (referenced_topic, scopes) in mentions_by_topic {
-    let Some(core::TopicMetadata::NamedTopic { doc_references, .. }) =
+    let Some(domain::TopicMetadata::NamedTopic { doc_references, .. }) =
       audit_data.topic_metadata.get_mut(&referenced_topic)
     else {
       continue;
@@ -105,7 +105,7 @@ pub fn analyze(
 
 fn process_documentation_ast(
   ast: &DocumentationAST,
-  project_path: &core::ProjectPath,
+  project_path: &domain::ProjectPath,
   is_technical: bool,
   audit_data: &mut AuditData,
   mentions_by_topic: &mut BTreeMap<topic::Topic, Vec<Scope>>,
@@ -249,7 +249,7 @@ fn process_documentation_node(
       // - Second nested section becomes Member (Component -> Member)
       // - Third nested section becomes SemanticBlock (Member -> SemanticBlock)
       // - Further nesting stays at SemanticBlock level
-      let section_scope = core::add_to_scope(scope, topic);
+      let section_scope = domain::add_to_scope(scope, topic);
 
       // Process section children with the nested scope
       for child in children {
@@ -535,8 +535,8 @@ fn build_self_context(
   topic: &topic::Topic,
   scope: &Scope,
   nodes: &BTreeMap<topic::Topic, Node>,
-) -> Vec<core::SourceContext> {
-  let mut groups: Vec<core::SourceContext> = Vec::new();
+) -> Vec<domain::SourceContext> {
+  let mut groups: Vec<domain::SourceContext> = Vec::new();
   let sort_key = get_source_location_start(topic, nodes);
 
   match scope {
@@ -550,7 +550,7 @@ fn build_self_context(
         true,
         None,
         &[],
-        core::Reference::project_reference(*topic, sort_key),
+        domain::Reference::project_reference(*topic, sort_key),
       );
     }
     Scope::Component { component, .. } => {
@@ -563,7 +563,7 @@ fn build_self_context(
         true,
         None,
         &[],
-        core::Reference::project_reference(*topic, sort_key),
+        domain::Reference::project_reference(*topic, sort_key),
       );
     }
     Scope::Member {
@@ -579,7 +579,7 @@ fn build_self_context(
         true,
         Some((*member, member_sort_key)),
         &[],
-        core::Reference::project_reference(*topic, sort_key),
+        domain::Reference::project_reference(*topic, sort_key),
       );
     }
     Scope::ContainingBlock {
@@ -599,7 +599,7 @@ fn build_self_context(
           true,
           Some((*member, member_sort_key)),
           &[],
-          core::Reference::project_reference(layer.block, cb_sort_key),
+          domain::Reference::project_reference(layer.block, cb_sort_key),
         );
       }
     }

@@ -3,7 +3,7 @@ mod websocket;
 
 use o11a_core::analysis_artifact::{self, ArtifactError};
 use o11a_core::collaborator::db as collab_db;
-use o11a_core::core;
+use o11a_core::domain;
 use o11a_core::db;
 use o11a_core::report::{self, AuditReport};
 use o11a_core::state::AppState;
@@ -42,7 +42,7 @@ async fn main() {
   println!("Creating DataContext...");
 
   // Create empty DataContext
-  let data_context = core::new_data_context();
+  let data_context = domain::new_data_context();
   let data_context = Arc::new(Mutex::new(data_context));
 
   println!("DataContext created successfully");
@@ -188,7 +188,7 @@ async fn main() {
   {
     let mut ctx = data_context.lock().unwrap();
     for audit_data in ctx.audits.values_mut() {
-      core::rebuild_feature_context(audit_data);
+      domain::rebuild_feature_context(audit_data);
     }
   }
 
@@ -266,7 +266,7 @@ mod tests {
       .connect("sqlite::memory:")
       .await
       .expect("in-memory sqlite pool");
-    let state = AppState::new(pool, core::new_data_context());
+    let state = AppState::new(pool, domain::new_data_context());
     let _ = routes::create_router(state);
   }
 }
