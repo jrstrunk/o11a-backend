@@ -13,7 +13,7 @@ use crate::core::{
 };
 use crate::solidity::parser::{
   self, ASTNode, FunctionVisibility, NatSpecSection, NatSpecTag,
-  SolidityAST, VariableVisibility,
+  SolidityAST, VariableVisibility, contract_members,
 };
 use crate::solidity::transform;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -487,7 +487,6 @@ fn process_first_pass_ast_nodes(
       ASTNode::ContractDefinition {
         node_id,
         signature,
-        nodes: contract_nodes,
         ..
       } => {
         // Extract fields from the ContractSignature
@@ -598,9 +597,9 @@ fn process_first_pass_ast_nodes(
           .flatten()
           .collect();
 
-        let public_member_ids: Vec<i32> = contract_nodes
+        let public_member_ids: Vec<i32> = contract_members(node)
           .iter()
-          .filter_map(|node| match node {
+          .filter_map(|member| match member {
             // Public functions
             ASTNode::FunctionDefinition {
               node_id, signature, ..
@@ -664,8 +663,8 @@ fn process_first_pass_ast_nodes(
 
         // Collect type references from state variable declarations
         let mut variable_type_references: Vec<ReferencedNode> = Vec::new();
-        for contract_node in contract_nodes {
-          match contract_node {
+        for member in contract_members(node) {
+          match member {
             ASTNode::VariableDeclaration {
               node_id: var_node_id,
               state_variable,
@@ -708,7 +707,7 @@ fn process_first_pass_ast_nodes(
           },
         );
 
-        let child_nodes = node.nodes();
+        let child_nodes: Vec<&ASTNode> = contract_members(node);
         process_first_pass_ast_nodes(
           &child_nodes,
           file_path,
@@ -1682,6 +1681,9 @@ fn process_second_pass_nodes(
           ASTNode::NewExpression { .. } => UnnamedTopicKind::NewExpression,
           ASTNode::Literal { .. } => UnnamedTopicKind::Literal,
           ASTNode::SemanticBlock { .. } => UnnamedTopicKind::SemanticBlock,
+          ASTNode::ContractMemberGroup { .. } => {
+            UnnamedTopicKind::ContractMemberGroup
+          }
           ASTNode::Break { .. } => UnnamedTopicKind::Break,
           ASTNode::Continue { .. } => UnnamedTopicKind::Continue,
           ASTNode::EmitStatement { .. } => UnnamedTopicKind::Emit,
@@ -1728,6 +1730,14 @@ fn process_second_pass_nodes(
             if statements.len() == 1 =>
           {
             Some(topic::new_node_topic(&statements[0].node_id()))
+          }
+          // A contract member group with exactly one child member is
+          // transitive to that member — the group's comment resolves onto
+          // the member directly.
+          ASTNode::ContractMemberGroup { members, .. }
+            if members.len() == 1 =>
+          {
+            Some(topic::new_node_topic(&members[0].node_id()))
           }
           // Signature nodes are transitive to their parent definition node.
           // FunctionSignature → FunctionDefinition, ModifierSignature →
@@ -3817,6 +3827,17 @@ fn inject_developer_documentation(audit_data: &mut AuditData) {
         }
       }
 
+      // ContractMemberGroup inline comments (// and /* */) on top-level
+      // contract members (state variables, functions, etc.)
+      ASTNode::ContractMemberGroup {
+        documentation: Some(doc),
+        ..
+      } => {
+        if !doc.trim().is_empty() {
+          semantic_block_docs.push((node_topic.clone(), doc.clone()));
+        }
+      }
+
       // Function NatSpec docstrings
       ASTNode::FunctionSignature {
         documentation,
@@ -3941,7 +3962,7 @@ fn inject_developer_documentation(audit_data: &mut AuditData) {
 
 /// Create a synthetic developer CommentTopic targeting the given topic.
 /// Parses the text through the comment parser to resolve code references.
-fn create_synthetic_dev_comment(
+pub(crate) fn create_synthetic_dev_comment(
   target_topic: &topic::Topic,
   doc_text: &str,
   comment_type: CommentType,
@@ -4693,6 +4714,158 @@ mod tests {
     let params = vec![param_topic("amount", 300)];
     let (_, desc, _) = resolve_return_target("amount", &params).unwrap();
     assert_eq!(desc, "");
+  }
+
+  // =========================================================================
+  // Developer Documentation Injection Tests
+  // =========================================================================
+
+  #[test]
+  fn test_inject_contract_member_group_single_member_resolves_transitively() {
+    // A ContractMemberGroup with exactly one member has `transitive_topic`
+    // pointing at the member, so the group's inline comment should resolve
+    // through and land in `comment_index[member_topic]`.
+    let mut audit_data = core::new_audit_data(
+      "test".to_string(),
+      HashSet::new(),
+      None,
+    );
+
+    let member_id = 100;
+    let group_id = -200;
+    let member_topic = topic::new_node_topic(&member_id);
+    let group_topic = topic::new_node_topic(&group_id);
+
+    let member_node = ASTNode::Break {
+      node_id: member_id,
+      src_location: dummy_src_location(),
+    };
+    let group_node = ASTNode::ContractMemberGroup {
+      node_id: group_id,
+      src_location: dummy_src_location(),
+      documentation: Some("Group docs for single member".to_string()),
+      members: vec![member_node],
+    };
+
+    audit_data
+      .nodes
+      .insert(group_topic.clone(), Node::Solidity(group_node));
+
+    audit_data.topic_metadata.insert(
+      group_topic.clone(),
+      TopicMetadata::UnnamedTopic {
+        topic: group_topic.clone(),
+        scope: Scope::Global,
+        kind: UnnamedTopicKind::ContractMemberGroup,
+        transitive_topic: Some(member_topic.clone()),
+      },
+    );
+
+    inject_developer_documentation(&mut audit_data);
+
+    let member_comments = audit_data
+      .comment_index
+      .get(&member_topic)
+      .cloned()
+      .unwrap_or_default();
+    assert_eq!(
+      member_comments.len(),
+      1,
+      "expected the comment to land on the transitive member topic"
+    );
+    assert!(
+      audit_data
+        .comment_index
+        .get(&group_topic)
+        .map_or(true, |v| v.is_empty()),
+      "comment should not remain on the group topic when it resolves through"
+    );
+
+    let comment_topic = &member_comments[0];
+    match audit_data.nodes.get(comment_topic) {
+      Some(Node::Comment(comment_nodes)) => {
+        let text =
+          crate::collaborator::formatter::render_comment_plain_text(
+            comment_nodes,
+          );
+        assert!(
+          text.contains("Group docs for single member"),
+          "comment text missing: {:?}",
+          text
+        );
+      }
+      _ => panic!("expected Node::Comment for the synthetic dev comment"),
+    }
+  }
+
+  #[test]
+  fn test_inject_contract_member_group_multi_member_stays_on_group() {
+    // A multi-member ContractMemberGroup has no transitive topic, so the
+    // inline comment stays on the group topic itself. Individual members
+    // do not receive the comment.
+    let mut audit_data = core::new_audit_data(
+      "test".to_string(),
+      HashSet::new(),
+      None,
+    );
+
+    let group_id = -300;
+    let member_a_id = 101;
+    let member_b_id = 102;
+    let group_topic = topic::new_node_topic(&group_id);
+    let member_a_topic = topic::new_node_topic(&member_a_id);
+    let member_b_topic = topic::new_node_topic(&member_b_id);
+
+    let group_node = ASTNode::ContractMemberGroup {
+      node_id: group_id,
+      src_location: dummy_src_location(),
+      documentation: Some("Shared configuration".to_string()),
+      members: vec![
+        ASTNode::Break {
+          node_id: member_a_id,
+          src_location: dummy_src_location(),
+        },
+        ASTNode::Break {
+          node_id: member_b_id,
+          src_location: dummy_src_location(),
+        },
+      ],
+    };
+
+    audit_data
+      .nodes
+      .insert(group_topic.clone(), Node::Solidity(group_node));
+
+    audit_data.topic_metadata.insert(
+      group_topic.clone(),
+      TopicMetadata::UnnamedTopic {
+        topic: group_topic.clone(),
+        scope: Scope::Global,
+        kind: UnnamedTopicKind::ContractMemberGroup,
+        transitive_topic: None,
+      },
+    );
+
+    inject_developer_documentation(&mut audit_data);
+
+    let group_comments = audit_data
+      .comment_index
+      .get(&group_topic)
+      .cloned()
+      .unwrap_or_default();
+    assert_eq!(
+      group_comments.len(),
+      1,
+      "expected the comment to land on the group topic"
+    );
+    assert!(
+      audit_data.comment_index.get(&member_a_topic).is_none(),
+      "member A should not receive a duplicate of the group comment"
+    );
+    assert!(
+      audit_data.comment_index.get(&member_b_topic).is_none(),
+      "member B should not receive a duplicate of the group comment"
+    );
   }
 }
 

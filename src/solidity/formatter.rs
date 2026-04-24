@@ -931,6 +931,48 @@ fn do_node_to_source_text(
       }
     }
 
+    ASTNode::ContractMemberGroup {
+      node_id,
+      members,
+      documentation: _,
+      ..
+    } => {
+      let members_str = members
+        .iter()
+        .map(|m| {
+          do_node_to_source_text(
+            m,
+            indent_level,
+            nodes_map,
+            topic_metadata,
+            ctx,
+          )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+      let topic = topic::new_node_topic(node_id);
+      let block_placeholder =
+        formatting::format_containing_block_placeholder(&topic);
+
+      let class = if ctx.target_topic == topic {
+        "contract-member-group target-topic"
+      } else {
+        "contract-member-group"
+      };
+
+      format!(
+        "{}{}",
+        block_placeholder,
+        formatting::format_topic_block(
+          &new_node_topic(node_id),
+          &members_str,
+          class,
+          &topic,
+        )
+      )
+    }
+
     ASTNode::Break { node_id, .. } => {
       format!(
         "{}{}",
@@ -1678,6 +1720,11 @@ fn do_node_to_source_text(
             .format_parameter_variable_as_signature,
           omit_function_and_modifier_bodies: true,
         };
+        // Members are always wrapped in ContractMemberGroup nodes, each
+        // starting with a block-level placeholder div that introduces an
+        // implicit line break. Joining with a single `\n` here plus the
+        // `\n\n` used between members within a group gives consistent
+        // two-line visual separation between every top-level member.
         let members = nodes
           .iter()
           .map(|n| {
@@ -1690,7 +1737,7 @@ fn do_node_to_source_text(
             )
           })
           .collect::<Vec<_>>()
-          .join("\n\n");
+          .join("\n");
         let trailing_newline = if !members.is_empty() { "\n" } else { "" };
         format!(
           "{} {}{}{}{}",

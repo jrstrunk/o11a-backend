@@ -843,6 +843,7 @@ pub enum UnnamedTopicKind {
   NewExpression,
   Literal,
   SemanticBlock,
+  ContractMemberGroup,
   Break,
   Continue,
   Emit,
