@@ -12,8 +12,9 @@
 
 use crate::core::{ContractKind, ProjectPath};
 use crate::solidity::parser::{
-  self, ASTNode, SolidityAST, generate_node_id, get_definition_parameters,
-  get_function_return_parameters, get_referenced_function_id,
+  self, ASTNode, SolidityAST, contract_members, generate_node_id,
+  get_definition_parameters, get_function_return_parameters,
+  get_referenced_function_id,
 };
 use std::collections::{BTreeMap, HashSet};
 
@@ -175,7 +176,6 @@ fn collect_definitions_from_node(
     ASTNode::ContractDefinition {
       node_id,
       signature,
-      nodes: contract_nodes,
       ..
     } => {
       // Extract contract info for interface mapping
@@ -183,13 +183,13 @@ fn collect_definitions_from_node(
         *node_id,
         container_file,
         signature,
-        contract_nodes,
+        node,
       ) {
         contracts.push(contract_info);
       }
 
-      // Recurse into contract members
-      for child in contract_nodes {
+      // Recurse into contract members (flatten through semantic blocks)
+      for child in contract_members(node) {
         collect_definitions_from_node(
           child,
           container_file,
@@ -306,7 +306,7 @@ fn extract_contract_info(
   node_id: i32,
   container_file: &ProjectPath,
   signature: &ASTNode,
-  contract_nodes: &[ASTNode],
+  contract_node: &ASTNode,
 ) -> Option<ContractInfo> {
   let (contract_kind, base_contracts) = match signature {
     ASTNode::ContractSignature {
@@ -338,7 +338,7 @@ fn extract_contract_info(
   let mut functions = Vec::new();
   let mut public_state_variables = Vec::new();
 
-  for child in contract_nodes {
+  for child in contract_members(contract_node) {
     match child {
       ASTNode::FunctionDefinition {
         node_id: func_id,

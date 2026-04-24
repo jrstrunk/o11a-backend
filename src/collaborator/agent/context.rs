@@ -12,7 +12,7 @@ use crate::core::{
 };
 
 use crate::documentation::parser::DocumentationNode;
-use crate::solidity::parser::ASTNode;
+use crate::solidity::parser::{ASTNode, contract_members};
 
 // ============================================================================
 // Response Types
@@ -208,13 +208,15 @@ fn plaintext_name_from_metadata(metadata: &TopicMetadata) -> String {
 }
 
 /// Build an `AgentScopeTitle` for a topic: plaintext name, topic id, and
-/// any info comments targeting that topic.
+/// any comments targeting that topic. See [`lookup_topic_comments`] for the
+/// meaning of `include_untrusted`.
 fn build_scope_title(
   topic: &topic::Topic,
   audit_data: &AuditData,
+  include_untrusted: bool,
 ) -> AgentScopeTitle {
   let name = plaintext_name(topic, audit_data);
-  let comments = lookup_topic_comments(topic, audit_data);
+  let comments = lookup_topic_comments(topic, audit_data, include_untrusted);
   AgentScopeTitle {
     name,
     topic: topic.id().to_string(),
@@ -222,12 +224,22 @@ fn build_scope_title(
   }
 }
 
-/// Look up info and dev documentation comments targeting a topic from the CommentIndex.
+/// Look up comments targeting a topic from the CommentIndex.
+///
 /// Resolves through the transitive chain so that looking up a signature topic
 /// finds comments stored on its canonical definition topic.
+///
+/// `include_untrusted` controls whether source-derived comments
+/// (`DevTechnical` from inline `//` and `/* */`, `DevDocumentation` from
+/// NatSpec) are returned. Auditor-authored `Info` comments are always
+/// returned. Contexts that feed agent tasks which must operate only on
+/// trusted, pipeline-generated content (e.g. behavior extraction) should pass
+/// `false`; contexts that surface the developer's own prose to humans or to
+/// semantic-linking agents should pass `true`.
 fn lookup_topic_comments(
   topic: &topic::Topic,
   audit_data: &AuditData,
+  include_untrusted: bool,
 ) -> Vec<String> {
   let resolved =
     core::resolve_transitive_topic(topic, &audit_data.topic_metadata);
@@ -243,10 +255,14 @@ fn lookup_topic_comments(
       let TopicMetadata::CommentTopic { comment_type, .. } = metadata else {
         return None;
       };
-      let is_relevant = *comment_type == CommentType::Info
-        || *comment_type == CommentType::DevTechnical
+      let is_untrusted = *comment_type == CommentType::DevTechnical
         || *comment_type == CommentType::DevDocumentation;
+      let is_relevant =
+        *comment_type == CommentType::Info || is_untrusted;
       if !is_relevant {
+        return None;
+      }
+      if is_untrusted && !include_untrusted {
         return None;
       }
       let content = match audit_data.nodes.get(comment_topic) {
@@ -321,6 +337,7 @@ fn render_condition_ast_snippet(
       let render_ctx = ASTRenderContext {
         target_topic: target_topic.clone(),
         omit_function_and_modifier_bodies: false,
+        include_untrusted_comments: true,
       };
       Some(render_solidity_ast_snippet(
         node,
@@ -372,6 +389,14 @@ struct ASTRenderContext {
   /// When true, function/modifier bodies are omitted.
   /// Set to true when converting ContractDefinition members.
   omit_function_and_modifier_bodies: bool,
+  /// Whether source-derived (untrusted) comments — inline `//` dev comments
+  /// and NatSpec docstrings — should appear in the rendered output. Set to
+  /// `false` when the rendering feeds an agent task that must operate only on
+  /// trusted, pipeline-generated content (behavior extraction, where only
+  /// `functional_semantics` annotations are trusted). Set to `true` when the
+  /// developer's prose is useful context (semantic linking, topic views).
+  /// Auditor-authored `Info` comments are always included regardless.
+  include_untrusted_comments: bool,
 }
 
 /// Render a type AST node to a plain-text string directly from its fields.
@@ -403,18 +428,24 @@ fn render_type_name(node: &ASTNode, audit_data: &AuditData) -> String {
   }
 }
 
-/// Look up info comments targeting a node from the CommentIndex.
-fn lookup_node_comments(node_id: i32, audit_data: &AuditData) -> Vec<String> {
+/// Look up comments targeting a node. See [`lookup_topic_comments`] for the
+/// meaning of `include_untrusted`.
+fn lookup_node_comments(
+  node_id: i32,
+  audit_data: &AuditData,
+  include_untrusted: bool,
+) -> Vec<String> {
   let node_topic = topic::new_node_topic(&node_id);
-  lookup_topic_comments(&node_topic, audit_data)
+  lookup_topic_comments(&node_topic, audit_data, include_untrusted)
 }
 
 fn lookup_doc_node_comments(
   node_id: i32,
   audit_data: &AuditData,
+  include_untrusted: bool,
 ) -> Vec<String> {
   let doc_topic = topic::new_documentation_topic(node_id);
-  lookup_topic_comments(&doc_topic, audit_data)
+  lookup_topic_comments(&doc_topic, audit_data, include_untrusted)
 }
 
 /// Build a JSON object for a node, attaching comments if present.
@@ -440,7 +471,11 @@ fn render_solidity_ast_snippet(
   // Unresolved stub → TopicRef
   if let ASTNode::Stub { node_id, topic, .. } = resolved {
     let name = resolve_topic_name(topic, audit_data);
-    let comments = lookup_node_comments(*node_id, audit_data);
+    let comments = lookup_node_comments(
+      *node_id,
+      audit_data,
+      render_ctx.include_untrusted_comments,
+    );
     return make_node_json(
       json!({
         "type": "topic_ref",
@@ -453,7 +488,11 @@ fn render_solidity_ast_snippet(
 
   let node_id = resolved.node_id();
   let id = topic::new_node_topic(&node_id).id().to_string();
-  let comments = lookup_node_comments(node_id, audit_data);
+  let comments = lookup_node_comments(
+    node_id,
+    audit_data,
+    render_ctx.include_untrusted_comments,
+  );
 
   // Helper closure for recursive conversion
   let recurse = |child: &ASTNode| -> serde_json::Value {
@@ -473,7 +512,11 @@ fn render_solidity_ast_snippet(
         let resolved_s = s.resolve(&audit_data.nodes);
         if let ASTNode::SemanticBlock { statements, .. } = resolved_s {
           let node_id = resolved_s.node_id();
-          let comments = lookup_node_comments(node_id, audit_data);
+          let comments = lookup_node_comments(
+            node_id,
+            audit_data,
+            render_ctx.include_untrusted_comments,
+          );
           if comments.is_empty() {
             // Flatten: recurse into the inner statements directly
             return statements
@@ -792,6 +835,13 @@ fn render_solidity_ast_snippet(
       "statements": recurse_statements(statements),
     }),
 
+    ASTNode::ContractMemberGroup { members, .. } => json!({
+      "type": "block",
+      "id": id,
+      "kind": "contract_member_group",
+      "members": recurse_statements(members),
+    }),
+
     ASTNode::UncheckedBlock { statements, .. } => json!({
       "type": "block",
       "id": id,
@@ -875,6 +925,7 @@ fn render_solidity_ast_snippet(
       let member_ctx = ASTRenderContext {
         target_topic: render_ctx.target_topic.clone(),
         omit_function_and_modifier_bodies: true,
+        include_untrusted_comments: render_ctx.include_untrusted_comments,
       };
       let members: Vec<serde_json::Value> = nodes
         .iter()
@@ -1452,7 +1503,9 @@ pub fn render_documentation_ast_snippet(
   // Unresolved Stub → topic_ref
   if let DocumentationNode::Stub { topic, node_id, .. } = resolved {
     let name = resolve_topic_name(topic, audit_data);
-    let comments = lookup_doc_node_comments(*node_id, audit_data);
+    // Documentation rendering currently only feeds the auditor-facing topic
+    // view; untrusted comments are always included.
+    let comments = lookup_doc_node_comments(*node_id, audit_data, true);
     return make_node_json(
       json!({"type": "topic_ref", "id": topic.id(), "name": name}),
       comments,
@@ -1461,7 +1514,7 @@ pub fn render_documentation_ast_snippet(
 
   let node_id = resolved.node_id();
   let id = topic::new_documentation_topic(node_id).id().to_string();
-  let comments = lookup_doc_node_comments(node_id, audit_data);
+  let comments = lookup_doc_node_comments(node_id, audit_data, true);
 
   let recurse = |child: &DocumentationNode,
                  ctx: Option<&DocRenderContext>|
@@ -1752,7 +1805,9 @@ fn convert_source_group(
   audit_data: &AuditData,
   source_text_cache: &std::collections::HashMap<String, String>,
 ) -> AgentSourceGroup {
-  let scope = build_scope_title(group.scope(), audit_data);
+  // These scope titles feed auditor-facing topic views where the developer's
+  // own prose is useful signal; untrusted comments are always included.
+  let scope = build_scope_title(group.scope(), audit_data, true);
 
   let scope_references = group
     .scope_references()
@@ -1764,7 +1819,7 @@ fn convert_source_group(
     .nested_references()
     .iter()
     .map(|nested| {
-      let subscope = build_scope_title(nested.subscope(), audit_data);
+      let subscope = build_scope_title(nested.subscope(), audit_data, true);
       let children = convert_source_children(
         nested.children(),
         target_topic,
@@ -1860,6 +1915,7 @@ fn convert_reference(
       let render_ctx = ASTRenderContext {
         target_topic: target_topic.clone(),
         omit_function_and_modifier_bodies: false,
+        include_untrusted_comments: true,
       };
       render_solidity_ast_snippet(
         solidity_node,
@@ -1949,7 +2005,7 @@ fn build_documentation_section_context(
       };
       let rendered =
         render_documentation_ast_snippet(node, audit_data, None);
-      let scope_title = build_scope_title(topic, audit_data);
+      let scope_title = build_scope_title(topic, audit_data, true);
       return vec![AgentSourceGroup {
         scope: scope_title,
         in_scope: true,
@@ -1995,7 +2051,7 @@ fn build_documentation_section_context(
   let rendered =
     render_documentation_ast_snippet(root_node, audit_data, Some(&render_ctx));
 
-  let scope_title = build_scope_title(root_ancestor, audit_data);
+  let scope_title = build_scope_title(root_ancestor, audit_data, true);
   vec![AgentSourceGroup {
     scope: scope_title,
     in_scope: true,
@@ -2104,6 +2160,7 @@ pub fn build_agent_topic_context(
           let render_ctx = ASTRenderContext {
             target_topic: topic.clone(),
             omit_function_and_modifier_bodies: false,
+            include_untrusted_comments: true,
           };
           Some(render_solidity_ast_snippet(
             node,
@@ -2217,19 +2274,17 @@ pub fn build_agent_topic_context(
 
 /// Render a contract's members (signatures only, no bodies) as a JSON object
 /// with N-prefixed topic IDs. Used by semantic linking pass 1.
-pub fn render_contract_members_for_linking(
+pub fn render_contract_members_for_semantic_linking(
   contract_node: &crate::solidity::parser::ASTNode,
   audit_data: &AuditData,
   source_text_cache: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
   use crate::solidity::parser::ASTNode;
 
-  let (name, kind, members) = match contract_node {
-    ASTNode::ContractDefinition {
-      signature, nodes, ..
-    } => {
+  let (name, kind) = match contract_node {
+    ASTNode::ContractDefinition { signature, .. } => {
       let resolved_sig = signature.resolve(&audit_data.nodes);
-      let (name, kind) = match resolved_sig {
+      match resolved_sig {
         ASTNode::ContractSignature {
           name,
           contract_kind,
@@ -2246,20 +2301,58 @@ pub fn render_contract_members_for_linking(
             .to_string();
           (name, "contract".to_string())
         }
-      };
-      (name, kind, nodes)
+      }
     }
     _ => return None,
   };
 
+  // Include the developer's own inline comments and NatSpec — the
+  // semantic-linking agent needs that prose to recognize groups and topics.
+  // Iterate raw contract nodes so ContractMemberGroup wrappers reach
+  // `render_solidity_ast_snippet`; groups with comments render as a wrapper
+  // (carrying the group-level `[dev]` comment), comment-less groups flatten
+  // below.
   let render_ctx = ASTRenderContext {
     target_topic: topic::new_node_topic(&-1),
     omit_function_and_modifier_bodies: true,
+    include_untrusted_comments: true,
   };
 
-  let member_snippets: Vec<serde_json::Value> = members
+  let nodes = match contract_node {
+    ASTNode::ContractDefinition { nodes, .. } => nodes.as_slice(),
+    _ => return None,
+  };
+  let member_snippets: Vec<serde_json::Value> = nodes
     .iter()
-    .map(|m| render_solidity_ast_snippet(m, &render_ctx, audit_data, source_text_cache))
+    .flat_map(|n| {
+      let resolved = n.resolve(&audit_data.nodes);
+      if let ASTNode::ContractMemberGroup { members, .. } = resolved {
+        let comments = lookup_node_comments(
+          resolved.node_id(),
+          audit_data,
+          render_ctx.include_untrusted_comments,
+        );
+        if comments.is_empty() {
+          return members
+            .iter()
+            .map(|inner| {
+              render_solidity_ast_snippet(
+                inner,
+                &render_ctx,
+                audit_data,
+                source_text_cache,
+              )
+            })
+            .collect::<Vec<_>>();
+        }
+      }
+      vec![render_solidity_ast_snippet(
+        n,
+        &render_ctx,
+        audit_data,
+        source_text_cache,
+      )]
+    })
     .collect();
 
   let contract_topic = topic::new_node_topic(&contract_node.node_id());
@@ -2292,12 +2385,10 @@ pub fn render_contract_for_behavior_extraction(
   audit_data: &AuditData,
   source_text_cache: &std::collections::HashMap<String, String>,
 ) -> Option<ContractForBehaviorExtraction> {
-  let (name, members) = match contract_node {
-    ASTNode::ContractDefinition {
-      signature, nodes, ..
-    } => {
+  let name = match contract_node {
+    ASTNode::ContractDefinition { signature, .. } => {
       let resolved_sig = signature.resolve(&audit_data.nodes);
-      let name = match resolved_sig {
+      match resolved_sig {
         ASTNode::ContractSignature { name, .. } => name.clone(),
         _ => {
           let ct = topic::new_node_topic(&contract_node.node_id());
@@ -2308,18 +2399,23 @@ pub fn render_contract_for_behavior_extraction(
             .unwrap_or("unknown")
             .to_string()
         }
-      };
-      (name, nodes)
+      }
     }
     _ => return None,
   };
 
+  let members = contract_members(contract_node);
+
   let contract_topic = topic::new_node_topic(&contract_node.node_id());
 
-  // Render with bodies included
+  // Render with bodies included. Behavior extraction runs against trusted,
+  // pipeline-generated content only — `functional_semantics` below is the
+  // trusted channel. The developer's own inline comments and NatSpec must
+  // not leak into this render.
   let render_ctx = ASTRenderContext {
     target_topic: contract_topic.clone(),
     omit_function_and_modifier_bodies: false,
+    include_untrusted_comments: false,
   };
 
   // Build semantic annotations for declarations in this contract
@@ -2549,14 +2645,15 @@ pub fn render_member_source_for_semantics(
     };
     for contract_node in &sol_ast.nodes {
       let resolved_contract = contract_node.resolve(&audit_data.nodes);
-      if let ASTNode::ContractDefinition { nodes, .. } = resolved_contract {
-        for member_node in nodes {
+      if let ASTNode::ContractDefinition { .. } = resolved_contract {
+        for member_node in contract_members(&resolved_contract) {
           let resolved_member = member_node.resolve(&audit_data.nodes);
           let node_topic = topic::new_node_topic(&resolved_member.node_id());
           if node_topic == *member_topic {
             let render_ctx = ASTRenderContext {
               target_topic: member_topic.clone(),
               omit_function_and_modifier_bodies: false,
+              include_untrusted_comments: true,
             };
             let rendered = render_solidity_ast_snippet(
               resolved_member,
@@ -2625,14 +2722,15 @@ pub fn render_contract_declaration_signatures(
       if node_topic != *contract_topic {
         continue;
       }
-      if let ASTNode::ContractDefinition { nodes, .. } = resolved {
+      if let ASTNode::ContractDefinition { .. } = resolved {
         let render_ctx = ASTRenderContext {
           target_topic: contract_topic.clone(),
           omit_function_and_modifier_bodies: true,
+          include_untrusted_comments: true,
         };
         // Filter to non-function/modifier members (state vars, events, structs, etc.)
         // Resolve each member before checking its type
-        let snippets: Vec<serde_json::Value> = nodes
+        let snippets: Vec<serde_json::Value> = contract_members(resolved)
           .iter()
           .filter(|n| {
             let resolved_n = n.resolve(&audit_data.nodes);
@@ -2893,7 +2991,7 @@ pub fn render_contract_list_for_semantic_linking(
       let resolved = node.resolve(&audit_data.nodes);
       if let ASTNode::ContractDefinition { .. } = resolved {
         let contract_topic = topic::new_node_topic(&resolved.node_id());
-        if let Some(json) = render_contract_members_for_linking(
+        if let Some(json) = render_contract_members_for_semantic_linking(
           resolved,
           audit_data,
           source_text_cache,
@@ -2989,4 +3087,513 @@ fn find_doc_node_by_id<'a>(
   }
 
   None
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::core::{ContractKind, NamedTopicKind, NamedTopicVisibility, Scope};
+  use crate::solidity::analyzer;
+  use crate::solidity::parser::SourceLocation;
+  use std::collections::HashSet;
+
+  fn dummy_src_location() -> SourceLocation {
+    SourceLocation {
+      start: None,
+      length: None,
+      index: None,
+    }
+  }
+
+  fn empty_parameter_list(node_id: i32) -> ASTNode {
+    ASTNode::ParameterList {
+      node_id,
+      src_location: dummy_src_location(),
+      parameters: vec![],
+      is_return_parameters: false,
+    }
+  }
+
+  /// Builds a minimal ContractDefinition containing a single
+  /// ContractMemberGroup that wraps one EventDefinition. Returns the contract
+  /// node alongside the topics for the group and the event so tests can
+  /// assert against them.
+  fn make_single_member_contract(
+    contract_id: i32,
+    signature_id: i32,
+    group_id: i32,
+    event_id: i32,
+    event_name: &str,
+    doc_text: Option<&str>,
+  ) -> (ASTNode, topic::Topic, topic::Topic) {
+    let event_node = ASTNode::EventDefinition {
+      node_id: event_id,
+      src_location: dummy_src_location(),
+      name: event_name.to_string(),
+      name_location: dummy_src_location(),
+      parameters: Box::new(empty_parameter_list(event_id + 1)),
+    };
+    let group_node = ASTNode::ContractMemberGroup {
+      node_id: group_id,
+      src_location: dummy_src_location(),
+      documentation: doc_text.map(str::to_string),
+      members: vec![event_node],
+    };
+    let signature_node = ASTNode::ContractSignature {
+      node_id: signature_id,
+      src_location: dummy_src_location(),
+      documentation: None,
+      name: "TestContract".to_string(),
+      name_location: dummy_src_location(),
+      declaration_id: contract_id,
+      contract_kind: ContractKind::Contract,
+      abstract_: false,
+      base_contracts: vec![],
+      directives: vec![],
+    };
+    let contract_node = ASTNode::ContractDefinition {
+      node_id: contract_id,
+      src_location: dummy_src_location(),
+      signature: Box::new(signature_node),
+      nodes: vec![group_node],
+    };
+    (
+      contract_node,
+      topic::new_node_topic(&group_id),
+      topic::new_node_topic(&event_id),
+    )
+  }
+
+  /// Registers a NamedTopic for the event so that `render_solidity_ast_snippet`
+  /// can look up its metadata.
+  fn register_event_metadata(
+    audit_data: &mut AuditData,
+    event_topic: &topic::Topic,
+    name: &str,
+  ) {
+    audit_data.topic_metadata.insert(
+      event_topic.clone(),
+      TopicMetadata::NamedTopic {
+        topic: event_topic.clone(),
+        scope: Scope::Global,
+        kind: NamedTopicKind::Event,
+        name: name.to_string(),
+        visibility: NamedTopicVisibility::Public,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+  }
+
+  #[test]
+  fn test_dev_comment_from_contract_member_group_reaches_semantic_linking_render() {
+    // End-to-end: a ContractMemberGroup with a single member and an inline
+    // `// comment` should produce a DevTechnical synthetic comment that
+    // `render_contract_members_for_semantic_linking` includes in its JSON output for
+    // the member.
+    let mut audit_data =
+      core::new_audit_data("test".to_string(), HashSet::new(), None);
+
+    let (contract_node, group_topic, event_topic) =
+      make_single_member_contract(1, 2, -400, 100, "Approved", Some("Fires when the admin approves"));
+
+    // Store the ContractMemberGroup (with its nested EventDefinition) in
+    // audit_data.nodes so inject_developer_documentation can find it.
+    let group_node_owned = match &contract_node {
+      ASTNode::ContractDefinition { nodes, .. } => nodes[0].clone(),
+      _ => unreachable!(),
+    };
+    audit_data
+      .nodes
+      .insert(group_topic.clone(), Node::Solidity(group_node_owned));
+
+    // Single-member group → UnnamedTopic metadata with transitive_topic so
+    // the synthetic comment resolves through to the event's topic.
+    audit_data.topic_metadata.insert(
+      group_topic.clone(),
+      TopicMetadata::UnnamedTopic {
+        topic: group_topic.clone(),
+        scope: Scope::Global,
+        kind: core::UnnamedTopicKind::ContractMemberGroup,
+        transitive_topic: Some(event_topic.clone()),
+      },
+    );
+    register_event_metadata(&mut audit_data, &event_topic, "Approved");
+
+    // Inject developer documentation — this is the real code path that
+    // creates synthetic DevTechnical comments from group docs.
+    analyzer::create_synthetic_dev_comment(
+      &event_topic,
+      "Fires when the admin approves",
+      CommentType::DevTechnical,
+      crate::collaborator::models::AUTHOR_DEV_TECHNICAL,
+      &mut audit_data,
+    );
+
+    let cache = std::collections::HashMap::new();
+    let rendered = render_contract_members_for_semantic_linking(
+      &contract_node,
+      &audit_data,
+      &cache,
+    )
+    .expect("semantic linking render returned None");
+
+    let value: serde_json::Value = serde_json::from_str(&rendered)
+      .expect("semantic linking render produced invalid JSON");
+    let members = value
+      .get("members")
+      .and_then(|m| m.as_array())
+      .expect("members field missing or wrong type");
+    assert_eq!(members.len(), 1, "expected exactly one flattened member");
+
+    let comments = members[0]
+      .get("comments")
+      .and_then(|c| c.as_array())
+      .expect("comments field missing on member");
+    assert!(
+      comments
+        .iter()
+        .filter_map(|c| c.as_str())
+        .any(|s| s.contains("[dev]") && s.contains("approves")),
+      "expected [dev] comment on member, got: {:?}",
+      comments
+    );
+  }
+
+  #[test]
+  fn test_multi_member_group_comment_surfaces_in_semantic_linking_render() {
+    // A multi-member ContractMemberGroup (with no transitive topic) stores
+    // its dev comment on the group topic itself. The semantic linking render should
+    // NOT flatten the group — it should emit the wrapper with the comment
+    // attached so the agent sees the group header alongside its members.
+    let mut audit_data =
+      core::new_audit_data("test".to_string(), HashSet::new(), None);
+
+    let contract_id = 1;
+    let contract_sig_id = 2;
+    let group_id = -600;
+    let event_a_id = 300;
+    let event_b_id = 301;
+
+    let group_topic = topic::new_node_topic(&group_id);
+    let event_a_topic = topic::new_node_topic(&event_a_id);
+    let event_b_topic = topic::new_node_topic(&event_b_id);
+
+    let event_a = ASTNode::EventDefinition {
+      node_id: event_a_id,
+      src_location: dummy_src_location(),
+      name: "AdminSet".to_string(),
+      name_location: dummy_src_location(),
+      parameters: Box::new(empty_parameter_list(event_a_id + 100)),
+    };
+    let event_b = ASTNode::EventDefinition {
+      node_id: event_b_id,
+      src_location: dummy_src_location(),
+      name: "AdminRevoked".to_string(),
+      name_location: dummy_src_location(),
+      parameters: Box::new(empty_parameter_list(event_b_id + 100)),
+    };
+    let group_node = ASTNode::ContractMemberGroup {
+      node_id: group_id,
+      src_location: dummy_src_location(),
+      documentation: Some("Admin lifecycle events".to_string()),
+      members: vec![event_a, event_b],
+    };
+    let contract_node = ASTNode::ContractDefinition {
+      node_id: contract_id,
+      src_location: dummy_src_location(),
+      signature: Box::new(ASTNode::ContractSignature {
+        node_id: contract_sig_id,
+        src_location: dummy_src_location(),
+        documentation: None,
+        name: "TestContract".to_string(),
+        name_location: dummy_src_location(),
+        declaration_id: contract_id,
+        contract_kind: ContractKind::Contract,
+        abstract_: false,
+        base_contracts: vec![],
+        directives: vec![],
+      }),
+      nodes: vec![group_node.clone()],
+    };
+
+    audit_data
+      .nodes
+      .insert(group_topic.clone(), Node::Solidity(group_node));
+
+    // Multi-member group → NO transitive topic; comment lands on the group.
+    audit_data.topic_metadata.insert(
+      group_topic.clone(),
+      TopicMetadata::UnnamedTopic {
+        topic: group_topic.clone(),
+        scope: Scope::Global,
+        kind: core::UnnamedTopicKind::ContractMemberGroup,
+        transitive_topic: None,
+      },
+    );
+    register_event_metadata(&mut audit_data, &event_a_topic, "AdminSet");
+    register_event_metadata(&mut audit_data, &event_b_topic, "AdminRevoked");
+
+    analyzer::create_synthetic_dev_comment(
+      &group_topic,
+      "Admin lifecycle events",
+      CommentType::DevTechnical,
+      crate::collaborator::models::AUTHOR_DEV_TECHNICAL,
+      &mut audit_data,
+    );
+
+    let cache = std::collections::HashMap::new();
+    let rendered = render_contract_members_for_semantic_linking(
+      &contract_node,
+      &audit_data,
+      &cache,
+    )
+    .expect("semantic linking render returned None");
+
+    let value: serde_json::Value = serde_json::from_str(&rendered)
+      .expect("semantic linking render produced invalid JSON");
+    let members = value
+      .get("members")
+      .and_then(|m| m.as_array())
+      .expect("members field missing");
+    assert_eq!(
+      members.len(),
+      1,
+      "multi-member group with comment should render as a single wrapper"
+    );
+
+    let wrapper = &members[0];
+    assert_eq!(
+      wrapper.get("kind").and_then(|k| k.as_str()),
+      Some("contract_member_group"),
+      "wrapper should be a ContractMemberGroup"
+    );
+    let group_comments = wrapper
+      .get("comments")
+      .and_then(|c| c.as_array())
+      .expect("group wrapper should carry its dev comment");
+    assert!(
+      group_comments
+        .iter()
+        .filter_map(|c| c.as_str())
+        .any(|s| s.contains("[dev]") && s.contains("Admin lifecycle")),
+      "expected group-level [dev] comment, got: {:?}",
+      group_comments
+    );
+    let inner = wrapper
+      .get("members")
+      .and_then(|m| m.as_array())
+      .expect("group wrapper should nest inner members");
+    assert_eq!(inner.len(), 2, "both events should render inside the group");
+  }
+
+  #[test]
+  fn test_dev_comment_from_contract_member_group_reaches_behavior_render() {
+    // Same end-to-end verification but for the behavior-extraction renderer.
+    // That renderer only emits function/modifier members, so we use a
+    // FunctionDefinition here.
+    let mut audit_data =
+      core::new_audit_data("test".to_string(), HashSet::new(), None);
+
+    let contract_id = 1;
+    let contract_sig_id = 2;
+    let group_id = -500;
+    let function_id = 200;
+    let function_sig_id = 201;
+    let params_id = 202;
+    let returns_id = 203;
+    let modifiers_id = 204;
+    let body_id = 205;
+
+    let event_topic = topic::new_node_topic(&function_id);
+    let group_topic = topic::new_node_topic(&group_id);
+    let contract_topic = topic::new_node_topic(&contract_id);
+
+    let function_node = ASTNode::FunctionDefinition {
+      node_id: function_id,
+      src_location: dummy_src_location(),
+      implemented: true,
+      signature: Box::new(ASTNode::FunctionSignature {
+        node_id: function_sig_id,
+        src_location: dummy_src_location(),
+        documentation: None,
+        kind: crate::core::FunctionKind::Function,
+        modifiers: Box::new(ASTNode::ModifierList {
+          node_id: modifiers_id,
+          src_location: dummy_src_location(),
+          modifiers: vec![],
+        }),
+        name: "doThing".to_string(),
+        name_location: dummy_src_location(),
+        declaration_id: function_id,
+        parameters: Box::new(empty_parameter_list(params_id)),
+        return_parameters: Box::new(ASTNode::ParameterList {
+          node_id: returns_id,
+          src_location: dummy_src_location(),
+          parameters: vec![],
+          is_return_parameters: true,
+        }),
+        scope: contract_id,
+        state_mutability:
+          crate::solidity::parser::FunctionStateMutability::NonPayable,
+        virtual_: false,
+        visibility: crate::solidity::parser::FunctionVisibility::External,
+        implementation_declaration: None,
+      }),
+      body: Some(Box::new(ASTNode::Block {
+        node_id: body_id,
+        src_location: dummy_src_location(),
+        statements: vec![],
+      })),
+    };
+
+    let group_node = ASTNode::ContractMemberGroup {
+      node_id: group_id,
+      src_location: dummy_src_location(),
+      documentation: Some("Admin-only entry point".to_string()),
+      members: vec![function_node],
+    };
+
+    let contract_node = ASTNode::ContractDefinition {
+      node_id: contract_id,
+      src_location: dummy_src_location(),
+      signature: Box::new(ASTNode::ContractSignature {
+        node_id: contract_sig_id,
+        src_location: dummy_src_location(),
+        documentation: None,
+        name: "TestContract".to_string(),
+        name_location: dummy_src_location(),
+        declaration_id: contract_id,
+        contract_kind: ContractKind::Contract,
+        abstract_: false,
+        base_contracts: vec![],
+        directives: vec![],
+      }),
+      nodes: vec![group_node.clone()],
+    };
+
+    audit_data
+      .nodes
+      .insert(group_topic.clone(), Node::Solidity(group_node));
+
+    audit_data.topic_metadata.insert(
+      group_topic.clone(),
+      TopicMetadata::UnnamedTopic {
+        topic: group_topic.clone(),
+        scope: Scope::Global,
+        kind: core::UnnamedTopicKind::ContractMemberGroup,
+        transitive_topic: Some(event_topic.clone()),
+      },
+    );
+    audit_data.topic_metadata.insert(
+      event_topic.clone(),
+      TopicMetadata::NamedTopic {
+        topic: event_topic.clone(),
+        scope: Scope::Component {
+          container: crate::core::ProjectPath {
+            file_path: "test.sol".to_string(),
+          },
+          component: contract_topic.clone(),
+        },
+        kind: NamedTopicKind::Function(crate::core::FunctionKind::Function),
+        name: "doThing".to_string(),
+        visibility: NamedTopicVisibility::Public,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+
+    // Untrusted dev comment: must NOT leak into the behavior render.
+    analyzer::create_synthetic_dev_comment(
+      &event_topic,
+      "Admin-only entry point",
+      CommentType::DevTechnical,
+      crate::collaborator::models::AUTHOR_DEV_TECHNICAL,
+      &mut audit_data,
+    );
+
+    // Trusted auditor comment: should still surface.
+    analyzer::create_synthetic_dev_comment(
+      &event_topic,
+      "Auditor: confirmed role-restricted",
+      CommentType::Info,
+      0,
+      &mut audit_data,
+    );
+
+    // Trusted pipeline-generated functional semantic annotation.
+    let semantic_topic = topic::new_functional_property_topic(9001);
+    audit_data.topic_metadata.insert(
+      semantic_topic.clone(),
+      TopicMetadata::FunctionalSemanticTopic {
+        topic: semantic_topic.clone(),
+        description: "Only callable by the admin role".to_string(),
+        declaration_topic: event_topic.clone(),
+        documentation_topics: vec![],
+        author_id: 0,
+        created_at: String::new(),
+      },
+    );
+    audit_data
+      .declaration_semantics
+      .entry(event_topic.clone())
+      .or_default()
+      .push(semantic_topic);
+
+    let cache = std::collections::HashMap::new();
+    let rendered = render_contract_for_behavior_extraction(
+      &contract_node,
+      &audit_data,
+      &cache,
+    )
+    .expect("behavior extraction returned None");
+
+    let value: serde_json::Value = serde_json::from_str(&rendered.json)
+      .expect("behavior extraction produced invalid JSON");
+    let members = value
+      .get("members")
+      .and_then(|m| m.as_array())
+      .expect("members field missing");
+    assert_eq!(members.len(), 1, "expected one rendered function member");
+
+    let comments: Vec<&str> = members[0]
+      .get("comments")
+      .and_then(|c| c.as_array())
+      .map(|arr| arr.iter().filter_map(|c| c.as_str()).collect())
+      .unwrap_or_default();
+
+    assert!(
+      comments.iter().all(|s| !s.contains("[dev]")),
+      "dev comments must not leak into behavior extraction, got: {:?}",
+      comments
+    );
+    assert!(
+      comments.iter().any(|s| s.contains("Auditor:")),
+      "auditor-authored Info comments should still surface, got: {:?}",
+      comments
+    );
+
+    let semantics = value
+      .get("functional_semantics")
+      .and_then(|s| s.as_array())
+      .expect("functional_semantics field missing");
+    assert!(
+      semantics.iter().any(|s| s
+        .get("semantic")
+        .and_then(|v| v.as_str())
+        .map_or(false, |text| text.contains("admin role"))),
+      "expected trusted semantic annotation on function, got: {:?}",
+      semantics
+    );
+  }
 }

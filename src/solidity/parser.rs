@@ -861,6 +861,18 @@ pub enum ASTNode {
     documentation: Option<String>,
     statements: Vec<ASTNode>,
   },
+  /// A group of contract-body members (state variables, functions, etc.)
+  /// separated from neighboring groups by a blank line. Exists only to
+  /// attach a leading inline comment (captured in `documentation`) to a
+  /// group of related members. Unlike `SemanticBlock`, this node does NOT
+  /// introduce a scope layer — contract members inside it are semantically
+  /// peers of the ContractDefinition.
+  ContractMemberGroup {
+    node_id: i32,
+    src_location: SourceLocation,
+    documentation: Option<String>,
+    members: Vec<ASTNode>,
+  },
   Break {
     node_id: i32,
     src_location: SourceLocation,
@@ -1306,6 +1318,7 @@ impl ASTNode {
       ASTNode::EnumValue { node_id, .. } => *node_id,
       ASTNode::Block { node_id, .. } => *node_id,
       ASTNode::SemanticBlock { node_id, .. } => *node_id,
+      ASTNode::ContractMemberGroup { node_id, .. } => *node_id,
       ASTNode::Break { node_id, .. } => *node_id,
       ASTNode::Continue { node_id, .. } => *node_id,
       ASTNode::DoWhileStatement { node_id, .. } => *node_id,
@@ -1379,6 +1392,7 @@ impl ASTNode {
       ASTNode::EnumValue { src_location, .. } => src_location,
       ASTNode::Block { src_location, .. } => src_location,
       ASTNode::SemanticBlock { src_location, .. } => src_location,
+      ASTNode::ContractMemberGroup { src_location, .. } => src_location,
       ASTNode::Break { src_location, .. } => src_location,
       ASTNode::Continue { src_location, .. } => src_location,
       ASTNode::DoWhileStatement { src_location, .. } => src_location,
@@ -1532,6 +1546,13 @@ impl ASTNode {
       ASTNode::SemanticBlock { statements, .. } => {
         let mut result = vec![];
         for item in statements {
+          result.push(item);
+        }
+        result
+      }
+      ASTNode::ContractMemberGroup { members, .. } => {
+        let mut result = vec![];
+        for item in members {
           result.push(item);
         }
         result
@@ -1909,6 +1930,9 @@ impl ASTNode {
       ASTNode::SemanticBlock { statements, .. } => {
         statements.iter_mut().collect()
       }
+      ASTNode::ContractMemberGroup { members, .. } => {
+        members.iter_mut().collect()
+      }
       ASTNode::Break { .. } => vec![],
       ASTNode::Continue { .. } => vec![],
       ASTNode::DoWhileStatement {
@@ -2236,6 +2260,7 @@ impl ASTNode {
       ASTNode::EnumValue { .. } => "EnumValue",
       ASTNode::Block { .. } => "Block",
       ASTNode::SemanticBlock { .. } => "SemanticBlock",
+      ASTNode::ContractMemberGroup { .. } => "ContractMemberGroup",
       ASTNode::Break { .. } => "Break",
       ASTNode::Continue { .. } => "Continue",
       ASTNode::DoWhileStatement { .. } => "DoWhileStatement",
@@ -2623,6 +2648,17 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       src_location: src_location,
       documentation: documentation,
       statements: statements.iter().map(|n| node_to_stub(n)).collect(),
+    },
+    ASTNode::ContractMemberGroup {
+      node_id,
+      src_location,
+      documentation,
+      members,
+    } => ASTNode::ContractMemberGroup {
+      node_id: node_id,
+      src_location: src_location,
+      documentation: documentation,
+      members: members.iter().map(|n| node_to_stub(n)).collect(),
     },
     ASTNode::Break {
       node_id,
@@ -3932,73 +3968,121 @@ fn wrap_statement_in_block(statement: Box<ASTNode>) -> Box<ASTNode> {
   }
 }
 
+/// Groups a list of nodes into slices separated by blank lines, returning
+/// each group along with its leading inline documentation comment (if any).
+fn group_nodes_by_semantic_breaks(
+  statements: Vec<ASTNode>,
+  source: &str,
+  block_src_location: &SourceLocation,
+) -> Vec<(Vec<ASTNode>, Option<String>, SourceLocation)> {
+  if statements.is_empty() {
+    return vec![];
+  }
+
+  let breaks = find_semantic_breaks(source, &statements);
+  let mut groups = vec![];
+
+  let build_group = |group_statements: Vec<ASTNode>,
+                     group_start_index: usize,
+                     all_statements: &[ASTNode]|
+   -> Option<(Vec<ASTNode>, Option<String>, SourceLocation)> {
+    if group_statements.is_empty() {
+      return None;
+    }
+
+    let first_stmt_start =
+      group_statements[0].src_location().start.unwrap_or(0);
+    let last_stmt = &group_statements[group_statements.len() - 1];
+    let last_stmt_end = last_stmt.src_location().start.unwrap_or(0)
+      + last_stmt.src_location().length.unwrap_or(0);
+
+    let group_start_pos = if group_start_index == 0 {
+      block_src_location.start.unwrap_or(0)
+    } else {
+      all_statements[group_start_index - 1]
+        .src_location()
+        .start
+        .unwrap_or(0)
+        + all_statements[group_start_index - 1]
+          .src_location()
+          .length
+          .unwrap_or(0)
+    };
+
+    let documentation =
+      extract_block_documentation(source, group_start_pos, first_stmt_start);
+
+    let src_location = SourceLocation {
+      start: Some(first_stmt_start),
+      length: Some(last_stmt_end - first_stmt_start),
+      index: None,
+    };
+
+    Some((group_statements, documentation, src_location))
+  };
+
+  let mut current_group_start = 0;
+  for &break_index in &breaks {
+    let group_statements =
+      statements[current_group_start..break_index].to_vec();
+    if let Some(group) =
+      build_group(group_statements, current_group_start, &statements)
+    {
+      groups.push(group);
+    }
+    current_group_start = break_index;
+  }
+
+  let group_statements = statements[current_group_start..].to_vec();
+  if let Some(group) =
+    build_group(group_statements, current_group_start, &statements)
+  {
+    groups.push(group);
+  }
+
+  groups
+}
+
 fn group_statements_into_semantic_blocks(
   statements: Vec<ASTNode>,
   source: &str,
   block_src_location: &SourceLocation,
 ) -> Result<Vec<ASTNode>, String> {
-  if statements.is_empty() {
-    return Ok(vec![]);
-  }
-
-  let breaks = find_semantic_breaks(source, &statements);
-  let mut semantic_blocks = vec![];
-  let mut current_group_start = 0;
-
-  let mut create_semantic_block =
-    |group_statements: Vec<ASTNode>, group_start_index: usize| {
-      if group_statements.is_empty() {
-        return;
-      }
-
-      let first_stmt_start =
-        group_statements[0].src_location().start.unwrap_or(0);
-      let last_stmt = &group_statements[group_statements.len() - 1];
-      let last_stmt_end = last_stmt.src_location().start.unwrap_or(0)
-        + last_stmt.src_location().length.unwrap_or(0);
-
-      let group_start_pos = if group_start_index == 0 {
-        block_src_location.start.unwrap_or(0)
-      } else {
-        statements[group_start_index - 1]
-          .src_location()
-          .start
-          .unwrap_or(0)
-          + statements[group_start_index - 1]
-            .src_location()
-            .length
-            .unwrap_or(0)
-      };
-
-      let documentation =
-        extract_block_documentation(source, group_start_pos, first_stmt_start);
-
-      let semantic_block = ASTNode::SemanticBlock {
+  let groups =
+    group_nodes_by_semantic_breaks(statements, source, block_src_location);
+  Ok(
+    groups
+      .into_iter()
+      .map(|(statements, documentation, src_location)| ASTNode::SemanticBlock {
         node_id: generate_node_id(),
-        src_location: SourceLocation {
-          start: Some(first_stmt_start),
-          length: Some(last_stmt_end - first_stmt_start),
-          index: None,
-        },
+        src_location,
         documentation,
-        statements: group_statements,
-      };
+        statements,
+      })
+      .collect(),
+  )
+}
 
-      semantic_blocks.push(semantic_block);
-    };
-
-  for &break_index in &breaks {
-    let group_statements =
-      statements[current_group_start..break_index].to_vec();
-    create_semantic_block(group_statements, current_group_start);
-    current_group_start = break_index;
-  }
-
-  // Handle the last group
-  let group_statements = statements[current_group_start..].to_vec();
-  create_semantic_block(group_statements, current_group_start);
-
-  Ok(semantic_blocks)
+fn group_members_into_contract_member_groups(
+  members: Vec<ASTNode>,
+  source: &str,
+  block_src_location: &SourceLocation,
+) -> Result<Vec<ASTNode>, String> {
+  let groups =
+    group_nodes_by_semantic_breaks(members, source, block_src_location);
+  Ok(
+    groups
+      .into_iter()
+      .map(
+        |(members, documentation, src_location)| ASTNode::ContractMemberGroup {
+          node_id: generate_node_id(),
+          src_location,
+          documentation,
+          members,
+        },
+      )
+      .collect(),
+  )
 }
 
 /// Extracts the referenced declaration ID from a function call expression.
@@ -4021,6 +4105,26 @@ pub fn get_referenced_function_id(expression: &ASTNode) -> Option<i32> {
     }
     _ => None,
   }
+}
+
+/// Flattens contract members through ContractMemberGroup wrappers.
+/// After grouping, ContractDefinition.nodes may contain ContractMemberGroup
+/// nodes; this returns the leaf declaration nodes within them.
+pub fn contract_members(contract: &ASTNode) -> Vec<&ASTNode> {
+  let nodes = match contract {
+    ASTNode::ContractDefinition { nodes, .. } => nodes,
+    _ => return vec![],
+  };
+  let mut result = Vec::new();
+  for node in nodes {
+    match node {
+      ASTNode::ContractMemberGroup { members, .. } => {
+        result.extend(members.iter());
+      }
+      _ => result.push(node),
+    }
+  }
+  result
 }
 
 /// Gets the parameters from a function definition node.
@@ -4926,9 +5030,23 @@ fn node_from_json(
         get_required_enum_with_context(val, "contractKind", node_type_str)?;
 
       // Separate UsingForDirective nodes from other nodes
-      let (directives, nodes): (Vec<ASTNode>, Vec<ASTNode>) = all_nodes
+      let (directives, mut nodes): (Vec<ASTNode>, Vec<ASTNode>) = all_nodes
         .into_iter()
         .partition(|node| matches!(node, ASTNode::UsingForDirective { .. }));
+
+      // Group contract members separated by blank lines into
+      // ContractMemberGroup wrappers so that inline comments are captured
+      // on the group and single-child groups become transitive to their
+      // child. Unlike SemanticBlock, this wrapper is scope-transparent —
+      // its members remain peers of the ContractDefinition for scope
+      // purposes.
+      if !nodes.is_empty() {
+        nodes = group_members_into_contract_member_groups(
+          nodes,
+          &context.source_content,
+          &src_location,
+        )?;
+      }
 
       // Create the ContractSignature node with a generated ID
       let signature_node_id = generate_node_id();

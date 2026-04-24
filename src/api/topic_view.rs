@@ -256,6 +256,9 @@ pub fn highlighted_name(metadata: &TopicMetadata) -> String {
       UnnamedTopicKind::SemanticBlock => {
         "<span class=\"block\">ContainingBlock</span>".to_string()
       }
+      UnnamedTopicKind::ContractMemberGroup => {
+        "<span class=\"block\">ContractMemberGroup</span>".to_string()
+      }
       UnnamedTopicKind::Break => {
         "<span class=\"keyword\">BreakStatement</span>".to_string()
       }
