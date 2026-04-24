@@ -1,0 +1,15 @@
+[package]
+name = "o11a-server"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "o11a-server"
+path = "src/main.rs"
+
+[dependencies]
+o11a-core = { path = "../o11a-core" }
+o11a-web-backend = { path = "../o11a-web-backend" }
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1.0"
