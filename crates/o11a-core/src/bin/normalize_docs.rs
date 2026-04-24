@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use o11a_core::collaborator::agent::task::{
   DocumentationFile, normalize_documentation,
 };
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 /// Standalone binary to normalize documentation files for plain text readability.
 ///
@@ -16,6 +17,14 @@ use o11a_core::collaborator::agent::task::{
 /// Requires OPENROUTER_API_KEY to be set (or AGENT_DRY_RUN for testing).
 #[tokio::main]
 async fn main() {
+  tracing_subscriber::registry()
+    .with(fmt::layer().with_target(false))
+    .with(
+      EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info")),
+    )
+    .init();
+
   let args: Vec<String> = std::env::args().collect();
   if args.len() != 2 {
     eprintln!("Usage: normalize_docs <project_root>");
@@ -24,7 +33,7 @@ async fn main() {
 
   let project_root = PathBuf::from(&args[1]);
   if !project_root.is_dir() {
-    eprintln!("Error: '{}' is not a directory", project_root.display());
+    tracing::error!("'{}' is not a directory", project_root.display());
     std::process::exit(1);
   }
 
@@ -33,7 +42,11 @@ async fn main() {
   let doc_list = match std::fs::read_to_string(&doc_list_path) {
     Ok(content) => content,
     Err(e) => {
-      eprintln!("Error: failed to read '{}': {}", doc_list_path.display(), e);
+      tracing::error!(
+        "failed to read '{}': {}",
+        doc_list_path.display(),
+        e
+      );
       std::process::exit(1);
     }
   };
@@ -54,12 +67,12 @@ async fn main() {
     let source_content = match std::fs::read_to_string(&absolute_path) {
       Ok(content) => content,
       Err(e) => {
-        eprintln!("Warning: skipping '{}': {}", absolute_path.display(), e);
+        tracing::warn!("skipping '{}': {}", absolute_path.display(), e);
         continue;
       }
     };
 
-    println!("Loaded: {}", relative_path);
+    tracing::info!("Loaded: {}", relative_path);
     documentation_files.push(DocumentationFile {
       file_path: relative_path.to_string(),
       source_content,
@@ -67,11 +80,11 @@ async fn main() {
   }
 
   if documentation_files.is_empty() {
-    eprintln!("No documentation files found");
+    tracing::error!("No documentation files found");
     std::process::exit(1);
   }
 
-  println!(
+  tracing::info!(
     "Normalizing {} documentation files...",
     documentation_files.len()
   );
@@ -79,7 +92,7 @@ async fn main() {
   let normalized = match normalize_documentation(&documentation_files).await {
     Ok(result) => result,
     Err(e) => {
-      eprintln!("Normalization failed: {}", e);
+      tracing::error!("Normalization failed: {}", e);
       std::process::exit(1);
     }
   };
@@ -88,10 +101,10 @@ async fn main() {
   for (relative_path, content) in &normalized.files {
     let absolute_path = project_root.join(relative_path);
     match std::fs::write(&absolute_path, content) {
-      Ok(()) => println!("Wrote: {}", relative_path),
+      Ok(()) => tracing::info!("Wrote: {}", relative_path),
       Err(e) => {
-        eprintln!(
-          "Error: failed to write '{}': {}",
+        tracing::error!(
+          "failed to write '{}': {}",
           absolute_path.display(),
           e
         );
@@ -99,5 +112,5 @@ async fn main() {
     }
   }
 
-  println!("Done. Normalized {} files.", normalized.files.len());
+  tracing::info!("Done. Normalized {} files.", normalized.files.len());
 }

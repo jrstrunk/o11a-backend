@@ -141,7 +141,7 @@ pub async fn chat_completion(
       model, system_message, prompt
     );
     std::fs::write(&path, &output)?;
-    println!("Dry run prompt written to: {}", path);
+    tracing::debug!("Dry run prompt written to: {}", path);
     // Return the schema's empty-shape sentinel so downstream parsing sees a
     // well-formed response and the pipeline continues with empty results,
     // letting every pass fire and write its prompt file. Callers that do not

@@ -350,12 +350,17 @@ pub async fn extract_requirements_from_documentation(
     match handle.await {
       Ok(Ok(response)) => per_doc_results.push(response),
       Ok(Err(e)) => {
-        eprintln!("extract_requirements failed for document {}: {}", i, e);
+        tracing::error!(
+          "extract_requirements failed for document {}: {}",
+          i,
+          e
+        );
       }
       Err(e) => {
-        eprintln!(
+        tracing::error!(
           "extract_requirements task panicked for document {}: {}",
-          i, e
+          i,
+          e
         );
       }
     }
@@ -1429,10 +1434,10 @@ pub async fn normalize_documentation(
         files.insert(path, response);
       }
       Ok((path, Err(e))) => {
-        eprintln!("normalize_documentation failed for {}: {}", path, e);
+        tracing::error!("normalize_documentation failed for {}: {}", path, e);
       }
       Err(e) => {
-        eprintln!("normalize_documentation task panicked: {}", e);
+        tracing::error!("normalize_documentation task panicked: {}", e);
       }
     }
   }

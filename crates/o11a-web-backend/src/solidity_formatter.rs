@@ -1603,7 +1603,7 @@ fn do_node_to_source_text(
             format!("<span>{}</span>", text.clone())
           }
           _ => {
-            println!("Unexpected documentation node: {:?}", doc);
+            tracing::info!("Unexpected documentation node: {:?}", doc);
             String::new()
           }
         })
@@ -1772,7 +1772,7 @@ fn do_node_to_source_text(
             format!("<span>{}</span>", text.clone())
           }
           _ => {
-            println!("Unexpected documentation node: {:?}", doc);
+            tracing::info!("Unexpected documentation node: {:?}", doc);
             String::new()
           }
         })

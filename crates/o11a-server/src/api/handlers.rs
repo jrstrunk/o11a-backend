@@ -21,7 +21,7 @@ use crate::api::error::artifact_error_response;
 
 // Health check handler
 pub async fn health_check() -> StatusCode {
-  println!("GET /health");
+  tracing::debug!("GET /health");
   StatusCode::OK
 }
 
@@ -38,9 +38,9 @@ pub async fn get_data_context(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
 ) -> Result<Json<DataContextResponse>, StatusCode> {
-  println!("GET /api/v1/audits/{}/data-context", audit_id);
+  tracing::debug!("GET /api/v1/audits/{}/data-context", audit_id);
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_data_context: {}", e);
+    tracing::error!("Mutex poisoned in get_data_context: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -77,7 +77,7 @@ pub struct CreateChatRequest {
 pub async fn get_chats(
   State(state): State<AppState>,
 ) -> Result<Json<Vec<Chat>>, StatusCode> {
-  println!("GET /api/v1/chats");
+  tracing::debug!("GET /api/v1/chats");
   let chats = sqlx::query_as::<_, Chat>(
     "SELECT id, content, created_at FROM chats ORDER BY created_at DESC",
   )
@@ -93,7 +93,7 @@ pub async fn create_chat(
   State(state): State<AppState>,
   Json(payload): Json<CreateChatRequest>,
 ) -> Result<Json<Chat>, StatusCode> {
-  println!("POST /api/v1/chats");
+  tracing::debug!("POST /api/v1/chats");
   let result = sqlx::query("INSERT INTO chats (content) VALUES (?)")
     .bind(&payload.content)
     .execute(&state.db)
@@ -122,7 +122,7 @@ pub async fn get_boundaries(
   State(_state): State<AppState>,
   Path(audit_id): Path<String>,
 ) -> Result<Json<BoundariesResponse>, StatusCode> {
-  println!("GET /api/v1/audits/{}/boundaries", audit_id);
+  tracing::debug!("GET /api/v1/audits/{}/boundaries", audit_id);
   // TODO: Implement actual boundaries from checker
   Ok(Json(BoundariesResponse { boundaries: vec![] }))
 }
@@ -137,10 +137,10 @@ pub async fn get_in_scope_files(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
 ) -> Result<Json<InScopeFilesResponse>, StatusCode> {
-  println!("GET /api/v1/audits/{}/in_scope_files", audit_id);
+  tracing::debug!("GET /api/v1/audits/{}/in_scope_files", audit_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_in_scope_files: {}", e);
+    tracing::error!("Mutex poisoned in get_in_scope_files: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -171,9 +171,9 @@ pub struct AuditsListResponse {
 pub async fn list_audits(
   State(state): State<AppState>,
 ) -> Result<Json<AuditsListResponse>, StatusCode> {
-  println!("GET /api/v1/audits");
+  tracing::debug!("GET /api/v1/audits");
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in list_audits: {}", e);
+    tracing::error!("Mutex poisoned in list_audits: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
   let audits = ctx
@@ -202,13 +202,13 @@ pub async fn create_audit(
   State(state): State<AppState>,
   Json(payload): Json<CreateAuditRequest>,
 ) -> Result<Json<CreateAuditResponse>, StatusCode> {
-  println!("POST /api/v1/audits");
+  tracing::debug!("POST /api/v1/audits");
   let project_root = std::path::Path::new(&payload.project_root);
   let artifact_path = project_root.join("o11a").join("audit.analysis.bin");
   let report_path = project_root.join("o11a").join("audit.json");
 
   let artifact = analysis_artifact::read_artifact(&artifact_path).map_err(|e| {
-    eprintln!(
+    tracing::error!(
       "create_audit: failed to read {}: {}",
       artifact_path.display(),
       e
@@ -221,12 +221,12 @@ pub async fn create_audit(
       expected: payload.audit_id.clone(),
       found: artifact.audit_id.clone(),
     };
-    eprintln!("create_audit: {}", err);
+    tracing::warn!("create_audit: {}", err);
     return Err(artifact_error_response(err).0);
   }
 
   let report_body = std::fs::read_to_string(&report_path).map_err(|e| {
-    eprintln!(
+    tracing::error!(
       "create_audit: failed to read {}: {}",
       report_path.display(),
       e
@@ -235,13 +235,13 @@ pub async fn create_audit(
   })?;
   let report: AuditReport =
     serde_json::from_str(&report_body).map_err(|e| {
-      eprintln!("create_audit: failed to parse audit.json: {}", e);
+      tracing::error!("create_audit: failed to parse audit.json: {}", e);
       StatusCode::BAD_REQUEST
     })?;
 
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in create_audit: {}", e);
+      tracing::error!("Mutex poisoned in create_audit: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     ctx.create_audit(
@@ -251,7 +251,7 @@ pub async fn create_audit(
       artifact.payload.security_notes.clone(),
     );
     let audit_data = ctx.get_audit_mut(&payload.audit_id).ok_or_else(|| {
-      eprintln!(
+      tracing::warn!(
         "create_audit: audit '{}' missing after create_audit",
         payload.audit_id
       );
@@ -261,7 +261,7 @@ pub async fn create_audit(
 
     if let Err(e) = report::apply_report(&payload.audit_id, audit_data, &report)
     {
-      eprintln!("create_audit: failed to apply audit report: {}", e);
+      tracing::error!("create_audit: failed to apply audit report: {}", e);
       return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
     domain::rebuild_feature_context(audit_data);
@@ -283,9 +283,9 @@ pub async fn delete_audit(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
 ) -> Result<Json<DeleteAuditResponse>, StatusCode> {
-  println!("DELETE /api/v1/audits/{}", audit_id);
+  tracing::debug!("DELETE /api/v1/audits/{}", audit_id);
   let mut ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in delete_audit: {}", e);
+    tracing::error!("Mutex poisoned in delete_audit: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -313,10 +313,10 @@ pub async fn get_documents(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
 ) -> Result<Json<DocumentsResponse>, StatusCode> {
-  println!("GET /api/v1/audits/{}/documents", audit_id);
+  tracing::debug!("GET /api/v1/audits/{}/documents", audit_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_documents: {}", e);
+    tracing::error!("Mutex poisoned in get_documents: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -342,10 +342,10 @@ pub async fn get_contracts(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
 ) -> Result<Json<ContractsResponse>, StatusCode> {
-  println!("GET /api/v1/audits/{}/contracts", audit_id);
+  tracing::debug!("GET /api/v1/audits/{}/contracts", audit_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_contracts: {}", e);
+    tracing::error!("Mutex poisoned in get_contracts: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -397,10 +397,10 @@ pub async fn get_qualified_names(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
-  println!("GET /api/v1/audits/{}/qualified_names", audit_id);
+  tracing::debug!("GET /api/v1/audits/{}/qualified_names", audit_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_qualified_names: {}", e);
+    tracing::error!("Mutex poisoned in get_qualified_names: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -427,10 +427,10 @@ pub async fn get_delimiter(
   Json<Option<o11a_core::solidity::delimiter::DelimiterInfo>>,
   StatusCode,
 > {
-  println!("GET /api/v1/audits/{}/delimiter/{}", audit_id, topic_id);
+  tracing::debug!("GET /api/v1/audits/{}/delimiter/{}", audit_id, topic_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_delimiter: {}", e);
+    tracing::error!("Mutex poisoned in get_delimiter: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -439,7 +439,7 @@ pub async fn get_delimiter(
   let topic = new_topic(&topic_id);
 
   let node = audit_data.nodes.get(&topic).ok_or_else(|| {
-    eprintln!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
+    tracing::warn!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
     StatusCode::NOT_FOUND
   })?;
 
@@ -816,10 +816,10 @@ pub async fn get_metadata(
   State(state): State<AppState>,
   Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  println!("GET /api/v1/audits/{}/metadata/{}", audit_id, topic_id);
+  tracing::debug!("GET /api/v1/audits/{}/metadata/{}", audit_id, topic_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_metadata: {}", e);
+    tracing::error!("Mutex poisoned in get_metadata: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -830,7 +830,7 @@ pub async fn get_metadata(
 
   // Get the metadata for this topic
   let metadata = audit_data.topic_metadata.get(&topic).ok_or_else(|| {
-    eprintln!(
+    tracing::warn!(
       "Metadata for topic '{}' not found in audit '{}'",
       topic_id, audit_id
     );
@@ -864,7 +864,7 @@ pub async fn list_comments_by_type_and_status(
   State(state): State<AppState>,
   Path((audit_id, comment_type, status)): Path<(String, String, String)>,
 ) -> Result<Json<CommentListResponse>, StatusCode> {
-  println!(
+  tracing::debug!(
     "GET /api/v1/audits/{}/comments/{}/{}",
     audit_id, comment_type, status
   );
@@ -903,7 +903,7 @@ pub async fn create_comment(
   Path(audit_id): Path<String>,
   Json(payload): Json<CreateCommentRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-  println!(
+  tracing::debug!(
     "POST /api/v1/audits/{}/comments body: {:?}",
     audit_id, payload
   );
@@ -911,7 +911,7 @@ pub async fn create_comment(
   // If target is a comment (starts with "C"), copy scope from parent comment
   // Otherwise, get scope from the topic's metadata in audit data
   let target_topic = new_topic(&payload.topic_id);
-  println!("create_comment: resolved target_topic={:?}", target_topic,);
+  tracing::debug!("create_comment: resolved target_topic={:?}", target_topic,);
   let scope = if let topic::Topic::Comment(parent_comment_id) = target_topic {
     // Target is a comment - get scope from parent comment
     let parent_comment_id = parent_comment_id as i64;
@@ -920,46 +920,46 @@ pub async fn create_comment(
       .map_err(|e| {
         let msg =
           format!("Parent comment {} not found: {}", parent_comment_id, e);
-        eprintln!("ERROR create_comment: {}", msg);
+        tracing::error!("ERROR create_comment: {}", msg);
         (StatusCode::NOT_FOUND, msg)
       })?;
     // Parse the stored scope JSON
     serde_json::from_str(&parent_comment.scope).unwrap_or_default()
   } else {
     // Target is a regular topic - get scope from audit metadata
-    println!("create_comment: acquiring first lock for scope resolution...");
+    tracing::debug!("create_comment: acquiring first lock for scope resolution...");
     let ctx = state.data_context.lock().map_err(|e| {
       let msg = format!("Failed to lock data context: {}", e);
-      eprintln!("ERROR create_comment: {}", msg);
+      tracing::error!("ERROR create_comment: {}", msg);
       (StatusCode::INTERNAL_SERVER_ERROR, msg)
     })?;
-    println!(
+    tracing::debug!(
       "create_comment: first lock acquired, looking up audit '{}'...",
       audit_id
     );
     let audit_data = ctx.get_audit(&audit_id).ok_or_else(|| {
       let msg = format!("Audit '{}' not found in data context", audit_id);
-      eprintln!("ERROR create_comment: {}", msg);
+      tracing::error!("ERROR create_comment: {}", msg);
       (StatusCode::NOT_FOUND, msg)
     })?;
     let scope = ScopeInfo::from_topic(&payload.topic_id, audit_data);
-    println!("create_comment: resolved scope={:?}", scope.scope_type);
+    tracing::debug!("create_comment: resolved scope={:?}", scope.scope_type);
     scope
   };
 
   // Insert comment into database with scope
-  println!("create_comment: inserting into DB...");
+  tracing::debug!("create_comment: inserting into DB...");
   let comment = db::create_comment(&state.db, &audit_id, &payload, &scope)
     .await
     .map_err(|e| {
       let msg = format!("Failed to create comment in DB: {}", e);
-      eprintln!("ERROR create_comment: {}", msg);
+      tracing::error!("ERROR create_comment: {}", msg);
       (StatusCode::INTERNAL_SERVER_ERROR, msg)
     })?;
 
   let comment_topic_id = comment.comment_topic_id();
   let comment_topic = comment.comment_topic();
-  println!(
+  tracing::debug!(
     "create_comment: inserted as {}, ingesting...",
     comment_topic_id
   );
@@ -971,7 +971,7 @@ pub async fn create_comment(
   let (affected_topic_ids, invalidated_thread_ids) = {
     let mut ctx = state.data_context.lock().map_err(|e| {
       let msg = format!("Failed to lock data context for ingest: {}", e);
-      eprintln!("ERROR create_comment: {}", msg);
+      tracing::error!("ERROR create_comment: {}", msg);
       (StatusCode::INTERNAL_SERVER_ERROR, msg)
     })?;
 
@@ -979,7 +979,7 @@ pub async fn create_comment(
 
     let audit_data = ctx.get_audit(&audit_id).ok_or_else(|| {
       let msg = format!("Audit '{}' not found after ingest", audit_id);
-      eprintln!("ERROR create_comment: {}", msg);
+      tracing::error!("ERROR create_comment: {}", msg);
       (StatusCode::NOT_FOUND, msg)
     })?;
 
@@ -1048,11 +1048,11 @@ pub async fn get_comment_status(
   Path((audit_id, comment_id)): Path<(String, String)>,
 ) -> Result<Json<CommentStatusResponse>, StatusCode> {
   let comment_topic = topic::parse_comment_topic(&comment_id).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
+    tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
   let comment_id_num = comment_topic.numeric_id() as i64;
-  println!(
+  tracing::debug!(
     "GET /api/v1/audits/{}/comments/{}/status",
     audit_id, comment_id
   );
@@ -1071,11 +1071,11 @@ pub async fn update_comment_status(
   Json(payload): Json<UpdateStatusRequest>,
 ) -> Result<Json<CommentStatusResponse>, StatusCode> {
   let comment_topic = topic::parse_comment_topic(&comment_id).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
+    tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
   let comment_id_num = comment_topic.numeric_id() as i64;
-  println!(
+  tracing::debug!(
     "PUT /api/v1/audits/{}/comments/{}/status",
     audit_id, comment_id
   );
@@ -1087,7 +1087,7 @@ pub async fn update_comment_status(
   // Update in-memory comment index on hide/unhide
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in update_comment_status: {}", e);
+      tracing::error!("Mutex poisoned in update_comment_status: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     if let Some(audit_data) = ctx.get_audit_mut(&audit_id)
@@ -1134,11 +1134,11 @@ pub async fn get_vote_summary(
   Query(params): Query<OptionalUserIdQuery>,
 ) -> Result<Json<CommentVoteSummary>, StatusCode> {
   let comment_topic = topic::parse_comment_topic(&comment_id).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
+    tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
   let comment_id_num = comment_topic.numeric_id() as i64;
-  println!("GET /api/v1/audits/{}/votes/{}", audit_id, comment_id);
+  tracing::debug!("GET /api/v1/audits/{}/votes/{}", audit_id, comment_id);
   let vote_info = db::get_vote_info(&state.db, comment_id_num, params.user_id)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1160,7 +1160,7 @@ pub async fn get_unvoted_comment_ids(
   Path(audit_id): Path<String>,
   Query(params): Query<UserIdQuery>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
-  println!(
+  tracing::debug!(
     "GET /api/v1/audits/{}/votes/unvoted?user_id={}",
     audit_id, params.user_id
   );
@@ -1186,11 +1186,11 @@ pub async fn cast_vote(
   Json(payload): Json<VoteRequest>,
 ) -> Result<Json<CommentVoteSummary>, StatusCode> {
   let comment_topic = topic::parse_comment_topic(&comment_id).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
+    tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
   let comment_id_num = comment_topic.numeric_id() as i64;
-  println!("POST /api/v1/audits/{}/votes/{}", audit_id, comment_id);
+  tracing::debug!("POST /api/v1/audits/{}/votes/{}", audit_id, comment_id);
   let vote_value = payload.vote.to_i32();
 
   db::upsert_vote(&state.db, comment_id_num, payload.user_id, vote_value)
@@ -1232,11 +1232,11 @@ pub async fn remove_vote(
   Query(params): Query<UserIdQuery>,
 ) -> Result<StatusCode, StatusCode> {
   let comment_topic = topic::parse_comment_topic(&comment_id).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
+    tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
   let comment_id_num = comment_topic.numeric_id() as i64;
-  println!(
+  tracing::debug!(
     "DELETE /api/v1/audits/{}/votes/{}?user_id={}",
     audit_id, comment_id, params.user_id
   );
@@ -1279,10 +1279,10 @@ pub async fn get_agent_context(
   Json<o11a_core::collaborator::agent::context::AgentTopicContext>,
   StatusCode,
 > {
-  println!("GET /api/v1/audits/{}/agent_context/{}", audit_id, topic_id);
+  tracing::debug!("GET /api/v1/audits/{}/agent_context/{}", audit_id, topic_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_agent_context: {}", e);
+    tracing::error!("Mutex poisoned in get_agent_context: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -1295,7 +1295,7 @@ pub async fn get_agent_context(
       params.include_expanded_context,
     )
     .ok_or_else(|| {
-      eprintln!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
+      tracing::warn!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
       StatusCode::NOT_FOUND
     })?;
 
@@ -1311,10 +1311,10 @@ pub async fn get_features(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
 ) -> Result<Json<Vec<TopicMetadataResponse>>, StatusCode> {
-  println!("GET /api/v1/audits/{}/features", audit_id);
+  tracing::debug!("GET /api/v1/audits/{}/features", audit_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_features: {}", e);
+    tracing::error!("Mutex poisoned in get_features: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -1341,16 +1341,16 @@ pub async fn get_feature_requirements(
   Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
   let feature_topic = topic::parse_feature_topic(&topic_id).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
+    tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
-  println!(
+  tracing::debug!(
     "GET /api/v1/audits/{}/features/{}/requirements",
     audit_id, topic_id
   );
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_feature_requirements: {}", e);
+    tracing::error!("Mutex poisoned in get_feature_requirements: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -1378,16 +1378,16 @@ pub async fn get_threat_invariants(
 ) -> Result<Json<Vec<String>>, StatusCode> {
   let threat_topic =
     topic::parse_attack_vector_topic(&threat_id).map_err(|e| {
-      eprintln!("Invalid topic ID in path: {}", e);
+      tracing::warn!("Invalid topic ID in path: {}", e);
       StatusCode::BAD_REQUEST
     })?;
-  println!(
+  tracing::debug!(
     "GET /api/v1/audits/{}/threats/{}/invariants",
     audit_id, threat_id
   );
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_threat_invariants: {}", e);
+    tracing::error!("Mutex poisoned in get_threat_invariants: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -1428,13 +1428,13 @@ pub async fn get_feature(
   Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
   let feature_topic = topic::parse_feature_topic(&topic_id).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
+    tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
-  println!("GET /api/v1/audits/{}/features/{}", audit_id, topic_id);
+  tracing::debug!("GET /api/v1/audits/{}/features/{}", audit_id, topic_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_feature: {}", e);
+    tracing::error!("Mutex poisoned in get_feature: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -1458,13 +1458,13 @@ pub async fn get_requirement(
   Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
   let req_topic = topic::parse_requirement_topic(&topic_id).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
+    tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
-  println!("GET /api/v1/audits/{}/requirements/{}", audit_id, topic_id);
+  tracing::debug!("GET /api/v1/audits/{}/requirements/{}", audit_id, topic_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_requirement: {}", e);
+    tracing::error!("Mutex poisoned in get_requirement: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -1499,7 +1499,7 @@ pub async fn get_requirements(
   Path(audit_id): Path<String>,
   Query(params): Query<GetRequirementsQuery>,
 ) -> Result<Json<Vec<TopicMetadataResponse>>, StatusCode> {
-  println!(
+  tracing::debug!(
     "GET /api/v1/audits/{}/requirements{}",
     audit_id,
     params
@@ -1510,7 +1510,7 @@ pub async fn get_requirements(
   );
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_requirements: {}", e);
+    tracing::error!("Mutex poisoned in get_requirements: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -1608,7 +1608,7 @@ pub async fn get_functional_semantics(
   Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<SubjectPropertyResponse>>, StatusCode> {
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_functional_semantics: {}", e);
+    tracing::error!("Mutex poisoned in get_functional_semantics: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
@@ -1651,10 +1651,10 @@ pub async fn get_all_functional_semantics(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
 ) -> Result<Json<Vec<TopicMetadataResponse>>, StatusCode> {
-  println!("GET /api/v1/audits/{}/functional_semantics", audit_id);
+  tracing::debug!("GET /api/v1/audits/{}/functional_semantics", audit_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_all_functional_semantics: {}", e);
+    tracing::error!("Mutex poisoned in get_all_functional_semantics: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -1683,16 +1683,16 @@ pub async fn get_functional_semantic(
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
   let sem_topic =
     topic::parse_functional_property_topic(&topic_id).map_err(|e| {
-      eprintln!("Invalid topic ID in path: {}", e);
+      tracing::warn!("Invalid topic ID in path: {}", e);
       StatusCode::BAD_REQUEST
     })?;
-  println!(
+  tracing::debug!(
     "GET /api/v1/audits/{}/functional_semantics/{}",
     audit_id, topic_id
   );
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_functional_semantic: {}", e);
+    tracing::error!("Mutex poisoned in get_functional_semantic: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -1732,19 +1732,19 @@ pub async fn create_threat_feature_link(
   Path(audit_id): Path<String>,
   Json(payload): Json<CreateThreatFeatureLinkRequest>,
 ) -> Result<Json<ThreatFeatureLinkResponse>, StatusCode> {
-  println!(
+  tracing::debug!(
     "POST /api/v1/audits/{}/impact_analysis T{} -> F{}",
     audit_id, payload.threat_id, payload.feature_id
   );
 
   let threat_topic = topic::parse_attack_vector_topic(&payload.threat_id)
     .map_err(|e| {
-      eprintln!("Invalid topic ID in payload: {}", e);
+      tracing::warn!("Invalid topic ID in payload: {}", e);
       StatusCode::BAD_REQUEST
     })?;
   let feature_topic =
     topic::parse_feature_topic(&payload.feature_id).map_err(|e| {
-      eprintln!("Invalid topic ID in payload: {}", e);
+      tracing::warn!("Invalid topic ID in payload: {}", e);
       StatusCode::BAD_REQUEST
     })?;
   let threat_id = threat_topic.numeric_id() as i64;
@@ -1765,14 +1765,14 @@ pub async fn create_threat_feature_link(
   )
   .await
   .map_err(|e| {
-    eprintln!("create_threat_feature_link failed: {}", e);
+    tracing::error!("create_threat_feature_link failed: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
   // Update in-memory state
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in create_threat_feature_link: {}", e);
+      tracing::error!("Mutex poisoned in create_threat_feature_link: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data =
@@ -1822,16 +1822,16 @@ pub async fn delete_threat_feature_link(
 ) -> Result<StatusCode, StatusCode> {
   let threat_topic =
     topic::parse_attack_vector_topic(&threat_id).map_err(|e| {
-      eprintln!("Invalid topic ID in path: {}", e);
+      tracing::warn!("Invalid topic ID in path: {}", e);
       StatusCode::BAD_REQUEST
     })?;
   let feature_topic = topic::parse_feature_topic(&feature_id).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
+    tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
   let threat_id = threat_topic.numeric_id() as i64;
   let feature_id = feature_topic.numeric_id() as i64;
-  println!(
+  tracing::debug!(
     "DELETE /api/v1/audits/{}/impact_analysis/{}/{}",
     audit_id, threat_id, feature_id
   );
@@ -1839,13 +1839,13 @@ pub async fn delete_threat_feature_link(
   db::delete_threat_feature_link(&state.db, threat_id, feature_id)
     .await
     .map_err(|e| {
-      eprintln!("delete_threat_feature_link failed: {}", e);
+      tracing::error!("delete_threat_feature_link failed: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in delete_threat_feature_link: {}", e);
+      tracing::error!("Mutex poisoned in delete_threat_feature_link: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data =
@@ -1916,7 +1916,7 @@ pub async fn create_condition(
   Path(audit_id): Path<String>,
   Json(payload): Json<CreateConditionRequest>,
 ) -> Result<Json<ConditionResponse>, StatusCode> {
-  println!(
+  tracing::debug!(
     "POST /api/v1/audits/{}/conditions for {}",
     audit_id, payload.subject_topic
   );
@@ -1931,7 +1931,7 @@ pub async fn create_condition(
   )
   .await
   .map_err(|e| {
-    eprintln!("create_condition failed: {}", e);
+    tracing::error!("create_condition failed: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -1977,7 +1977,7 @@ pub async fn create_condition(
 
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in create_condition: {}", e);
+      tracing::error!("Mutex poisoned in create_condition: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data =
@@ -2004,7 +2004,7 @@ pub async fn get_subject_conditions(
   State(state): State<AppState>,
   Path((audit_id, subject_topic)): Path<(String, String)>,
 ) -> Result<Json<Vec<ConditionResponse>>, StatusCode> {
-  println!(
+  tracing::debug!(
     "GET /api/v1/audits/{}/conditions/{}",
     audit_id, subject_topic
   );
@@ -2013,7 +2013,7 @@ pub async fn get_subject_conditions(
     db::get_conditions_for_subject(&state.db, &audit_id, &subject_topic)
       .await
       .map_err(|e| {
-        eprintln!("get_conditions_for_subject failed: {}", e);
+        tracing::error!("get_conditions_for_subject failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
       })?;
 
@@ -2022,7 +2022,7 @@ pub async fn get_subject_conditions(
     let evals = db::get_condition_evaluations(&state.db, row.id)
       .await
       .map_err(|e| {
-        eprintln!("get_condition_evaluations failed: {}", e);
+        tracing::error!("get_condition_evaluations failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
       })?;
 
@@ -2051,7 +2051,7 @@ pub async fn delete_condition(
   State(state): State<AppState>,
   Path((audit_id, condition_id)): Path<(String, i64)>,
 ) -> Result<StatusCode, StatusCode> {
-  println!(
+  tracing::debug!(
     "DELETE /api/v1/audits/{}/conditions/{}",
     audit_id, condition_id
   );
@@ -2068,14 +2068,14 @@ pub async fn delete_condition(
   db::delete_condition(&state.db, condition_id)
     .await
     .map_err(|e| {
-      eprintln!("delete_condition failed: {}", e);
+      tracing::error!("delete_condition failed: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
   // Remove from in-memory state
   if let Some(_subject) = subject_topic {
     let mut ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in delete_condition: {}", e);
+      tracing::error!("Mutex poisoned in delete_condition: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data =
@@ -2099,13 +2099,13 @@ pub async fn get_behavior(
   Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
   let beh_topic = topic::parse_behavior_topic(&topic_id).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
+    tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
-  println!("GET /api/v1/audits/{}/behaviors/{}", audit_id, topic_id);
+  tracing::debug!("GET /api/v1/audits/{}/behaviors/{}", audit_id, topic_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_behavior: {}", e);
+    tracing::error!("Mutex poisoned in get_behavior: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -2124,10 +2124,10 @@ pub async fn get_behaviors(
   State(state): State<AppState>,
   Path(audit_id): Path<String>,
 ) -> Result<Json<Vec<TopicMetadataResponse>>, StatusCode> {
-  println!("GET /api/v1/audits/{}/behaviors", audit_id);
+  tracing::debug!("GET /api/v1/audits/{}/behaviors", audit_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_behaviors: {}", e);
+    tracing::error!("Mutex poisoned in get_behaviors: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -2167,7 +2167,7 @@ pub async fn create_threat(
   Path(audit_id): Path<String>,
   Json(payload): Json<CreateThreatRequest>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  println!(
+  tracing::debug!(
     "POST /api/v1/audits/{}/threats on {}",
     audit_id, payload.subject_topic
   );
@@ -2182,7 +2182,7 @@ pub async fn create_threat(
   )
   .await
   .map_err(|e| {
-    eprintln!("create_threat failed: {}", e);
+    tracing::error!("create_threat failed: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -2203,7 +2203,7 @@ pub async fn create_threat(
   };
 
   let mut ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in create_threat: {}", e);
+    tracing::error!("Mutex poisoned in create_threat: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
   let audit_data = ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
@@ -2226,20 +2226,20 @@ pub async fn delete_threat(
 ) -> Result<StatusCode, StatusCode> {
   let threat_topic =
     topic::parse_attack_vector_topic(&threat_id).map_err(|e| {
-      eprintln!("Invalid topic ID in path: {}", e);
+      tracing::warn!("Invalid topic ID in path: {}", e);
       StatusCode::BAD_REQUEST
     })?;
   let threat_id = threat_topic.numeric_id() as i64;
-  println!("DELETE /api/v1/audits/{}/threats/{}", audit_id, threat_id);
+  tracing::debug!("DELETE /api/v1/audits/{}/threats/{}", audit_id, threat_id);
 
   db::delete_threat(&state.db, threat_id).await.map_err(|e| {
-    eprintln!("delete_threat failed: {}", e);
+    tracing::error!("delete_threat failed: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in delete_threat: {}", e);
+      tracing::error!("Mutex poisoned in delete_threat: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data =
@@ -2271,13 +2271,13 @@ pub async fn get_threat(
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
   let threat_topic =
     topic::parse_attack_vector_topic(&threat_id).map_err(|e| {
-      eprintln!("Invalid topic ID in path: {}", e);
+      tracing::warn!("Invalid topic ID in path: {}", e);
       StatusCode::BAD_REQUEST
     })?;
-  println!("GET /api/v1/audits/{}/threats/{}", audit_id, threat_id);
+  tracing::debug!("GET /api/v1/audits/{}/threats/{}", audit_id, threat_id);
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_threat: {}", e);
+    tracing::error!("Mutex poisoned in get_threat: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -2308,11 +2308,11 @@ pub async fn create_invariant(
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
   let threat_topic =
     topic::parse_attack_vector_topic(&threat_id).map_err(|e| {
-      eprintln!("Invalid topic ID in path: {}", e);
+      tracing::warn!("Invalid topic ID in path: {}", e);
       StatusCode::BAD_REQUEST
     })?;
   let threat_id = threat_topic.numeric_id() as i64;
-  println!(
+  tracing::debug!(
     "POST /api/v1/audits/{}/threats/{}/invariants",
     audit_id, threat_id
   );
@@ -2320,7 +2320,7 @@ pub async fn create_invariant(
   // Invariants inherit severity from their parent threat (may be None)
   let severity = {
     let ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in create_invariant: {}", e);
+      tracing::error!("Mutex poisoned in create_invariant: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
@@ -2339,7 +2339,7 @@ pub async fn create_invariant(
   )
   .await
   .map_err(|e| {
-    eprintln!("create_invariant failed: {}", e);
+    tracing::error!("create_invariant failed: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -2359,7 +2359,7 @@ pub async fn create_invariant(
   };
 
   let mut ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in create_invariant: {}", e);
+    tracing::error!("Mutex poisoned in create_invariant: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
   let audit_data = ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
@@ -2388,16 +2388,16 @@ pub async fn delete_invariant(
 ) -> Result<StatusCode, StatusCode> {
   let threat_topic =
     topic::parse_attack_vector_topic(&threat_id).map_err(|e| {
-      eprintln!("Invalid topic ID in path: {}", e);
+      tracing::warn!("Invalid topic ID in path: {}", e);
       StatusCode::BAD_REQUEST
     })?;
   let inv_topic = topic::parse_invariant_topic(&invariant_id).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
+    tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
   let threat_id = threat_topic.numeric_id() as i64;
   let invariant_id = inv_topic.numeric_id() as i64;
-  println!(
+  tracing::debug!(
     "DELETE /api/v1/audits/{}/threats/{}/invariants/{}",
     audit_id, threat_id, invariant_id
   );
@@ -2405,13 +2405,13 @@ pub async fn delete_invariant(
   db::delete_invariant(&state.db, invariant_id)
     .await
     .map_err(|e| {
-      eprintln!("delete_invariant failed: {}", e);
+      tracing::error!("delete_invariant failed: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in delete_invariant: {}", e);
+      tracing::error!("Mutex poisoned in delete_invariant: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data =
@@ -2437,16 +2437,16 @@ pub async fn get_invariant(
   Path((audit_id, invariant_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
   let inv_topic = topic::parse_invariant_topic(&invariant_id).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
+    tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
-  println!(
+  tracing::debug!(
     "GET /api/v1/audits/{}/invariants/{}",
     audit_id, invariant_id
   );
 
   let ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in get_invariant: {}", e);
+    tracing::error!("Mutex poisoned in get_invariant: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -2466,11 +2466,11 @@ pub async fn add_invariant_source_topic(
   Json(payload): Json<AddSourceTopicRequest>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
   let inv_topic = topic::parse_invariant_topic(&invariant_id).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
+    tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
   let invariant_id = inv_topic.numeric_id() as i64;
-  println!(
+  tracing::debug!(
     "POST /api/v1/audits/{}/invariants/{}/source_topics",
     audit_id, invariant_id
   );
@@ -2478,12 +2478,12 @@ pub async fn add_invariant_source_topic(
   db::add_invariant_source_topic(&state.db, invariant_id, &payload.topic_id)
     .await
     .map_err(|e| {
-      eprintln!("add_invariant_source_topic failed: {}", e);
+      tracing::error!("add_invariant_source_topic failed: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
   let mut ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in add_invariant_source_topic: {}", e);
+    tracing::error!("Mutex poisoned in add_invariant_source_topic: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
   let audit_data = ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
@@ -2511,11 +2511,11 @@ pub async fn remove_invariant_source_topic(
   Path((audit_id, invariant_id, topic_id)): Path<(String, String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
   let inv_topic = topic::parse_invariant_topic(&invariant_id).map_err(|e| {
-    eprintln!("Invalid topic ID in path: {}", e);
+    tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
   let invariant_id = inv_topic.numeric_id() as i64;
-  println!(
+  tracing::debug!(
     "DELETE /api/v1/audits/{}/invariants/{}/source_topics/{}",
     audit_id, invariant_id, topic_id
   );
@@ -2523,12 +2523,12 @@ pub async fn remove_invariant_source_topic(
   db::remove_invariant_source_topic(&state.db, invariant_id, &topic_id)
     .await
     .map_err(|e| {
-      eprintln!("remove_invariant_source_topic failed: {}", e);
+      tracing::error!("remove_invariant_source_topic failed: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
   let mut ctx = state.data_context.lock().map_err(|e| {
-    eprintln!("Mutex poisoned in remove_invariant_source_topic: {}", e);
+    tracing::error!("Mutex poisoned in remove_invariant_source_topic: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
   let audit_data = ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
@@ -2600,7 +2600,7 @@ pub async fn create_user_feature(
   Path(audit_id): Path<String>,
   Json(payload): Json<CreateUserFeatureRequest>,
 ) -> Result<Json<CreatedResponse>, StatusCode> {
-  println!("POST /api/v1/audits/{}/features", audit_id);
+  tracing::debug!("POST /api/v1/audits/{}/features", audit_id);
 
   let id = o11a_core::ids::allocate_feature_id();
   let created_at = o11a_core::ids::now_iso8601();
@@ -2616,7 +2616,7 @@ pub async fn create_user_feature(
   )
   .await
   .map_err(|e| {
-    eprintln!("create_user_feature failed: {}", e);
+    tracing::error!("create_user_feature failed: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -2624,7 +2624,7 @@ pub async fn create_user_feature(
     db::user_entities::add_user_feature_requirement_link(&state.db, id, rt)
       .await
       .map_err(|e| {
-        eprintln!("add_user_feature_requirement_link failed: {}", e);
+        tracing::error!("add_user_feature_requirement_link failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
       })?;
   }
@@ -2632,7 +2632,7 @@ pub async fn create_user_feature(
     db::user_entities::add_user_feature_behavior_link(&state.db, id, bt)
       .await
       .map_err(|e| {
-        eprintln!("add_user_feature_behavior_link failed: {}", e);
+        tracing::error!("add_user_feature_behavior_link failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
       })?;
   }
@@ -2651,7 +2651,7 @@ pub async fn create_user_feature(
 
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in create_user_feature: {}", e);
+      tracing::error!("Mutex poisoned in create_user_feature: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data =
@@ -2697,7 +2697,7 @@ pub async fn create_user_requirement(
   Path(audit_id): Path<String>,
   Json(payload): Json<CreateUserRequirementRequest>,
 ) -> Result<Json<CreatedResponse>, StatusCode> {
-  println!("POST /api/v1/audits/{}/requirements", audit_id);
+  tracing::debug!("POST /api/v1/audits/{}/requirements", audit_id);
 
   let id = o11a_core::ids::allocate_requirement_id();
   let created_at = o11a_core::ids::now_iso8601();
@@ -2713,7 +2713,7 @@ pub async fn create_user_requirement(
   )
   .await
   .map_err(|e| {
-    eprintln!("create_user_requirement failed: {}", e);
+    tracing::error!("create_user_requirement failed: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -2723,7 +2723,7 @@ pub async fn create_user_requirement(
     )
     .await
     .map_err(|e| {
-      eprintln!("add_user_requirement_documentation_topic failed: {}", e);
+      tracing::error!("add_user_requirement_documentation_topic failed: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
   }
@@ -2739,7 +2739,7 @@ pub async fn create_user_requirement(
 
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in create_user_requirement: {}", e);
+      tracing::error!("Mutex poisoned in create_user_requirement: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data =
@@ -2777,7 +2777,7 @@ pub async fn create_user_behavior(
   Path(audit_id): Path<String>,
   Json(payload): Json<CreateUserBehaviorRequest>,
 ) -> Result<Json<CreatedResponse>, StatusCode> {
-  println!("POST /api/v1/audits/{}/behaviors", audit_id);
+  tracing::debug!("POST /api/v1/audits/{}/behaviors", audit_id);
 
   let id = o11a_core::ids::allocate_behavior_id();
   let created_at = o11a_core::ids::now_iso8601();
@@ -2793,7 +2793,7 @@ pub async fn create_user_behavior(
   )
   .await
   .map_err(|e| {
-    eprintln!("create_user_behavior failed: {}", e);
+    tracing::error!("create_user_behavior failed: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -2802,7 +2802,7 @@ pub async fn create_user_behavior(
 
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in create_user_behavior: {}", e);
+      tracing::error!("Mutex poisoned in create_user_behavior: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data =
@@ -2833,7 +2833,7 @@ pub async fn create_user_functional_semantic(
   Path(audit_id): Path<String>,
   Json(payload): Json<CreateUserFunctionalSemanticRequest>,
 ) -> Result<Json<CreatedResponse>, StatusCode> {
-  println!("POST /api/v1/audits/{}/functional_semantics", audit_id);
+  tracing::debug!("POST /api/v1/audits/{}/functional_semantics", audit_id);
 
   let id = o11a_core::ids::allocate_functional_semantic_id();
   let created_at = o11a_core::ids::now_iso8601();
@@ -2849,7 +2849,7 @@ pub async fn create_user_functional_semantic(
   )
   .await
   .map_err(|e| {
-    eprintln!("create_user_functional_semantic failed: {}", e);
+    tracing::error!("create_user_functional_semantic failed: {}", e);
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
@@ -2859,7 +2859,7 @@ pub async fn create_user_functional_semantic(
     )
     .await
     .map_err(|e| {
-      eprintln!(
+      tracing::error!(
         "add_user_functional_semantic_documentation_topic failed: {}",
         e
       );
@@ -2877,7 +2877,7 @@ pub async fn create_user_functional_semantic(
 
   {
     let mut ctx = state.data_context.lock().map_err(|e| {
-      eprintln!("Mutex poisoned in create_user_functional_semantic: {}", e);
+      tracing::error!("Mutex poisoned in create_user_functional_semantic: {}", e);
       StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let audit_data =

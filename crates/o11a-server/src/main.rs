@@ -9,6 +9,8 @@ use o11a_core::report::{self, AuditReport};
 use o11a_core::state::AppState;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tower_http::trace::TraceLayer;
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::api::routes;
 
@@ -18,6 +20,14 @@ const ARTIFACT_FILE_NAME: &str = "audit.analysis.bin";
 
 #[tokio::main]
 async fn main() {
+  tracing_subscriber::registry()
+    .with(fmt::layer().with_target(false))
+    .with(
+      EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info")),
+    )
+    .init();
+
   // Ensure data directory exists
   let data_dir = Path::new("data");
   if !data_dir.exists() {
@@ -28,24 +38,24 @@ async fn main() {
   let database_url = std::env::var("DATABASE_URL")
     .unwrap_or_else(|_| "sqlite://data/o11a.db".to_string());
 
-  println!("Connecting to database: {}", database_url);
+  tracing::info!(database_url = %database_url, "Connecting to database");
 
   let pool = db::create_pool(&database_url)
     .await
     .expect("Failed to create database pool");
 
-  println!("Initializing schema...");
+  tracing::info!("Initializing schema...");
   db::init_schema(&pool)
     .await
     .expect("Failed to initialize database schema");
 
-  println!("Creating DataContext...");
+  tracing::info!("Creating DataContext...");
 
   // Create empty DataContext
   let data_context = domain::new_data_context();
   let data_context = Arc::new(Mutex::new(data_context));
 
-  println!("DataContext created successfully");
+  tracing::info!("DataContext created successfully");
 
   // Get project root and audit ID from environment variables
   let project_root = std::env::var("PROJECT_ROOT")
@@ -60,15 +70,15 @@ async fn main() {
   // longer reads the project's source tree; all of that state comes from
   // the artifact produced by `o11a-analyze`.
   let artifact_path = audit_artifact_path(project_root);
-  println!(
-    "Loading analysis artifact for audit '{}' from {}",
-    audit_id,
-    artifact_path.display()
+  tracing::info!(
+    audit_id = %audit_id,
+    path = %artifact_path.display(),
+    "Loading analysis artifact"
   );
   let artifact = match analysis_artifact::read_artifact(&artifact_path) {
     Ok(artifact) => artifact,
     Err(ArtifactError::VersionMismatch { found, expected }) => {
-      eprintln!(
+      tracing::error!(
         "error: analysis artifact at {} has schema version {} but this \
          server supports {}. Re-run `o11a-analyze <project_root> <audit_id>` \
          to regenerate the artifact.",
@@ -79,7 +89,7 @@ async fn main() {
       std::process::exit(1);
     }
     Err(e) => {
-      eprintln!(
+      tracing::error!(
         "error: could not read analysis artifact at {}: {}. Run \
          `o11a-analyze <project_root> <audit_id>` first.",
         artifact_path.display(),
@@ -90,9 +100,10 @@ async fn main() {
   };
 
   if artifact.audit_id != audit_id {
-    eprintln!(
+    tracing::error!(
       "error: artifact audit id mismatch: expected '{}', artifact is for '{}'",
-      audit_id, artifact.audit_id
+      audit_id,
+      artifact.audit_id
     );
     std::process::exit(1);
   }
@@ -102,14 +113,14 @@ async fn main() {
   let report = match load_report(&report_path) {
     Ok(Some(report)) => report,
     Ok(None) => {
-      eprintln!(
+      tracing::error!(
         "error: no audit report found at {}. Run `o11a-analyze` first to produce audit.json.",
         report_path.display()
       );
       std::process::exit(1);
     }
     Err(e) => {
-      eprintln!(
+      tracing::error!(
         "error: could not read audit report at {}: {}",
         report_path.display(),
         e
@@ -134,10 +145,10 @@ async fn main() {
     analysis_artifact::apply_snapshot(audit_data, artifact.payload);
 
     if let Err(e) = report::apply_report(&audit_id, audit_data, &report) {
-      eprintln!("error: failed to apply audit report: {}", e);
+      tracing::error!("error: failed to apply audit report: {}", e);
       std::process::exit(1);
     }
-    println!(
+    tracing::info!(
       "Applied audit report from {} (schema v{}, generated {})",
       report_path.display(),
       report.schema_version,
@@ -153,13 +164,13 @@ async fn main() {
     collab_db::load_user_entities_snapshot(&pool, &audit_id)
       .await
       .unwrap_or_else(|e| {
-        eprintln!("error: failed to load user-created entities: {}", e);
+        tracing::error!("error: failed to load user-created entities: {}", e);
         std::process::exit(1);
       });
   {
     let mut ctx = data_context.lock().unwrap();
     let audit_data = ctx.get_audit_mut(&audit_id).unwrap_or_else(|| {
-      eprintln!(
+      tracing::error!(
         "error: audit '{}' not initialized before user-entity load",
         audit_id
       );
@@ -170,11 +181,11 @@ async fn main() {
 
   // Load and parse all comments (collaboration state, unaffected by the
   // JSON handoff). Same split-load/sync-apply pattern as above.
-  println!("Loading comments...");
+  tracing::info!("Loading comments...");
   let comments = collab_db::load_visible_comments(&pool)
     .await
     .unwrap_or_else(|e| {
-      eprintln!("Warning: Failed to load comments: {}", e);
+      tracing::warn!("Warning: Failed to load comments: {}", e);
       Vec::new()
     });
   let comment_count = {
@@ -182,7 +193,7 @@ async fn main() {
     collab_db::ingest_loaded_comments(&mut ctx, &comments)
   };
 
-  println!("Loaded {} comments", comment_count);
+  tracing::info!("Loaded {} comments", comment_count);
 
   // Rebuild reverse indexes after pipeline data is in place.
   {
@@ -209,11 +220,12 @@ async fn main() {
   let frontend_state =
     o11a_web_backend::state::FrontendState::new(state.clone());
   let app = routes::create_router(state)
-    .merge(o11a_web_backend::routes::create_router(frontend_state));
+    .merge(o11a_web_backend::routes::create_router(frontend_state))
+    .layer(TraceLayer::new_for_http());
 
   // Start server
   let addr = "0.0.0.0:3058";
-  println!("Server running on http://{}", addr);
+  tracing::info!("Server running on http://{}", addr);
 
   let listener = tokio::net::TcpListener::bind(addr)
     .await

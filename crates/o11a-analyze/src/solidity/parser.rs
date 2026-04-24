@@ -28,7 +28,7 @@ pub fn process(
     return Err(format!("'out' directory not found at {:?}", out_dir));
   }
 
-  println!("Processing JSON files in directory: {:?}", out_dir);
+  tracing::info!("Processing JSON files in directory: {:?}", out_dir);
 
   let mut context = ParserContext {
     source_content: String::new(),
@@ -40,7 +40,7 @@ pub fn process(
   traverse_and_parse_asts(&out_dir, project_root, &mut context)?;
 
   let total_asts: usize = context.ast_map.values().map(|v| v.len()).sum();
-  println!(
+  tracing::info!(
     "Successfully processed {} unique paths with {} total AST files",
     context.ast_map.len(),
     total_asts
@@ -75,7 +75,7 @@ fn traverse_and_parse_asts(
       && let Some(extension) = path.extension()
       && extension == "json"
     {
-      println!("Processing JSON file: {:?}", path);
+      tracing::info!("Processing JSON file: {:?}", path);
       let ast =
         ast_from_json_file(&path.to_string_lossy(), project_root, context)
           .map_err(|e| {
