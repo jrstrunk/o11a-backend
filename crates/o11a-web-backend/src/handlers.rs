@@ -32,35 +32,24 @@ pub async fn get_source_text(
 
   let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
 
-  {
-    let cache = state.source_text_cache.lock().map_err(|e| {
-      tracing::warn!("Source text cache poisoned: {}", e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    if let Some(inner) = cache.get(&audit_id)
-      && let Some(html) = inner.get(&topic_id)
-    {
-      return Ok(Html(html.clone()));
-    }
-  }
-
   let topic = new_topic(&topic_id);
-  let source_text = crate::topic_view::render_source_text(&topic, audit_data)
-    .ok_or_else(|| {
-    tracing::warn!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
-    StatusCode::NOT_FOUND
-  })?;
 
-  {
-    let mut cache = state.source_text_cache.lock().map_err(|e| {
-      tracing::warn!("Source text cache poisoned: {}", e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    cache
-      .entry(audit_id.clone())
-      .or_default()
-      .insert(topic_id.clone(), source_text.clone());
-  }
+  let mut source_text_cache = state.source_text_cache.lock().map_err(|e| {
+    tracing::warn!("Source text cache poisoned: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?;
+  let cache = source_text_cache.entry(audit_id.clone()).or_default();
+
+  let source_text =
+    crate::topic_view::render_source_text_as_block(&topic, audit_data, cache)
+      .ok_or_else(|| {
+        tracing::warn!(
+          "Topic '{}' not found in audit '{}'",
+          topic_id,
+          audit_id
+        );
+        StatusCode::NOT_FOUND
+      })?;
 
   Ok(Html(source_text))
 }

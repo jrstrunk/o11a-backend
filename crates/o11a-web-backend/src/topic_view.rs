@@ -33,6 +33,8 @@ pub struct ConversationEntry {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub created_at: Option<String>,
   pub html: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub inline_html: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -41,8 +43,24 @@ pub enum ConversationEntryKind {
   FunctionalSemantics,
   Behavior,
   Requirement,
+  Threat,
+  Invariant,
   Comment,
   Mention,
+}
+
+/// Structured rendering of a single conversation entry node.
+/// All entry types (comments, requirements, behaviors, functional semantics,
+/// mentions, threats, invariants) produce one of these. Thread children are
+/// represented as a recursive tree.
+#[derive(Debug, Clone)]
+pub struct RenderedEntry {
+  pub topic_id: String,
+  pub kind: ConversationEntryKind,
+  pub header_html: String,
+  pub body_html: String,
+  pub created_at: Option<String>,
+  pub children: Vec<RenderedEntry>,
 }
 
 // ============================================================================
@@ -608,34 +626,46 @@ fn authored_topic_label(
   }
 }
 
+/// Render an authored topic's description body as a plain `<div data-topic>`
+/// wrapper around `<p>description</p>`. No header, no styled container.
+/// `description_container` is passed to `render_description_html` as the
+/// owner topic for resolving inline topic references. For most callers this
+/// is the topic itself; for FunctionalSemantics it is the parent declaration.
+fn render_body_html(
+  topic: &topic::Topic,
+  description_container: &topic::Topic,
+  description: &str,
+  audit_data: &AuditData,
+) -> String {
+  let desc_html = crate::comment_formatter::render_description_html(
+    description,
+    description_container,
+    audit_data,
+  );
+  format!(
+    "<div data-topic=\"{}\"><p style=\"margin: 0\">{}</p></div>",
+    html_escape(&topic.id()),
+    desc_html,
+  )
+}
+
 /// Render source text HTML for a topic from its data.
 /// Returns None if the topic has no renderable content.
 ///
 /// For authored topics (Feature/Requirement/Behavior/FunctionalSemantic/
-/// Threat/Invariant) returns a styled topic block with an authored header
-/// and the description. For other topics returns raw source/documentation/
-/// comment HTML.
+/// Threat/Invariant) returns just the body: the description wrapped in a
+/// plain `<div data-topic>` (no header, no styled container). For other
+/// topics returns raw source/documentation/comment HTML.
 pub fn render_source_text(
   topic: &topic::Topic,
   audit_data: &AuditData,
 ) -> Option<String> {
-  // Authored topics: header + description, wrapped in a styled topic block.
+  // Authored topics: just the body, no header, minimal wrapper.
   if let Some(metadata) = audit_data.topic_metadata.get(topic)
-    && let Some((keyword, css_class)) = authored_topic_label(metadata)
+    && authored_topic_label(metadata).is_some()
   {
     let description = metadata.description().unwrap_or("");
-    let author_id = metadata.author_id().unwrap_or(0);
-    let created_at = metadata.created_at().unwrap_or("");
-    let header = render_authored_header(&keyword, author_id, created_at);
-    let desc_html = crate::comment_formatter::render_description_html(
-      description,
-      topic,
-      audit_data,
-    );
-    let content = format!("{}<p style=\"margin: 0\">{}</p>", header, desc_html);
-    return Some(formatting::format_topic_block(
-      topic, &content, css_class, topic,
-    ));
+    return Some(render_body_html(topic, topic, description, audit_data));
   }
 
   // Global builtins
@@ -670,6 +700,31 @@ pub fn render_source_text(
     }
     None => None,
   }
+}
+
+/// Render source text for the `/source_text` endpoint: for authored topics,
+/// wraps the body with an authored header and `format_topic_block`; other
+/// topic types pass through unchanged. Mirrors the pre-refactor behavior of
+/// `render_source_text`.
+pub fn render_source_text_as_block(
+  topic: &topic::Topic,
+  audit_data: &AuditData,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
+) -> Option<String> {
+  if let Some(metadata) = audit_data.topic_metadata.get(topic)
+    && let Some((keyword, css_class)) = authored_topic_label(metadata)
+  {
+    let body = get_source_text(topic, audit_data, source_text_cache);
+    let author_id = metadata.author_id().unwrap_or(0);
+    let created_at = metadata.created_at().unwrap_or("");
+    let header = render_authored_header(&keyword, author_id, created_at);
+    let content = format!("{}{}", header, body);
+    return Some(formatting::format_topic_block(
+      topic, &content, css_class, topic,
+    ));
+  }
+
+  render_source_text(topic, audit_data)
 }
 
 /// Get or render source text HTML for a topic, checking cache first.
@@ -1309,14 +1364,20 @@ pub fn build_topic_panel_prefix(
     _ => return String::new(),
   };
 
-  // For requirements/threats/invariants, render as a standalone topic node
-  let standalone_label = match metadata {
-    TopicMetadata::RequirementTopic { .. } => Some("Requirement"),
-    TopicMetadata::ThreatTopic { .. } => Some("Threat"),
-    TopicMetadata::InvariantTopic { .. } => Some("Invariant"),
+  // For requirements/threats/invariants, render as a standalone entry.
+  let standalone = match metadata {
+    TopicMetadata::RequirementTopic { .. } => {
+      Some(("Requirement", ConversationEntryKind::Requirement))
+    }
+    TopicMetadata::ThreatTopic { .. } => {
+      Some(("Threat", ConversationEntryKind::Threat))
+    }
+    TopicMetadata::InvariantTopic { .. } => {
+      Some(("Invariant", ConversationEntryKind::Invariant))
+    }
     _ => None,
   };
-  if let Some(kind_label) = standalone_label {
+  if let Some((kind_label, kind)) = standalone {
     let mut html = String::new();
     html.push_str(
       "<div class=\"component-group\" style=\"margin-bottom: 0.5rem;\">",
@@ -1325,12 +1386,15 @@ pub fn build_topic_panel_prefix(
       "<div class=\"topic-reference-title scope-standard\" style=\"{}\"><span style=\"{}\"><code><span>{}</span></code></span></div>",
       SCOPE_STYLE, SCOPE_ITEM_STYLE, html_escape(kind_label)
     ));
-    html.push_str(&render_topic_node(metadata, audit_data, source_text_cache));
+    let entry =
+      build_prefix_entry(metadata, kind, audit_data, source_text_cache);
+    html.push_str(&render_entry_html(&entry, 0, 1, 0));
     html.push_str("</div>");
     return html;
   }
 
-  // For comments, render the parent chain
+  // For comments, render the parent chain as siblings (each a leaf entry)
+  // so replies of the ancestry's siblings don't pull in other threads.
   let chain = collect_parent_chain(metadata, audit_data);
   let total = chain.len();
   let mut html = String::new();
@@ -1346,14 +1410,13 @@ pub fn build_topic_panel_prefix(
   ));
 
   for (i, comment_meta) in chain.iter().enumerate() {
-    html.push_str(&render_comment_node(
+    let entry = build_prefix_entry(
       comment_meta,
-      i,
-      total,
-      i,
+      ConversationEntryKind::Comment,
       audit_data,
       source_text_cache,
-    ));
+    );
+    html.push_str(&render_entry_html(&entry, i, total, i));
   }
 
   html.push_str("</div>");
@@ -1432,60 +1495,233 @@ pub fn build_topic_view(
   })
 }
 
-/// Build a `ConversationEntry` for a Requirement, Behavior, or
-/// FunctionalSemantic topic. Returns `None` if `metadata` is none of those.
-/// `description_container` is the topic used for resolving inline references
-/// in the description.
-fn build_generated_conversation_entry(
+// ============================================================================
+// Entry Tree Rendering
+// ============================================================================
+
+/// Render the metadata header for a conversation entry. Uses
+/// [`authored_topic_label`] to detect authored topics (requirement/behavior/
+/// semantics/threat/invariant) and emits an authored-style header; other
+/// topics get a comment-style header using `comment_type` (defaulting to
+/// `note`).
+fn render_entry_header(metadata: &TopicMetadata) -> String {
+  let author_id = metadata.author_id().unwrap_or(0);
+  let created_at = metadata.created_at().unwrap_or("");
+
+  if let Some((keyword, _)) = authored_topic_label(metadata) {
+    format!(
+      "<div style=\"display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.25rem;\">\
+       <span class=\"keyword\">{}</span> \
+       <span class=\"comment-author\" style=\"font-size: 0.8em; opacity: 0.7;\">author:{}</span> \
+       <span class=\"comment-time\" style=\"font-size: 0.8em; opacity: 0.7;\">{}</span></div>",
+      html_escape(&keyword),
+      author_id,
+      html_escape(created_at),
+    )
+  } else {
+    let comment_type = metadata
+      .comment_type()
+      .map(|ct| ct.as_str())
+      .unwrap_or("note");
+    format!(
+      "<div style=\"{}\"><span class=\"comment-type keyword\">{}</span> \
+       <span class=\"comment-author\">author:{}</span> \
+       <span class=\"comment-time\">{}</span></div>",
+      COMMENT_META_STYLE,
+      html_escape(comment_type),
+      author_id,
+      html_escape(created_at),
+    )
+  }
+}
+
+/// Collect direct comment replies to a topic and render each as a
+/// `RenderedEntry` subtree. Children are always rendered as Comment kind and
+/// recursed through `render_entry_tree`.
+fn collect_thread_children(
+  parent_topic: &topic::Topic,
   audit_data: &AuditData,
-  topic: &topic::Topic,
-  description_container: &topic::Topic,
-  metadata: &TopicMetadata,
-) -> Option<ConversationEntry> {
-  let (keyword, css_class, kind) = match metadata {
-    TopicMetadata::RequirementTopic { .. } => {
-      ("req", "requirement", ConversationEntryKind::Requirement)
+  source_text_cache: &mut std::collections::HashMap<String, String>,
+) -> Vec<RenderedEntry> {
+  let mut child_topics: Vec<topic::Topic> = Vec::new();
+
+  if let Some(comments) = audit_data.comment_index.get(parent_topic) {
+    for ct in comments {
+      if !child_topics.contains(ct) {
+        child_topics.push(*ct);
+      }
     }
-    TopicMetadata::BehaviorTopic { .. } => {
-      ("behavior", "behavior", ConversationEntryKind::Behavior)
+  }
+
+  for meta in audit_data.topic_metadata.values() {
+    if meta.target_topic() == Some(parent_topic) {
+      let t = *meta.topic();
+      if !child_topics.contains(&t) {
+        child_topics.push(t);
+      }
     }
-    TopicMetadata::FunctionalSemanticTopic { .. } => (
-      "semantics",
-      "functional-semantics",
-      ConversationEntryKind::FunctionalSemantics,
-    ),
-    _ => return None,
-  };
+  }
 
-  let description = metadata.description()?;
-  let author_id = metadata.author_id()?;
-  let created_at = metadata.created_at()?;
+  let mut children: Vec<RenderedEntry> = Vec::new();
+  for child_topic in child_topics {
+    if let Some(entry) = render_entry_tree(
+      &child_topic,
+      ConversationEntryKind::Comment,
+      audit_data,
+      source_text_cache,
+      None,
+    ) {
+      children.push(entry);
+    }
+  }
+  children
+}
 
-  let header = render_authored_header(keyword, author_id, created_at);
-  let desc_html = crate::comment_formatter::render_description_html(
-    description,
-    description_container,
-    audit_data,
-  );
-  let html = format!(
-    "<div class=\"{}\" data-topic=\"{}\" style=\"{}\">{}\
-     <p style=\"margin: 0\">{}</p></div>",
-    css_class,
-    html_escape(&topic.id()),
-    COMBINED_PANEL_STYLE,
-    header,
-    desc_html,
-  );
+/// Render a single conversation entry as a `RenderedEntry` tree.
+/// Handles comments, mentions (as comments), requirements, behaviors,
+/// functional semantics, threats, and invariants. Recursively collects
+/// comment thread children for all types.
+///
+/// `description_container` overrides the owner topic passed to
+/// `render_description_html` for authored topics. This is needed for
+/// FunctionalSemantics entries whose inline topic references resolve
+/// against their parent declaration, not the semantic topic itself.
+/// Pass `None` to use the entry topic as its own container (the default).
+pub fn render_entry_tree(
+  entry_topic: &topic::Topic,
+  kind: ConversationEntryKind,
+  audit_data: &AuditData,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
+  description_container: Option<&topic::Topic>,
+) -> Option<RenderedEntry> {
+  let metadata = audit_data.topic_metadata.get(entry_topic)?;
+  let header_html = render_entry_header(metadata);
 
-  Some(ConversationEntry {
-    topic_id: topic.id().to_string(),
+  // When a description container override is provided for an authored topic,
+  // render the body directly (bypassing the cache) to avoid stale cache hits
+  // where the same topic may need different rendering depending on context.
+  let body_html =
+    if let Some(container) = description_container {
+      let description = metadata.description().unwrap_or("");
+      render_body_html(entry_topic, container, description, audit_data)
+    } else {
+      get_source_text(entry_topic, audit_data, source_text_cache)
+    };
+
+  let created_at = metadata.created_at().map(|s| s.to_string());
+  let children =
+    collect_thread_children(entry_topic, audit_data, source_text_cache);
+
+  Some(RenderedEntry {
+    topic_id: entry_topic.id().to_string(),
     kind,
-    created_at: Some(created_at.to_string()),
-    html,
+    header_html,
+    body_html,
+    created_at,
+    children,
   })
 }
 
-/// Build the conversation for a topic: direct comments + mentions, each with thread HTML.
+/// Compose a full HTML string from a `RenderedEntry` tree. The container div
+/// wraps the header, body, and recursively-rendered children. First/last
+/// border styling is applied per-level based on (`index`, `total`). Indent
+/// divs are applied based on `depth` so nested children are visually indented
+/// relative to their parent, matching the old flat-list rendering.
+pub fn render_entry_html(
+  entry: &RenderedEntry,
+  index: usize,
+  total: usize,
+  depth: usize,
+) -> String {
+  let css_class = match entry.kind {
+    ConversationEntryKind::Comment | ConversationEntryKind::Mention => {
+      "comment-thread-node"
+    }
+    ConversationEntryKind::Requirement => "requirement",
+    ConversationEntryKind::Behavior => "behavior",
+    ConversationEntryKind::FunctionalSemantics => "functional-semantics",
+    ConversationEntryKind::Threat => "threat",
+    ConversationEntryKind::Invariant => "invariant",
+  };
+  let content_class = match entry.kind {
+    ConversationEntryKind::Comment | ConversationEntryKind::Mention => {
+      "comment-content code-style"
+    }
+    _ => "comment-content",
+  };
+
+  let mut children_html = String::new();
+  let n_children = entry.children.len();
+  for (i, child) in entry.children.iter().enumerate() {
+    children_html
+      .push_str(&render_entry_html(child, i, n_children, depth + 1));
+  }
+
+  let mut style = String::from(COMBINED_PANEL_STYLE);
+  style.push(' ');
+  style.push_str(&first_last_style(index, total));
+
+  // Wrap header + body in indent divs based on depth, then append children
+  // inside the outer container (children render their own indent recursively).
+  let inner = format!(
+    "{}<div class=\"{}\">{}</div>",
+    entry.header_html, content_class, entry.body_html
+  );
+  let wrapped = wrap_in_indent(&inner, depth);
+
+  format!(
+    "<div class=\"{}\" data-topic=\"{}\" style=\"{}\">{}{}</div>",
+    css_class,
+    html_escape(&entry.topic_id),
+    style,
+    wrapped,
+    children_html,
+  )
+}
+
+/// Turn a root `RenderedEntry` into a `ConversationEntry`. Sets `inline_html`
+/// only for trusted entity kinds (currently just `FunctionalSemantics`).
+fn conversation_entry_from_tree(tree: RenderedEntry) -> ConversationEntry {
+  let html = render_entry_html(&tree, 0, 1, 0);
+  let inline_html = match tree.kind {
+    ConversationEntryKind::FunctionalSemantics => Some(tree.body_html.clone()),
+    _ => None,
+  };
+  ConversationEntry {
+    topic_id: tree.topic_id,
+    kind: tree.kind,
+    created_at: tree.created_at,
+    html,
+    inline_html,
+  }
+}
+
+/// Map a topic's metadata to the appropriate top-level `ConversationEntryKind`
+/// for the conversation/thread pipelines. Returns `None` for topic types that
+/// are not conversational entities.
+fn entry_kind_for(metadata: &TopicMetadata) -> Option<ConversationEntryKind> {
+  match metadata {
+    TopicMetadata::CommentTopic { .. } => Some(ConversationEntryKind::Comment),
+    TopicMetadata::RequirementTopic { .. } => {
+      Some(ConversationEntryKind::Requirement)
+    }
+    TopicMetadata::BehaviorTopic { .. } => {
+      Some(ConversationEntryKind::Behavior)
+    }
+    TopicMetadata::FunctionalSemanticTopic { .. } => {
+      Some(ConversationEntryKind::FunctionalSemantics)
+    }
+    TopicMetadata::ThreatTopic { .. } => Some(ConversationEntryKind::Threat),
+    TopicMetadata::InvariantTopic { .. } => {
+      Some(ConversationEntryKind::Invariant)
+    }
+    _ => None,
+  }
+}
+
+/// Build the conversation for a topic: requirements/behaviors/semantics,
+/// direct comments, and mentioning comments, each rendered through the
+/// unified `render_entry_tree` pipeline.
 pub fn build_conversation(
   topic_id: &str,
   audit_data: &AuditData,
@@ -1503,10 +1739,7 @@ pub fn build_conversation(
 
   let mut entries: Vec<ConversationEntry> = Vec::new();
 
-  // Functional semantics, behaviors, and requirements all render via the
-  // same generated-topic helper, looked up via their respective reverse indexes.
-  // Resolve through transitive chain so signature topics find their
-  // definition's semantics/behaviors/requirements.
+  // Functional semantics, behaviors, and requirements via reverse indexes.
   let related_iter = audit_data
     .declaration_semantics
     .get(&resolved_topic)
@@ -1518,16 +1751,22 @@ pub fn build_conversation(
     let Some(metadata) = audit_data.topic_metadata.get(rt) else {
       continue;
     };
-    // Semantics use the parent declaration as the description container;
-    // behaviors and requirements use their own topic.
-    let container = match metadata {
-      TopicMetadata::FunctionalSemanticTopic { .. } => &resolved_topic,
-      _ => rt,
+    let Some(kind) = entry_kind_for(metadata) else {
+      continue;
     };
-    if let Some(entry) =
-      build_generated_conversation_entry(audit_data, rt, container, metadata)
+    // FunctionalSemantics descriptions reference topics in the parent
+    // declaration's scope, so the description container must be the
+    // resolved declaration topic, not the semantic topic itself.
+    let container = match metadata {
+      TopicMetadata::FunctionalSemanticTopic { .. } => {
+        Some(&resolved_topic)
+      }
+      _ => None,
+    };
+    if let Some(tree) =
+      render_entry_tree(rt, kind, audit_data, source_text_cache, container)
     {
-      entries.push(entry);
+      entries.push(conversation_entry_from_tree(tree));
     }
   }
 
@@ -1537,32 +1776,31 @@ pub fn build_conversation(
     audit_data.comment_index.get(comment_lookup_topic)
   {
     for comment_topic in comment_topics {
-      if let Some(entry) = build_conversation_entry(
+      if let Some(tree) = render_entry_tree(
         comment_topic,
         ConversationEntryKind::Comment,
         audit_data,
         source_text_cache,
+        None,
       ) {
-        entries.push(entry);
+        entries.push(conversation_entry_from_tree(tree));
       }
     }
   }
 
   // Comments that mention this topic (resolve through transitive chain).
-  // Documentation-sourced references are rendered in the documentation
-  // panel instead, where they can be deduplicated with other linked
-  // documentation sections.
   if let Some(mentioning_topics) =
     audit_data.mentions_index.get(comment_lookup_topic)
   {
     for mentioning_topic in mentioning_topics {
-      if let Some(entry) = build_conversation_entry(
+      if let Some(tree) = render_entry_tree(
         mentioning_topic,
         ConversationEntryKind::Mention,
         audit_data,
         source_text_cache,
+        None,
       ) {
-        entries.push(entry);
+        entries.push(conversation_entry_from_tree(tree));
       }
     }
   }
@@ -1570,36 +1808,8 @@ pub fn build_conversation(
   Some(ConversationResponse { entries })
 }
 
-/// Build a single conversation entry: metadata + rendered thread HTML.
-pub fn build_conversation_entry(
-  entry_topic: &topic::Topic,
-  kind: ConversationEntryKind,
-  audit_data: &AuditData,
-  source_text_cache: &mut std::collections::HashMap<String, String>,
-) -> Option<ConversationEntry> {
-  let metadata = audit_data.topic_metadata.get(entry_topic)?;
-
-  let html = match entry_topic {
-    topic::Topic::Comment(_) => build_comment_thread_html(
-      entry_topic,
-      metadata,
-      audit_data,
-      source_text_cache,
-    ),
-    _ => render_topic_node(metadata, audit_data, source_text_cache),
-  };
-
-  Some(ConversationEntry {
-    topic_id: entry_topic.id().to_string(),
-    kind,
-    created_at: metadata.created_at().map(|s| s.to_string()),
-    html,
-  })
-}
-
-/// Build thread HTML for a single topic.
-/// For comment topics: renders the comment thread (root + recursive children).
-/// For non-comment topics: renders a topic header + source text content.
+/// Build thread HTML for a single topic: renders the topic + its recursive
+/// comment children via the unified `render_entry_tree` pipeline.
 pub fn build_thread(
   topic_id: &str,
   audit_data: &AuditData,
@@ -1607,70 +1817,11 @@ pub fn build_thread(
 ) -> Option<String> {
   let topic = topic::new_topic(topic_id);
   let metadata = audit_data.topic_metadata.get(&topic)?;
+  let kind = entry_kind_for(metadata)?;
 
-  let html = match topic {
-    topic::Topic::Comment(_) => {
-      build_comment_thread_html(&topic, metadata, audit_data, source_text_cache)
-    }
-    _ => render_topic_node(metadata, audit_data, source_text_cache),
-  };
-
-  Some(html)
-}
-
-// ============================================================================
-// Comment Thread Rendering
-// ============================================================================
-
-/// Render a single comment node: metadata header + rendered content.
-fn render_comment_node(
-  metadata: &TopicMetadata,
-  index: usize,
-  total: usize,
-  depth: usize,
-  audit_data: &AuditData,
-  source_text_cache: &mut std::collections::HashMap<String, String>,
-) -> String {
-  let topic_id = metadata.topic().id();
-  let author_id = metadata.author_id().unwrap_or(0);
-  let comment_type = metadata
-    .comment_type()
-    .map(|ct| ct.as_str())
-    .unwrap_or("note");
-  let created_at = metadata.created_at().unwrap_or("");
-
-  // Metadata header
-  let meta_html = format!(
-    "<div style=\"{}\"><span class=\"comment-type keyword\">{}</span> \
-     <span class=\"comment-author\">author:{}</span> \
-     <span class=\"comment-time\">{}</span></div>",
-    COMMENT_META_STYLE,
-    html_escape(comment_type),
-    author_id,
-    html_escape(created_at),
-  );
-
-  // Comment content from cache
-  let content_html =
-    get_source_text(metadata.topic(), audit_data, source_text_cache);
-
-  let inner = format!(
-    "{}<div class=\"comment-content code-style\">{}</div>",
-    meta_html, content_html
-  );
-
-  let wrapped = wrap_in_indent(&inner, depth);
-
-  let mut style = String::from(COMBINED_PANEL_STYLE);
-  style.push(' ');
-  style.push_str(&first_last_style(index, total));
-
-  format!(
-    "<div class=\"comment-thread-node\" data-topic=\"{}\" style=\"{}\">{}</div>",
-    html_escape(&topic_id),
-    style,
-    wrapped
-  )
+  let tree =
+    render_entry_tree(&topic, kind, audit_data, source_text_cache, None)?;
+  Some(render_entry_html(&tree, 0, 1, 0))
 }
 
 /// Collect the parent chain from a comment topic up to (but not including)
@@ -1696,155 +1847,23 @@ fn collect_parent_chain<'a>(
   chain
 }
 
-/// Recursively collect comment children into a flat list with depth info.
-/// Each entry is (metadata, depth). Collects in depth-first order.
-fn collect_children_recursive<'a>(
-  parent_topic: &topic::Topic,
-  depth: usize,
-  audit_data: &'a AuditData,
-  result: &mut Vec<(&'a TopicMetadata, usize)>,
-) {
-  let children: Vec<&TopicMetadata> = audit_data
-    .topic_metadata
-    .values()
-    .filter(|m| m.target_topic() == Some(parent_topic))
-    .collect();
-
-  for child_meta in children {
-    result.push((child_meta, depth));
-    collect_children_recursive(
-      child_meta.topic(),
-      depth + 1,
-      audit_data,
-      result,
-    );
-  }
-}
-
-/// Render a comment thread: root comment + all recursive children.
-fn build_comment_thread_html(
-  topic: &topic::Topic,
+/// Build a `RenderedEntry` for a topic used in the topic panel prefix:
+/// context-only rendering with no thread children (to avoid pulling in
+/// siblings that aren't part of the displayed chain).
+fn build_prefix_entry(
   metadata: &TopicMetadata,
+  kind: ConversationEntryKind,
   audit_data: &AuditData,
   source_text_cache: &mut std::collections::HashMap<String, String>,
-) -> String {
-  let mut flat: Vec<(&TopicMetadata, usize)> = vec![(metadata, 0)];
-  collect_children_recursive(topic, 1, audit_data, &mut flat);
-
-  let total = flat.len();
-  let mut html = String::new();
-
-  for (i, (meta, depth)) in flat.iter().enumerate() {
-    html.push_str(&render_comment_node(
-      meta,
-      i,
-      total,
-      *depth,
-      audit_data,
-      source_text_cache,
-    ));
-  }
-
-  html
-}
-
-/// Wrap a topic's body in a conversation-thread node. For non-authored
-/// topics, prepends a small kind+name meta header so the reader knows what
-/// the source/documentation is. The body itself comes from `render_source_text`,
-/// which is canonical.
-fn render_topic_node(
-  metadata: &TopicMetadata,
-  audit_data: &AuditData,
-  source_text_cache: &mut std::collections::HashMap<String, String>,
-) -> String {
-  let topic_id = metadata.topic().id();
-  let is_authored = authored_topic_label(metadata).is_some();
-
-  let meta_html = if is_authored {
-    String::new()
-  } else {
-    let kind_label = topic_kind_label(metadata);
-    let name = metadata.name().unwrap_or(&topic_id);
-    format!(
-      "<div style=\"{}\"><span class=\"comment-type keyword\">{}</span> \
-       <span class=\"comment-author\">{}</span></div>",
-      COMMENT_META_STYLE,
-      html_escape(kind_label),
-      html_escape(name),
-    )
-  };
-
-  let content_html =
-    get_source_text(metadata.topic(), audit_data, source_text_cache);
-
-  let content_class = if is_authored {
-    "comment-content"
-  } else {
-    "comment-content code-style"
-  };
-
-  let inner = format!(
-    "{}<div class=\"{}\">{}</div>",
-    meta_html, content_class, content_html
-  );
-
-  let style = format!("{} {}", COMBINED_PANEL_STYLE, first_last_style(0, 1));
-
-  format!(
-    "<div class=\"conversation-node\" data-topic=\"{}\" style=\"{}\">{}</div>",
-    html_escape(&topic_id),
-    style,
-    inner
-  )
-}
-
-/// Returns a human-readable label for a topic's kind.
-fn topic_kind_label(metadata: &TopicMetadata) -> &'static str {
-  match metadata {
-    TopicMetadata::NamedTopic { kind, .. } => match kind {
-      NamedTopicKind::Contract(ContractKind::Contract) => "contract",
-      NamedTopicKind::Contract(ContractKind::Interface) => "interface",
-      NamedTopicKind::Contract(ContractKind::Library) => "library",
-      NamedTopicKind::Contract(ContractKind::Abstract) => "abstract",
-      NamedTopicKind::Function(FunctionKind::Function)
-      | NamedTopicKind::Function(FunctionKind::FreeFunction) => "function",
-      NamedTopicKind::Function(FunctionKind::Constructor) => "constructor",
-      NamedTopicKind::Function(FunctionKind::Fallback) => "fallback",
-      NamedTopicKind::Function(FunctionKind::Receive) => "receive",
-      NamedTopicKind::Modifier => "modifier",
-      NamedTopicKind::Struct => "struct",
-      NamedTopicKind::Enum => "enum",
-      NamedTopicKind::EnumMember => "enum member",
-      NamedTopicKind::Event => "event",
-      NamedTopicKind::Error => "error",
-      NamedTopicKind::StateVariable(VariableMutability::Mutable) => {
-        "state variable"
-      }
-      NamedTopicKind::StateVariable(VariableMutability::Constant) => "constant",
-      NamedTopicKind::StateVariable(VariableMutability::Immutable) => {
-        "immutable"
-      }
-      NamedTopicKind::LocalVariable => "variable",
-      NamedTopicKind::Builtin => "builtin",
-    },
-    TopicMetadata::UnnamedTopic { .. } => "expression",
-    TopicMetadata::DocumentationTopic { .. } => "document",
-    TopicMetadata::ControlFlow { kind, .. } => match kind {
-      ControlFlowStatementKind::If => "if",
-      ControlFlowStatementKind::For => "for",
-      ControlFlowStatementKind::While => "while",
-      ControlFlowStatementKind::DoWhile => "do while",
-    },
-    TopicMetadata::TitledTopic { kind, .. } => match kind {
-      TitledTopicKind::DocumentationSection => "section",
-    },
-    TopicMetadata::CommentTopic { .. } => "comment",
-    TopicMetadata::FeatureTopic { .. } => "feature",
-    TopicMetadata::RequirementTopic { .. } => "requirement",
-    TopicMetadata::BehaviorTopic { .. } => "behavior",
-    TopicMetadata::FunctionalSemanticTopic { .. } => "semantic",
-    TopicMetadata::ThreatTopic { .. } => "threat",
-    TopicMetadata::InvariantTopic { .. } => "invariant",
+) -> RenderedEntry {
+  let topic = metadata.topic();
+  RenderedEntry {
+    topic_id: topic.id().to_string(),
+    kind,
+    header_html: render_entry_header(metadata),
+    body_html: get_source_text(topic, audit_data, source_text_cache),
+    created_at: metadata.created_at().map(|s| s.to_string()),
+    children: Vec::new(),
   }
 }
 
