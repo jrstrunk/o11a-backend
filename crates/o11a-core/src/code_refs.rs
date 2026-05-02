@@ -236,21 +236,21 @@ pub fn find_declaration_by_name<'a>(
   audit_data: &'a domain::AuditData,
   value: &str,
 ) -> Option<&'a domain::TopicMetadata> {
-  audit_data
-    .topic_metadata
-    .get(&topic::new_topic(value))
-    .or_else(|| {
-      audit_data
-        .name_index
-        .get_by_qualified_name(value)
-        .and_then(|t| audit_data.topic_metadata.get(t))
-        .or_else(|| {
-          audit_data
-            .name_index
-            .get_by_simple_name(value)
-            .and_then(|t| audit_data.topic_metadata.get(t))
-        })
-    })
+  match topic::parse_topic(value) {
+    // If this is a valid topic string, use it directly
+    Ok(topic) => audit_data.topic_metadata.get(&topic),
+    // Otherwise, fall back to searching by qualified or simple name
+    Err(..) => audit_data
+      .name_index
+      .get_by_qualified_name(value)
+      .and_then(|t| audit_data.topic_metadata.get(t))
+      .or_else(|| {
+        audit_data
+          .name_index
+          .get_by_simple_name(value)
+          .and_then(|t| audit_data.topic_metadata.get(t))
+      }),
+  }
 }
 
 #[cfg(test)]

@@ -211,6 +211,12 @@ pub fn new_type_constraint_topic(id: i32) -> Topic {
   Topic::TypeConstraint(id)
 }
 
+/// Checks if value is a topic string, if not returns an error.
+pub fn parse_topic(s: &str) -> Result<Topic, ParseTopicError> {
+  let topic: Topic = s.parse()?;
+  Ok(topic)
+}
+
 /// Parse a topic from its prefixed string form. Panics on malformed input.
 /// Prefer `str::parse::<Topic>()` when a `Result` is desired.
 pub fn new_topic(id: &str) -> Topic {
