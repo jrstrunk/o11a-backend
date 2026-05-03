@@ -21,7 +21,7 @@
 //!
 //! See `docs/specs/semantic-linking.md`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -233,6 +233,7 @@ struct Pass3VariantOutput {
 
 const VARIANTS: &[&str] = &[
   "mechanical",
+  "mechanical-graph",
   "bm25-gap",
   "bm25-top-k-floor",
   "bm25-permissive",
@@ -347,6 +348,17 @@ struct MatchRecord {
 /// Read-only snapshot of every audit bit the harness needs. Built once,
 /// shared across all per-section tasks via `Arc` so we don't hold the
 /// `DataContext` lock during the comparison run.
+///
+/// Two pairs of mechanical maps live here:
+/// - The unprefixed `mechanical_*` maps are computed with every Phase B
+///   resolution removed — this is the pre-graph baseline that feeds the
+///   `mechanical` variant. Build-plan Phase 8's purpose is to measure
+///   what the graph adds *over* this baseline.
+/// - The `mechanical_graph_*` maps include Phase B's contributions —
+///   the production state today. These feed the new `mechanical-graph`
+///   variant directly, and they are also the seed BM25 / LLM variants
+///   build on so those workflows benchmark only their own additive
+///   contribution beyond the production resolver.
 struct CompareIndexes {
   /// Section topics in deterministic order.
   sections: Vec<topic::Topic>,
@@ -354,11 +366,18 @@ struct CompareIndexes {
   section_text: HashMap<topic::Topic, String>,
   /// File path of the section's parent document, per section topic.
   section_path: HashMap<topic::Topic, String>,
-  /// Mechanical section→[contracts] mapping.
+  /// Phase-A-only section→[contracts]: the floor of the benchmark.
   mechanical_section_to_contracts:
     HashMap<topic::Topic, Vec<topic::Topic>>,
-  /// Mechanical (section, contract)→[members] mapping.
+  /// Phase-A-only (section, contract)→[members].
   mechanical_members_by_section_contract:
+    HashMap<(topic::Topic, topic::Topic), Vec<topic::Topic>>,
+  /// Phase A + Phase B section→[contracts] — the production resolver
+  /// baseline that BM25 / LLM expansions seed from.
+  mechanical_graph_section_to_contracts:
+    HashMap<topic::Topic, Vec<topic::Topic>>,
+  /// Phase A + Phase B (section, contract)→[members].
+  mechanical_graph_members_by_section_contract:
     HashMap<(topic::Topic, topic::Topic), Vec<topic::Topic>>,
   /// Pre-built BM25 corpus per contract.
   bm25_corpus_by_contract: HashMap<topic::Topic, Vec<MemberDoc>>,
@@ -419,10 +438,13 @@ pub async fn run(
     pass1_start.elapsed(),
   );
 
-  // Mechanical's Pass 1 (contract anchors from name-resolution) — the
-  // floor of the benchmark. We log this separately so the full
-  // mechanical chain (Pass 1 → Pass 2 → Pass 3) is observable in the
-  // harness output without having to derive Pass 1 from `mechanical.jsonl`.
+  // Mechanical's Pass 1 (Phase A only contract anchors — i.e. before
+  // any graph-driven pass overwrites a `referenced_topic`). The floor
+  // of the benchmark. Logged separately so the full mechanical chain
+  // (Pass 1 → Pass 2 → Pass 3) is observable in the harness output
+  // without having to derive Pass 1 from `mechanical.jsonl`. The
+  // `mechanical-graph` chain re-uses these records' Pass 2/3
+  // counterparts via the `mechanical_graph_*` indexes.
   let mechanical_pass1 = build_mechanical_pass1_records(&indexes);
   write_mechanical_pass1(
     &dir.join("mechanical-pass1.jsonl"),
@@ -439,6 +461,7 @@ pub async fn run(
   // section_contracts maps that feed Pass 3 in the same loop.
   let sync_start = Instant::now();
   let mut mech_data = VariantData::empty();
+  let mut mech_graph_data = VariantData::empty();
   let mut bm25_gap_data = VariantData::empty();
   let mut bm25_topk_data = VariantData::empty();
   let mut bm25_permissive_data = VariantData::empty();
@@ -454,16 +477,28 @@ pub async fn run(
       .get(section_topic)
       .cloned()
       .unwrap_or_default();
+    // Phase-A-only and Phase A + Phase B contract anchors. The former
+    // is what the `mechanical` variant ships; the latter feeds the new
+    // `mechanical-graph` variant *and* serves as the production-baseline
+    // seed for BM25 / LLM expansions (so those variants benchmark only
+    // their own additive contribution).
     let mech_contracts = indexes
       .mechanical_section_to_contracts
       .get(section_topic)
       .cloned()
       .unwrap_or_default();
+    let mech_graph_contracts = indexes
+      .mechanical_graph_section_to_contracts
+      .get(section_topic)
+      .cloned()
+      .unwrap_or_default();
 
-    // BM25 contract anchor set = mechanical ∪ Pass-1 top-K. Mechanical
-    // entries take provenance precedence (Mechanical > Bm25 in `merge`).
+    // BM25 contract anchor set = mechanical-graph ∪ Pass-1 top-K — i.e.
+    // the production resolver baseline plus what BM25 discovered.
+    // Mechanical entries take provenance precedence (Mechanical > Bm25
+    // in `merge`).
     let mut bm25_contracts: Vec<(topic::Topic, domain::MatchSource)> =
-      mech_contracts
+      mech_graph_contracts
         .iter()
         .map(|c| (*c, domain::MatchSource::Mechanical))
         .collect();
@@ -475,15 +510,23 @@ pub async fn run(
       }
     }
 
-    // Mechanical variant: anchor-only, no Pass-1 expansion (it's the
-    // baseline). BM25 variants: augmented set so they can reach contracts
-    // mechanical didn't anchor.
+    // Mechanical / mechanical-graph variants: anchor-only, no Pass-1
+    // expansion (they are the baseline floors). BM25 variants:
+    // augmented set so they can reach contracts mechanical didn't
+    // anchor.
     if !mech_contracts.is_empty() {
       let entry: Vec<_> = mech_contracts
         .iter()
         .map(|c| (*c, domain::MatchSource::Mechanical))
         .collect();
       mech_data.section_contracts.insert(*section_topic, entry);
+    }
+    if !mech_graph_contracts.is_empty() {
+      let entry: Vec<_> = mech_graph_contracts
+        .iter()
+        .map(|c| (*c, domain::MatchSource::Mechanical))
+        .collect();
+      mech_graph_data.section_contracts.insert(*section_topic, entry);
     }
     if !bm25_contracts.is_empty() {
       for data in [
@@ -497,34 +540,49 @@ pub async fn run(
       }
     }
 
-    // Mechanical: one record per (section, contract, mechanical member).
-    for ct in &mech_contracts {
-      for m in indexes
-        .mechanical_members_by_section_contract
-        .get(&(*section_topic, *ct))
-        .into_iter()
-        .flatten()
-      {
-        mech_data.records.push(make_record(
-          section_topic,
-          &section_path,
-          ct,
-          m,
-          domain::MatchSource::Mechanical,
-          None,
-          &indexes,
-        ));
-        // Mechanical: doc_topic = section_topic (no LLM Pass 2 disambiguation).
-        let doc_map = mech_data.doc_members.entry(*section_topic).or_default();
-        let entry = doc_map.entry(*section_topic).or_default();
-        if !entry.iter().any(|(t, _)| t == m) {
-          entry.push((*m, domain::MatchSource::Mechanical));
+    // Mechanical / mechanical-graph: one record per (section, contract,
+    // member). Iterate both views with their respective member maps.
+    for (data, contracts, members_map) in [
+      (
+        &mut mech_data,
+        &mech_contracts,
+        &indexes.mechanical_members_by_section_contract,
+      ),
+      (
+        &mut mech_graph_data,
+        &mech_graph_contracts,
+        &indexes.mechanical_graph_members_by_section_contract,
+      ),
+    ] {
+      for ct in contracts {
+        for m in members_map
+          .get(&(*section_topic, *ct))
+          .into_iter()
+          .flatten()
+        {
+          data.records.push(make_record(
+            section_topic,
+            &section_path,
+            ct,
+            m,
+            domain::MatchSource::Mechanical,
+            None,
+            &indexes,
+          ));
+          // doc_topic = section_topic for the mechanical seed (no LLM
+          // Pass 2 disambiguation here).
+          let doc_map = data.doc_members.entry(*section_topic).or_default();
+          let entry = doc_map.entry(*section_topic).or_default();
+          if !entry.iter().any(|(t, _)| t == m) {
+            entry.push((*m, domain::MatchSource::Mechanical));
+          }
         }
       }
     }
 
-    // BM25 variants: mechanical seed + BM25 expansion across the augmented
-    // contract set. Each variant differs only in the cutoff function.
+    // BM25 variants: mechanical-graph seed + BM25 expansion across the
+    // augmented contract set. Each variant differs only in the cutoff
+    // function.
     if section_text.is_empty() {
       continue;
     }
@@ -538,12 +596,12 @@ pub async fn run(
       (&mut bm25_topk_data, CutoffKind::TopKFloor),
       (&mut bm25_permissive_data, CutoffKind::Permissive),
     ] {
-      // Mechanical seed (only from mechanically-anchored contracts;
-      // Pass-1-discovered contracts have no mechanical members for this
-      // section by definition).
-      for ct in &mech_contracts {
+      // Mechanical-graph seed (only from mechanically-anchored
+      // contracts; Pass-1-discovered contracts have no mechanical
+      // members for this section by definition).
+      for ct in &mech_graph_contracts {
         for m in indexes
-          .mechanical_members_by_section_contract
+          .mechanical_graph_members_by_section_contract
           .get(&(*section_topic, *ct))
           .into_iter()
           .flatten()
@@ -583,7 +641,7 @@ pub async fn run(
           let cand = &scored[i];
           let m = cand.item.member_topic;
           let already_seeded = indexes
-            .mechanical_members_by_section_contract
+            .mechanical_graph_members_by_section_contract
             .get(&(*section_topic, *ct))
             .map(|v| v.contains(&m))
             .unwrap_or(false);
@@ -628,9 +686,10 @@ pub async fn run(
 
   let sync_elapsed = sync_start.elapsed();
   tracing::info!(
-    "compare: mechanical + bm25 variants in {:?} (mechanical={}, bm25-gap={}, bm25-top-k-floor={}, bm25-permissive={})",
+    "compare: mechanical + bm25 variants in {:?} (mechanical={}, mechanical-graph={}, bm25-gap={}, bm25-top-k-floor={}, bm25-permissive={})",
     sync_elapsed,
     mech_data.records.len(),
+    mech_graph_data.records.len(),
     bm25_gap_data.records.len(),
     bm25_topk_data.records.len(),
     bm25_permissive_data.records.len(),
@@ -655,6 +714,7 @@ pub async fn run(
   // files (makes `diff` directly useful).
   for d in [
     &mut mech_data,
+    &mut mech_graph_data,
     &mut bm25_gap_data,
     &mut bm25_topk_data,
     &mut bm25_permissive_data,
@@ -664,6 +724,10 @@ pub async fn run(
   }
 
   write_jsonl(&dir.join("mechanical.jsonl"), &mech_data.records)?;
+  write_jsonl(
+    &dir.join("mechanical-graph.jsonl"),
+    &mech_graph_data.records,
+  )?;
   write_jsonl(&dir.join("bm25-gap.jsonl"), &bm25_gap_data.records)?;
   write_jsonl(&dir.join("bm25-top-k-floor.jsonl"), &bm25_topk_data.records)?;
   write_jsonl(
@@ -673,8 +737,9 @@ pub async fn run(
   write_jsonl(&dir.join("llm.jsonl"), &llm_data.records)?;
 
   tracing::info!(
-    "compare: wrote pass2 candidate logs (mechanical={}, bm25-gap={}, bm25-top-k-floor={}, bm25-permissive={}, llm={})",
+    "compare: wrote pass2 candidate logs (mechanical={}, mechanical-graph={}, bm25-gap={}, bm25-top-k-floor={}, bm25-permissive={}, llm={})",
     mech_data.records.len(),
+    mech_graph_data.records.len(),
     bm25_gap_data.records.len(),
     bm25_topk_data.records.len(),
     bm25_permissive_data.records.len(),
@@ -687,6 +752,7 @@ pub async fn run(
   let pass3_start = Instant::now();
   let variant_inputs: Vec<(&str, &VariantData)> = vec![
     ("mechanical", &mech_data),
+    ("mechanical-graph", &mech_graph_data),
     ("bm25-gap", &bm25_gap_data),
     ("bm25-top-k-floor", &bm25_topk_data),
     ("bm25-permissive", &bm25_permissive_data),
@@ -770,6 +836,17 @@ pub async fn run(
     build_pass3_summary(&variant_inputs, &all_pass3, &data_context, audit_id);
   write_pass3_summary(&dir.join("pass3-summary.jsonl"), &summary)?;
 
+  // Edge-contribution histogram: per-`EdgeType` aggregate of how often
+  // each edge type appeared in the top-contributing-edges of a Phase B
+  // resolution and how much PR mass it delivered. The build plan's
+  // Phase 8 calls this out as the third quality signal (alongside
+  // recall and precision deltas) for evaluating the graph resolver.
+  let histogram = build_edge_contribution_histogram(&data_context, audit_id);
+  write_edge_contribution_histogram(
+    &dir.join("edge-contribution-histogram.jsonl"),
+    &histogram,
+  )?;
+
   tracing::info!(
     "compare-all: wrote per-variant logs + Pass 3 outputs to {} in {:?} total",
     dir.display(),
@@ -777,6 +854,32 @@ pub async fn run(
   );
 
   Ok(())
+}
+
+/// Doc-node IDs whose `referenced_topic` was set (or overwritten) by a
+/// graph-driven resolution pass. Pure, easily testable: walks the trace
+/// store and picks every `DocumentationNode` reference whose trace
+/// landed on a non-`None` `chosen_topic`. Future phases (C / D / E)
+/// flow through the same `chosen_topic` field, so this filter stays
+/// correct as the resolver gains phases without code changes.
+fn graph_resolved_doc_node_ids(
+  traces: &BTreeMap<
+    crate::resolution_graph::ResolutionRefId,
+    crate::resolution_graph::ResolutionTrace,
+  >,
+) -> HashSet<i32> {
+  use crate::resolution_graph::ResolutionRefId;
+  traces
+    .iter()
+    .filter_map(|(ref_id, trace)| match ref_id {
+      ResolutionRefId::DocumentationNode(node_id)
+        if trace.chosen_topic.is_some() =>
+      {
+        Some(*node_id)
+      }
+      _ => None,
+    })
+    .collect()
 }
 
 /// Build all the read-side snapshots the harness needs. Returns `Ok(None)`
@@ -793,7 +896,25 @@ fn snapshot_indexes(
     return Ok(None);
   };
 
-  let mechanical = context::mechanical_semantic_links(audit_data);
+  // Two views of the deterministic resolver:
+  //
+  //   * `mechanical_phase_a` reverses every graph-driven resolution
+  //     against doc-tree identifiers so the `mechanical` variant
+  //     measures the pre-graph baseline. The exclusion set is "every
+  //     trace that resolved" — `chosen_topic.is_some()` covers Phase B
+  //     today and stays correct when Phases C / D / E (build plan
+  //     phases 9 and 10) start producing traces, since those phases
+  //     also represent graph-driven contributions to overwrite.
+  //   * `mechanical_graph` includes every graph phase — i.e. the
+  //     production resolver state. It feeds the new `mechanical-graph`
+  //     variant directly and seeds BM25 / LLM expansions.
+  let graph_resolved_doc_node_ids =
+    graph_resolved_doc_node_ids(&audit_data.resolution_traces);
+  let mechanical_phase_a = context::mechanical_semantic_links_excluding(
+    audit_data,
+    &graph_resolved_doc_node_ids,
+  );
+  let mechanical_graph = context::mechanical_semantic_links(audit_data);
   let sections = task::collect_documentation_sections(audit_data);
   if sections.is_empty() {
     return Ok(None);
@@ -841,26 +962,33 @@ fn snapshot_indexes(
     section_path.insert(*s, section_path_for(s, audit_data));
   }
 
-  // Mechanical members per (section, contract).
+  // Mechanical members per (section, contract). Built twice, once per
+  // resolver view: the Phase-A-only baseline and the Phase A + Phase B
+  // production state. Each view feeds its own variant downstream.
   let mut mechanical_members_by_section_contract: HashMap<
     (topic::Topic, topic::Topic),
     Vec<topic::Topic>,
   > = HashMap::new();
+  let mut mechanical_graph_members_by_section_contract: HashMap<
+    (topic::Topic, topic::Topic),
+    Vec<topic::Topic>,
+  > = HashMap::new();
   for s in &sections {
-    let section_decls = mechanical
-      .section_to_declarations
-      .get(s)
-      .cloned()
-      .unwrap_or_default();
-    let cs = mechanical
-      .section_to_contracts
-      .get(s)
-      .cloned()
-      .unwrap_or_default();
-    for ct in &cs {
-      let members =
-        context::mechanical_section_to_members(&section_decls, ct, audit_data);
-      mechanical_members_by_section_contract.insert((*s, *ct), members);
+    for (links, out) in [
+      (&mechanical_phase_a, &mut mechanical_members_by_section_contract),
+      (&mechanical_graph, &mut mechanical_graph_members_by_section_contract),
+    ] {
+      let section_decls = links
+        .section_to_declarations
+        .get(s)
+        .cloned()
+        .unwrap_or_default();
+      let cs = links.section_to_contracts.get(s).cloned().unwrap_or_default();
+      for ct in &cs {
+        let members =
+          context::mechanical_section_to_members(&section_decls, ct, audit_data);
+        out.insert((*s, *ct), members);
+      }
     }
   }
 
@@ -893,6 +1021,11 @@ fn snapshot_indexes(
       record_name(*m);
     }
   }
+  for members in mechanical_graph_members_by_section_contract.values() {
+    for m in members {
+      record_name(*m);
+    }
+  }
   for corpus in bm25_corpus_by_contract.values() {
     for doc in corpus {
       record_name(doc.member_topic);
@@ -903,8 +1036,11 @@ fn snapshot_indexes(
     sections,
     section_text,
     section_path,
-    mechanical_section_to_contracts: mechanical.section_to_contracts,
+    mechanical_section_to_contracts: mechanical_phase_a.section_to_contracts,
     mechanical_members_by_section_contract,
+    mechanical_graph_section_to_contracts: mechanical_graph
+      .section_to_contracts,
+    mechanical_graph_members_by_section_contract,
     bm25_corpus_by_contract,
     contract_json_by_topic,
     contract_list_json,
@@ -931,8 +1067,11 @@ async fn run_llm_variant(
     if section_text.is_empty() {
       continue;
     }
+    // Confirmed contracts use the production baseline (Phase A + Phase
+    // B) so the LLM pass measures only the additional contracts the LLM
+    // discovers.
     let confirmed = indexes
-      .mechanical_section_to_contracts
+      .mechanical_graph_section_to_contracts
       .get(section_topic)
       .cloned()
       .unwrap_or_default();
@@ -946,7 +1085,7 @@ async fn run_llm_variant(
   // Per-section contract list including LLM additions, keyed by section.
   let mut llm_contracts_by_section: HashMap<topic::Topic, Vec<topic::Topic>> =
     HashMap::new();
-  for (st, ctrs) in &indexes.mechanical_section_to_contracts {
+  for (st, ctrs) in &indexes.mechanical_graph_section_to_contracts {
     llm_contracts_by_section.insert(*st, ctrs.clone());
   }
   for handle in pass1_handles {
@@ -990,7 +1129,7 @@ async fn run_llm_variant(
     // contracts win over LLM-added (highest-confidence merge); we walk
     // mechanically-anchored ones first then LLM-added ones.
     let mech_anchored: std::collections::HashSet<topic::Topic> = indexes
-      .mechanical_section_to_contracts
+      .mechanical_graph_section_to_contracts
       .get(section_topic)
       .map(|v| v.iter().copied().collect())
       .unwrap_or_default();
@@ -1008,7 +1147,7 @@ async fn run_llm_variant(
 
     for ct in contracts {
       for m in indexes
-        .mechanical_members_by_section_contract
+        .mechanical_graph_members_by_section_contract
         .get(&(*section_topic, *ct))
         .into_iter()
         .flatten()
@@ -1036,7 +1175,7 @@ async fn run_llm_variant(
   }
 
   // Pass 2: per (section, contract) LLM call. Confirmed-members list is the
-  // union of mechanical members across all contracts of the section
+  // union of mechanical-graph members across all contracts of the section
   // (matches the main pipeline's behaviour).
   let mut pass2_handles = Vec::new();
   for (section_topic, contracts) in &llm_contracts_by_section {
@@ -1051,7 +1190,7 @@ async fn run_llm_variant(
     let mut confirmed_members: Vec<topic::Topic> = Vec::new();
     for ct in contracts {
       if let Some(v) =
-        indexes.mechanical_members_by_section_contract.get(&(*section_topic, *ct))
+        indexes.mechanical_graph_members_by_section_contract.get(&(*section_topic, *ct))
       {
         for m in v {
           if !confirmed_members.contains(m) {
@@ -1271,8 +1410,12 @@ fn run_bm25_pass1_and_log(
     let section_query_length =
       bm25::tokenize_prose_text(section_text).len();
 
+    // `is_mechanical_anchor` reflects the production resolver baseline —
+    // a contract counts as mechanically anchored iff Phase A or Phase B
+    // already reached it. BM25 is then evaluated against what the
+    // baseline did *not* anchor.
     let mech_anchor_set: std::collections::HashSet<topic::Topic> = indexes
-      .mechanical_section_to_contracts
+      .mechanical_graph_section_to_contracts
       .get(section_topic)
       .map(|v| v.iter().copied().collect())
       .unwrap_or_default();
@@ -2222,5 +2365,486 @@ fn write_pass3_summary(
   }
   std::fs::rename(&tmp, path)?;
   Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Edge-contribution histogram (Phase 8)
+//
+// Aggregate every `top_contributing_edges` entry across the audit's
+// resolution traces into one row per `EdgeType`. The harness emits this
+// alongside Pass 3 outputs so evaluators can see which edge types
+// actually drive resolutions vs. which sit unused — the calibration
+// signal the spec calls for.
+// ---------------------------------------------------------------------------
+
+/// One row in `edge-contribution-histogram.jsonl`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct EdgeContributionHistogramRow {
+  /// `Debug`-format name of the `EdgeType` variant. Stable across
+  /// releases — the spec's edge tables enumerate every variant by name.
+  edge_type: String,
+  /// Number of `EdgeContribution` entries with this edge type across
+  /// every trace. A single trace can contribute up to three (the spec
+  /// caps `top_contributing_edges` at 3 per resolution).
+  occurrences: usize,
+  /// Sum of `weighted_contribution` across all occurrences. Lets
+  /// reviewers see whether a low-occurrence edge type still moves a
+  /// lot of mass per occurrence.
+  total_weighted_contribution: f32,
+  /// Distinct traces that listed this edge type at least once. Helps
+  /// spot edge types that show up frequently across many resolutions
+  /// vs. ones whose count is concentrated on a single resolution.
+  traces_with_edge: usize,
+  /// Per-phase occurrence count (e.g. `"PhaseB" → 247`). Phase 8 only
+  /// produces `PhaseB` entries; later phases (9, 10) will populate the
+  /// other variants without schema changes here.
+  by_phase: BTreeMap<String, usize>,
+}
+
+/// Pure aggregation core — separated from the lock-acquisition layer so
+/// tests can exercise it without standing up a full `DataContext`.
+fn aggregate_edge_contribution_histogram(
+  traces: &BTreeMap<
+    crate::resolution_graph::ResolutionRefId,
+    crate::resolution_graph::ResolutionTrace,
+  >,
+) -> Vec<EdgeContributionHistogramRow> {
+  use crate::resolution_graph::EdgeType;
+
+  let mut occurrences: BTreeMap<EdgeType, usize> = BTreeMap::new();
+  let mut total_weight: BTreeMap<EdgeType, f32> = BTreeMap::new();
+  let mut traces_with_edge: BTreeMap<EdgeType, usize> = BTreeMap::new();
+  let mut by_phase: BTreeMap<EdgeType, BTreeMap<String, usize>> =
+    BTreeMap::new();
+
+  for trace in traces.values() {
+    let phase_label = format!("{:?}", trace.phase_resolved);
+    // Per-trace dedup: a trace counts once per edge type in
+    // `traces_with_edge`, even if it lists the same edge type twice in
+    // its top three contributions.
+    let mut seen_in_trace: std::collections::BTreeSet<EdgeType> =
+      std::collections::BTreeSet::new();
+    for edge in &trace.top_contributing_edges {
+      *occurrences.entry(edge.edge_type).or_insert(0) += 1;
+      *total_weight.entry(edge.edge_type).or_insert(0.0) +=
+        edge.weighted_contribution;
+      if seen_in_trace.insert(edge.edge_type) {
+        *traces_with_edge.entry(edge.edge_type).or_insert(0) += 1;
+      }
+      *by_phase
+        .entry(edge.edge_type)
+        .or_default()
+        .entry(phase_label.clone())
+        .or_insert(0) += 1;
+    }
+  }
+
+  // Emit a row per edge type that has any occurrences. Sorted ascending
+  // by `EdgeType`'s `Ord`, which is declaration order — so output is
+  // grouped universal-core first, Solidity-specific last (matching the
+  // spec table layout).
+  let mut rows: Vec<EdgeContributionHistogramRow> = Vec::new();
+  for (et, count) in &occurrences {
+    rows.push(EdgeContributionHistogramRow {
+      edge_type: format!("{:?}", et),
+      occurrences: *count,
+      total_weighted_contribution: total_weight.get(et).copied().unwrap_or(0.0),
+      traces_with_edge: traces_with_edge.get(et).copied().unwrap_or(0),
+      by_phase: by_phase.get(et).cloned().unwrap_or_default(),
+    });
+  }
+  rows
+}
+
+fn build_edge_contribution_histogram(
+  data_context: &Arc<Mutex<DataContext>>,
+  audit_id: &str,
+) -> Vec<EdgeContributionHistogramRow> {
+  let Ok(ctx) = data_context.lock() else {
+    return Vec::new();
+  };
+  let Some(audit_data) = ctx.get_audit(audit_id) else {
+    return Vec::new();
+  };
+  aggregate_edge_contribution_histogram(&audit_data.resolution_traces)
+}
+
+fn write_edge_contribution_histogram(
+  path: &Path,
+  rows: &[EdgeContributionHistogramRow],
+) -> std::io::Result<()> {
+  use std::io::Write;
+  let tmp = path.with_extension("jsonl.tmp");
+  {
+    let mut f = std::fs::File::create(&tmp)?;
+    for r in rows {
+      let line = serde_json::to_string(r).unwrap_or_default();
+      writeln!(f, "{}", line)?;
+    }
+  }
+  std::fs::rename(&tmp, path)?;
+  Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::domain::topic;
+  use crate::resolution_graph::{
+    EdgeContribution, EdgeType, ResolutionPhase, ResolutionRefId,
+    ResolutionTrace,
+  };
+
+  fn doc_ref(node_id: i32) -> ResolutionRefId {
+    ResolutionRefId::DocumentationNode(node_id)
+  }
+
+  fn nt(id: i32) -> topic::Topic {
+    topic::new_node_topic(&id)
+  }
+
+  fn trace_with_edges(
+    node_id: i32,
+    phase: ResolutionPhase,
+    edges: Vec<(EdgeType, f32)>,
+  ) -> ResolutionTrace {
+    ResolutionTrace {
+      reference_id: doc_ref(node_id),
+      identifier: format!("ident_{}", node_id),
+      section_topic: topic::new_documentation_topic(node_id),
+      phase_resolved: phase,
+      iteration: 1,
+      chosen_topic: Some(nt(node_id + 1000)),
+      candidate_scores: Vec::new(),
+      top_contributing_edges: edges
+        .into_iter()
+        .map(|(et, w)| EdgeContribution {
+          predecessor: nt(7),
+          edge_type: et,
+          weighted_contribution: w,
+        })
+        .collect(),
+    }
+  }
+
+  /// Empty trace map yields zero rows — the harness writes an empty
+  /// file in that case, which is the valid signal that no resolutions
+  /// reached Phase B for this audit (a real possibility for tiny
+  /// fixtures).
+  #[test]
+  fn aggregate_edge_contribution_histogram_empty_input_yields_no_rows() {
+    let traces = BTreeMap::new();
+    let rows = aggregate_edge_contribution_histogram(&traces);
+    assert!(rows.is_empty());
+  }
+
+  /// Two traces with overlapping edge types: occurrences sum, weighted
+  /// contributions sum, `traces_with_edge` counts distinct traces, and
+  /// `by_phase` groups by the trace's `phase_resolved` label.
+  #[test]
+  fn aggregate_edge_contribution_histogram_aggregates_across_traces() {
+    let mut traces: BTreeMap<ResolutionRefId, ResolutionTrace> =
+      BTreeMap::new();
+    traces.insert(
+      doc_ref(1),
+      trace_with_edges(
+        1,
+        ResolutionPhase::PhaseB,
+        vec![(EdgeType::ContainsMember, 0.4), (EdgeType::Calls, 0.2)],
+      ),
+    );
+    traces.insert(
+      doc_ref(2),
+      trace_with_edges(
+        2,
+        ResolutionPhase::PhaseB,
+        vec![
+          (EdgeType::ContainsMember, 0.5),
+          (EdgeType::ContainsMember, 0.1), // intra-trace dup
+        ],
+      ),
+    );
+
+    let rows = aggregate_edge_contribution_histogram(&traces);
+    let by_type: BTreeMap<&str, &EdgeContributionHistogramRow> =
+      rows.iter().map(|r| (r.edge_type.as_str(), r)).collect();
+
+    let cm = by_type.get("ContainsMember").expect("ContainsMember row");
+    assert_eq!(cm.occurrences, 3);
+    assert!((cm.total_weighted_contribution - 1.0).abs() < 1e-5);
+    assert_eq!(cm.traces_with_edge, 2);
+    assert_eq!(cm.by_phase.get("PhaseB").copied(), Some(3));
+
+    let calls = by_type.get("Calls").expect("Calls row");
+    assert_eq!(calls.occurrences, 1);
+    assert!((calls.total_weighted_contribution - 0.2).abs() < 1e-5);
+    assert_eq!(calls.traces_with_edge, 1);
+  }
+
+  /// Output is sorted by `EdgeType`'s declaration order so two runs
+  /// produce byte-identical histograms — the determinism contract this
+  /// harness relies on.
+  #[test]
+  fn aggregate_edge_contribution_histogram_sorts_by_declaration_order() {
+    let mut traces: BTreeMap<ResolutionRefId, ResolutionTrace> =
+      BTreeMap::new();
+    traces.insert(
+      doc_ref(1),
+      trace_with_edges(
+        1,
+        ResolutionPhase::PhaseB,
+        vec![
+          // Insert in non-declaration order to prove the aggregator
+          // sorts rather than echoing input order.
+          (EdgeType::EventEmitted, 0.1),
+          (EdgeType::ContainsMember, 0.2),
+          (EdgeType::Calls, 0.3),
+        ],
+      ),
+    );
+    let rows = aggregate_edge_contribution_histogram(&traces);
+    let names: Vec<&str> = rows.iter().map(|r| r.edge_type.as_str()).collect();
+    assert_eq!(names, vec!["ContainsMember", "Calls", "EventEmitted"]);
+  }
+
+  /// Unresolved traces have empty `top_contributing_edges`, so they
+  /// contribute nothing to the histogram. A mix of resolved and
+  /// unresolved entries must still produce only resolved-derived
+  /// counts.
+  #[test]
+  fn aggregate_edge_contribution_histogram_ignores_unresolved_traces() {
+    let mut traces: BTreeMap<ResolutionRefId, ResolutionTrace> =
+      BTreeMap::new();
+    traces.insert(
+      doc_ref(1),
+      trace_with_edges(
+        1,
+        ResolutionPhase::PhaseB,
+        vec![(EdgeType::ContainsMember, 0.4)],
+      ),
+    );
+    let mut unresolved =
+      trace_with_edges(2, ResolutionPhase::Unresolved, vec![]);
+    unresolved.chosen_topic = None;
+    traces.insert(doc_ref(2), unresolved);
+
+    let rows = aggregate_edge_contribution_histogram(&traces);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].edge_type, "ContainsMember");
+    assert_eq!(rows[0].occurrences, 1);
+    assert_eq!(rows[0].by_phase.get("PhaseB").copied(), Some(1));
+    assert!(!rows[0].by_phase.contains_key("Unresolved"));
+  }
+
+  /// `VARIANTS` is the source of truth for which variant labels Phase
+  /// 3 summary expects. Pin the new `mechanical-graph` entry so a
+  /// future edit that drops it surfaces here, before the harness
+  /// silently skips it in `build_pass3_summary`.
+  #[test]
+  fn variants_list_includes_mechanical_graph() {
+    assert!(VARIANTS.contains(&"mechanical-graph"));
+    assert!(VARIANTS.contains(&"mechanical"));
+    // Order matters for deterministic `pass3-summary.jsonl` output —
+    // mechanical comes first (the floor), mechanical-graph second
+    // (the production resolver), then the other variants.
+    let i_mech = VARIANTS.iter().position(|v| *v == "mechanical").unwrap();
+    let i_graph =
+      VARIANTS.iter().position(|v| *v == "mechanical-graph").unwrap();
+    assert!(i_graph == i_mech + 1);
+  }
+
+  // --------------------------------------------------------------------
+  // graph_resolved_doc_node_ids — Phase B/C/D/E exclusion-set builder
+  //
+  // The harness feeds the returned set to
+  // `mechanical_semantic_links_excluding` to recover the Phase-A-only
+  // baseline. The contract: include every `DocumentationNode` reference
+  // whose graph-driven trace picked a topic, regardless of which phase
+  // picked it.
+  // --------------------------------------------------------------------
+
+  /// Empty trace store yields an empty set — and an empty set fed to
+  /// `mechanical_semantic_links_excluding` returns the unfiltered
+  /// result. So an audit whose graph never resolved anything still
+  /// produces well-formed output (just identical to the production
+  /// baseline, which is the truthful signal).
+  #[test]
+  fn graph_resolved_doc_node_ids_handles_empty_traces() {
+    let traces = BTreeMap::new();
+    assert!(graph_resolved_doc_node_ids(&traces).is_empty());
+  }
+
+  /// Phase B is what Phase 6 writes today; Phase C / E are what Phases
+  /// 9 and 10 will. All three must appear in the exclusion set so
+  /// `mechanical` keeps measuring the pre-graph baseline as later
+  /// phases of the build plan land.
+  #[test]
+  fn graph_resolved_doc_node_ids_includes_every_graph_phase_with_a_winner() {
+    let mut traces: BTreeMap<ResolutionRefId, ResolutionTrace> =
+      BTreeMap::new();
+    for (id, phase) in [
+      (10, ResolutionPhase::PhaseB),
+      (20, ResolutionPhase::PhaseC),
+      (30, ResolutionPhase::PhaseE),
+    ] {
+      traces.insert(doc_ref(id), trace_with_edges(id, phase, vec![]));
+    }
+    let ids = graph_resolved_doc_node_ids(&traces);
+    assert!(ids.contains(&10), "PhaseB resolution must be excluded");
+    assert!(ids.contains(&20), "PhaseC resolution must be excluded");
+    assert!(ids.contains(&30), "PhaseE resolution must be excluded");
+  }
+
+  /// Unresolved traces (graph attempted, no candidate cleared the
+  /// threshold) leave `referenced_topic = None` — i.e. they did not
+  /// modify the parser's output. They must NOT be in the exclusion
+  /// set, otherwise the harness would treat parser-resolved
+  /// identifiers as if they came from the graph.
+  #[test]
+  fn graph_resolved_doc_node_ids_omits_unresolved_traces() {
+    let mut traces: BTreeMap<ResolutionRefId, ResolutionTrace> =
+      BTreeMap::new();
+    let mut t = trace_with_edges(42, ResolutionPhase::Unresolved, vec![]);
+    t.chosen_topic = None;
+    traces.insert(doc_ref(42), t);
+    assert!(graph_resolved_doc_node_ids(&traces).is_empty());
+  }
+
+  /// `DevDocComment` traces (Phase 7's pass) refer to comment-tree
+  /// identifiers, not doc-tree ones — `mechanical_semantic_links`
+  /// never visits them, so excluding them from its walk is a no-op
+  /// and could mask bugs in the dev-doc pass. Only `DocumentationNode`
+  /// trace IDs are surfaced.
+  #[test]
+  fn graph_resolved_doc_node_ids_skips_dev_doc_comment_traces() {
+    let mut traces: BTreeMap<ResolutionRefId, ResolutionTrace> =
+      BTreeMap::new();
+    let mut dev_trace =
+      trace_with_edges(99, ResolutionPhase::PhaseB, vec![]);
+    dev_trace.reference_id = ResolutionRefId::DevDocComment {
+      comment_topic: topic::new_comment_topic(-77),
+      occurrence: 0,
+    };
+    traces.insert(dev_trace.reference_id.clone(), dev_trace);
+    assert!(graph_resolved_doc_node_ids(&traces).is_empty());
+  }
+
+  /// Membership stability: two calls with the same input return sets
+  /// containing the same IDs. Iteration order of a `HashSet` is
+  /// deliberately not pinned, but the membership signal the harness
+  /// uses (`contains` checks against the doc walker) must be stable.
+  #[test]
+  fn graph_resolved_doc_node_ids_membership_is_stable_across_calls() {
+    let mut traces: BTreeMap<ResolutionRefId, ResolutionTrace> =
+      BTreeMap::new();
+    for (id, phase) in [
+      (1, ResolutionPhase::PhaseB),
+      (2, ResolutionPhase::PhaseC),
+      (3, ResolutionPhase::Unresolved), // omitted
+      (4, ResolutionPhase::PhaseE),
+    ] {
+      let mut t = trace_with_edges(id, phase, vec![]);
+      if matches!(phase, ResolutionPhase::Unresolved) {
+        t.chosen_topic = None;
+      }
+      traces.insert(doc_ref(id), t);
+    }
+    let s1 = graph_resolved_doc_node_ids(&traces);
+    let s2 = graph_resolved_doc_node_ids(&traces);
+    assert_eq!(s1, s2);
+    // Sanity: PhaseB / C / E in, Unresolved out.
+    assert_eq!(s1, [1, 2, 4].into_iter().collect());
+  }
+
+  /// Mixed-phase traces produce a histogram whose `by_phase` map
+  /// breaks each edge type's occurrence count out by phase. Pin this
+  /// so the operator inspecting the harness output can answer "did
+  /// PhaseC contribute new uses of `Implements`, or did PhaseB do all
+  /// the work?" without re-deriving the breakdown from raw traces.
+  #[test]
+  fn aggregate_edge_contribution_histogram_breaks_down_mixed_phases() {
+    let mut traces: BTreeMap<ResolutionRefId, ResolutionTrace> =
+      BTreeMap::new();
+    traces.insert(
+      doc_ref(1),
+      trace_with_edges(
+        1,
+        ResolutionPhase::PhaseB,
+        vec![(EdgeType::Implements, 0.3)],
+      ),
+    );
+    traces.insert(
+      doc_ref(2),
+      trace_with_edges(
+        2,
+        ResolutionPhase::PhaseC,
+        vec![(EdgeType::Implements, 0.2), (EdgeType::Calls, 0.4)],
+      ),
+    );
+    traces.insert(
+      doc_ref(3),
+      trace_with_edges(
+        3,
+        ResolutionPhase::PhaseE,
+        vec![(EdgeType::Implements, 0.1)],
+      ),
+    );
+
+    let rows = aggregate_edge_contribution_histogram(&traces);
+    let by_type: BTreeMap<&str, &EdgeContributionHistogramRow> =
+      rows.iter().map(|r| (r.edge_type.as_str(), r)).collect();
+
+    let imp = by_type.get("Implements").expect("Implements row");
+    assert_eq!(imp.occurrences, 3);
+    assert!((imp.total_weighted_contribution - 0.6).abs() < 1e-5);
+    assert_eq!(imp.traces_with_edge, 3);
+    assert_eq!(imp.by_phase.get("PhaseB").copied(), Some(1));
+    assert_eq!(imp.by_phase.get("PhaseC").copied(), Some(1));
+    assert_eq!(imp.by_phase.get("PhaseE").copied(), Some(1));
+    assert!(!imp.by_phase.contains_key("Unresolved"));
+
+    let calls = by_type.get("Calls").expect("Calls row");
+    assert_eq!(calls.occurrences, 1);
+    assert_eq!(calls.by_phase.get("PhaseC").copied(), Some(1));
+    assert!(!calls.by_phase.contains_key("PhaseB"));
+  }
+
+  /// Two calls with the same trace map produce byte-identical
+  /// serialized output. The histogram's `Vec` ordering and
+  /// per-row `BTreeMap`s feed straight into JSONL, and the harness's
+  /// `diff`-friendly contract requires byte stability — the
+  /// internal aggregator BTreeMaps make this automatic, but pin it
+  /// explicitly so a future swap-in of `HashMap` (which would
+  /// silently break determinism) trips here.
+  #[test]
+  fn aggregate_edge_contribution_histogram_is_byte_deterministic() {
+    let mut traces: BTreeMap<ResolutionRefId, ResolutionTrace> =
+      BTreeMap::new();
+    traces.insert(
+      doc_ref(1),
+      trace_with_edges(
+        1,
+        ResolutionPhase::PhaseB,
+        vec![
+          (EdgeType::Implements, 0.3),
+          (EdgeType::ContainsMember, 0.4),
+          (EdgeType::Calls, 0.5),
+        ],
+      ),
+    );
+    traces.insert(
+      doc_ref(2),
+      trace_with_edges(
+        2,
+        ResolutionPhase::PhaseC,
+        vec![(EdgeType::ContainsMember, 0.2)],
+      ),
+    );
+    let r1 = aggregate_edge_contribution_histogram(&traces);
+    let r2 = aggregate_edge_contribution_histogram(&traces);
+    let bytes1 = serde_json::to_vec(&r1).unwrap();
+    let bytes2 = serde_json::to_vec(&r2).unwrap();
+    assert_eq!(bytes1, bytes2);
+  }
 }
 
