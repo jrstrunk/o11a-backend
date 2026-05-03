@@ -658,7 +658,17 @@ pub async fn semantic_link_pass1(
     contract_topics: wrapper
       .contract_topics
       .into_iter()
-      .map(|id| topic::new_topic(&id))
+      .filter_map(|id| match topic::parse_topic(&id) {
+        Ok(t) => Some(t),
+        Err(e) => {
+          tracing::warn!(
+            "semantic_link_pass1 dropping malformed contract_topic '{}': {}",
+            id,
+            e
+          );
+          None
+        }
+      })
       .collect(),
   })
 }
@@ -700,13 +710,34 @@ pub async fn semantic_link_pass2(
     member_mappings: wrapper
       .members
       .into_iter()
-      .map(|m| MemberDocMapping {
-        member_topic: topic::new_topic(&m.member_topic),
-        doc_topics: m
+      .filter_map(|m| {
+        let member_topic =
+          topic::parse_topic(&m.member_topic).ok().or_else(|| {
+            tracing::warn!(
+              "semantic_link_pass2 dropping mapping with malformed member_topic '{}'",
+              m.member_topic
+            );
+            None
+          })?;
+        let doc_topics = m
           .doc_topics
           .into_iter()
-          .map(|d| topic::new_topic(&d))
-          .collect(),
+          .filter_map(|d| match topic::parse_topic(&d) {
+            Ok(t) => Some(t),
+            Err(e) => {
+              tracing::warn!(
+                "semantic_link_pass2 dropping malformed doc_topic '{}': {}",
+                d,
+                e
+              );
+              None
+            }
+          })
+          .collect();
+        Some(MemberDocMapping {
+          member_topic,
+          doc_topics,
+        })
       })
       .collect(),
   })
@@ -717,13 +748,16 @@ pub async fn semantic_link_pass2(
 /// only for disambiguation — semantics must reflect documented intent.
 ///
 /// `fallback_doc_topic` is used when the LLM omits `documentation_topic` from
-/// a result object.
+/// a result object. `match_source` is the provenance tag stamped on every
+/// returned link — chosen by the caller based on which workflow variant
+/// produced the (section, member) pair this Pass 3 call is synthesizing.
 pub async fn semantic_link_pass3(
   section_topic: &topic::Topic,
   section_text: &str,
   declarations_json: &str,
   source_code: &str,
   fallback_doc_topic: &topic::Topic,
+  match_source: domain::MatchSource,
 ) -> Result<SemanticLinkPass3Result, TaskError> {
   let prompt = format!(
     "{}Documentation section:\n{}\n\nDeclarations needing semantics:\n{}\n\nSource code (for disambiguation only):\n{}",
@@ -746,23 +780,45 @@ pub async fn semantic_link_pass3(
   let links = wrapper
     .links
     .into_iter()
-    .map(|l| {
+    .filter_map(|l| {
+      let declaration_topic = match topic::parse_topic(&l.declaration_topic) {
+        Ok(t) => t,
+        Err(e) => {
+          tracing::warn!(
+            "semantic_link_pass3 dropping link with malformed declaration_topic '{}': {}",
+            l.declaration_topic,
+            e
+          );
+          return None;
+        }
+      };
       let doc_topics: Vec<topic::Topic> = l
         .documentation_topics
         .iter()
         .filter(|d| d.starts_with('D'))
-        .map(|d| topic::new_topic(d))
+        .filter_map(|d| match topic::parse_topic(d) {
+          Ok(t) => Some(t),
+          Err(e) => {
+            tracing::warn!(
+              "semantic_link_pass3 dropping malformed documentation_topic '{}': {}",
+              d,
+              e
+            );
+            None
+          }
+        })
         .collect();
 
-      domain::SemanticLink {
+      Some(domain::SemanticLink {
         documentation_topics: if doc_topics.is_empty() {
           vec![*fallback_doc_topic]
         } else {
           doc_topics
         },
-        declaration_topic: topic::new_topic(&l.declaration_topic),
+        declaration_topic,
         description: l.semantic_text,
-      }
+        match_source,
+      })
     })
     .collect();
 

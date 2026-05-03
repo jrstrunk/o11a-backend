@@ -2560,6 +2560,43 @@ pub fn render_member_source_for_semantics(
   None
 }
 
+/// Like `render_member_source_for_semantics` but with function/modifier
+/// bodies stripped — useful for BM25 corpora that want signatures only.
+pub fn render_member_signature_for_semantics(
+  member_topic: &topic::Topic,
+  audit_data: &AuditData,
+) -> Option<String> {
+  for ast in audit_data.asts.values() {
+    let sol_ast = match ast {
+      domain::AST::Solidity(sol_ast) => sol_ast,
+      _ => continue,
+    };
+    for contract_node in &sol_ast.nodes {
+      let resolved_contract = contract_node.resolve(&audit_data.nodes);
+      if let ASTNode::ContractDefinition { .. } = resolved_contract {
+        for member_node in contract_members(resolved_contract) {
+          let resolved_member = member_node.resolve(&audit_data.nodes);
+          let node_topic = topic::new_node_topic(&resolved_member.node_id());
+          if node_topic == *member_topic {
+            let render_ctx = ASTRenderContext {
+              target_topic: *member_topic,
+              omit_function_and_modifier_bodies: true,
+              include_untrusted_comments: true,
+            };
+            let rendered = render_solidity_ast_snippet(
+              resolved_member,
+              &render_ctx,
+              audit_data,
+            );
+            return Some(serde_json::to_string(&rendered).unwrap_or_default());
+          }
+        }
+      }
+    }
+  }
+  None
+}
+
 /// For pass 2 mechanical step: given a section's resolved declarations,
 /// find the containing members. For declarations scoped at component level
 /// (state variables), find members that read/write them.
@@ -2990,6 +3027,67 @@ fn find_doc_node_by_id(
   }
 
   None
+}
+
+/// One CodeIdentifier found inside a documentation section, with its
+/// resolution status. Used by the mechanical-trace mode to surface every
+/// inline-code reference (resolved or not) for diagnostic review.
+#[derive(Debug, Clone)]
+pub struct CodeReference {
+  /// The literal text of the identifier as it appears in the doc.
+  pub text: String,
+  /// `Some` if the parser resolved this identifier to a declaration.
+  pub resolved_topic: Option<topic::Topic>,
+  /// Resolved declaration kind (when resolved).
+  pub resolved_kind: Option<domain::NamedTopicKind>,
+  /// Resolved declaration's canonical name (when resolved). May differ
+  /// from `text` if the original referred via an alias.
+  pub resolved_name: Option<String>,
+}
+
+/// Walk a section's documentation AST and return every CodeIdentifier
+/// node found inside, in left-to-right order. Resolution status (whether
+/// the identifier resolved to a declaration topic) is preserved on each
+/// returned record.
+pub fn enumerate_section_code_references(
+  section_topic: &topic::Topic,
+  audit_data: &AuditData,
+) -> Vec<CodeReference> {
+  let Some(section_node) =
+    find_doc_node_by_id(audit_data, section_topic.numeric_id())
+  else {
+    return Vec::new();
+  };
+  let mut out: Vec<CodeReference> = Vec::new();
+  collect_code_identifiers_recursive(section_node, audit_data, &mut out);
+  out
+}
+
+fn collect_code_identifiers_recursive(
+  node: &crate::documentation::ast::DocumentationNode,
+  audit_data: &AuditData,
+  out: &mut Vec<CodeReference>,
+) {
+  let resolved = node.resolve(&audit_data.nodes);
+  if let DocumentationNode::CodeIdentifier {
+    value,
+    referenced_topic,
+    kind,
+    referenced_name,
+    ..
+  } = resolved
+  {
+    out.push(CodeReference {
+      text: value.clone(),
+      resolved_topic: *referenced_topic,
+      resolved_kind: kind.clone(),
+      resolved_name: referenced_name.clone(),
+    });
+    return;
+  }
+  for child in resolved.children() {
+    collect_code_identifiers_recursive(child, audit_data, out);
+  }
 }
 
 #[cfg(test)]
@@ -3446,6 +3544,7 @@ mod tests {
         documentation_topics: vec![],
         author: crate::collaborator::models::Author::System,
         created_at: None,
+        match_source: None,
       },
     );
     audit_data

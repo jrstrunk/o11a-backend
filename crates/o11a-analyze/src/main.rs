@@ -5,6 +5,11 @@
 //!     Runs the analysis pipeline end-to-end and writes outputs into
 //!     `<project_root>/o11a/`.
 //!
+//!   dump <project_root> <audit_id> <kind> [<kind> ...]
+//!     Writes diagnostic JSON dumps of internal audit-data state to
+//!     `<project_root>/o11a/dumps/`. No LLM, no full pipeline. See
+//!     `o11a-analyze dump --help`-style usage in `cmd/dump.rs`.
+//!
 //!   normalize-docs <project_root>
 //!     Reads `documents.txt` from the project root, normalizes each
 //!     documentation file via LLM, and writes results back in-place.
@@ -33,6 +38,11 @@ Subcommands:
   analyze <project_root> <audit_id>
       Run the analysis pipeline and write the report and binary artifact.
 
+  dump <project_root> <audit_id> <kind> [<kind> ...]
+      Write diagnostic JSON dumps of internal audit-data state to
+      <project_root>/o11a/dumps/. No LLM. Kinds: interface-mapping,
+      name-index, all (or comma-separated).
+
   normalize-docs <project_root>
       Normalize documentation files from documents.txt via LLM.
 ";
@@ -49,6 +59,7 @@ async fn main() -> ExitCode {
 
   match args[1].as_str() {
     "analyze" => cmd::analyze::run(&args[2..]).await,
+    "dump" => cmd::dump::run(&args[2..]).await,
     "normalize-docs" => cmd::normalize_docs::run(&args[2..]).await,
     other => {
       eprintln!("Unknown subcommand: {other}\n{USAGE}");

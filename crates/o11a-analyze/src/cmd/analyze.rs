@@ -7,6 +7,9 @@ use o11a_core::analysis_artifact::{
 use o11a_core::collaborator::agent::pipeline::{
   self, PipelineError, PipelineState,
 };
+use o11a_core::collaborator::agent::semantic_linking::{
+  self, SemanticLinkingConfig,
+};
 use o11a_core::domain;
 use o11a_core::report;
 use std::path::{Path, PathBuf};
@@ -39,18 +42,46 @@ const REPORT_FILE_NAME: &str = "audit.json";
 const ARTIFACT_FILE_NAME: &str = "audit.analysis.bin";
 
 pub async fn run(args: &[String]) -> ExitCode {
-  if args.len() != 2 {
+  // Parse the semantic-linking flags first; they're optional and may appear
+  // anywhere in the argument list. Remaining args are the positional
+  // <project_root> <audit_id>.
+  let (semantic_linking_cfg, positional) =
+    match o11a_core::collaborator::agent::semantic_linking::parse_cli(args) {
+      Ok(v) => v,
+      Err(e) => {
+        eprintln!("{e}");
+        return ExitCode::from(2);
+      }
+    };
+
+  if positional.len() != 2 {
     eprintln!(
-      "Usage: o11a-analyze analyze <project_root> <audit_id>\n\n\
+      "Usage: o11a-analyze analyze [flags] <project_root> <audit_id>\n\n\
        Runs the analysis pipeline and writes the report and binary\n\
        artifact into <project_root>/{}/ (creating the directory if\n\
-       necessary).",
-      OUTPUT_DIR_NAME
+       necessary).\n\n\
+       Flags:\n\
+         --semantic-linking-mode <auto|llm|bm25|mechanical>\n\
+             Override per-document workflow routing. Default: auto.\n\
+         --semantic-linking-pass2-algo <gap|top-k-floor>\n\
+             BM25 cutoff algorithm. Default: gap.\n\
+         --semantic-linking-compare-all\n\
+             Run all workflow variants per section and write per-variant\n\
+             logs to <project_root>/{}/semantic-linking-compare/. The main\n\
+             artifact reflects only the configured workflow.\n\
+         --semantic-linking-mechanical-trace\n\
+             Run only mechanical Pass 1 + Pass 2 (no LLM, no Pass 3),\n\
+             write a pretty-printed JSON trace of every section's\n\
+             resolved / unresolved inline-code references and derived\n\
+             contract / member candidates to\n\
+             <project_root>/{}/mechanical-trace.json, then exit. Used to\n\
+             validate the deterministic name resolver.",
+      OUTPUT_DIR_NAME, OUTPUT_DIR_NAME, OUTPUT_DIR_NAME
     );
     return ExitCode::from(2);
   }
 
-  let project_root = PathBuf::from(&args[0]);
+  let project_root = PathBuf::from(&positional[0]);
   if !project_root.is_dir() {
     tracing::error!(
       "project root '{}' is not a directory",
@@ -59,9 +90,17 @@ pub async fn run(args: &[String]) -> ExitCode {
     return ExitCode::FAILURE;
   }
 
-  let audit_id = args[1].clone();
+  let audit_id = positional[1].clone();
 
-  match do_run(&project_root, &audit_id).await {
+  tracing::info!(
+    "Semantic linking config: mode={} pass2_algo={} compare_all={} mechanical_trace={}",
+    semantic_linking_cfg.mode.as_str(),
+    semantic_linking_cfg.pass2_algo.as_str(),
+    semantic_linking_cfg.compare_all,
+    semantic_linking_cfg.mechanical_trace,
+  );
+
+  match do_run(&project_root, &audit_id, semantic_linking_cfg).await {
     Ok(()) => ExitCode::SUCCESS,
     Err(e) => {
       tracing::error!("{}", e);
@@ -70,15 +109,40 @@ pub async fn run(args: &[String]) -> ExitCode {
   }
 }
 
-async fn do_run(project_root: &Path, audit_id: &str) -> Result<(), RunError> {
+async fn do_run(
+  project_root: &Path,
+  audit_id: &str,
+  semantic_linking: SemanticLinkingConfig,
+) -> Result<(), RunError> {
   tracing::info!("Loading project from {}", project_root.display());
   let data_context = domain::new_data_context();
   let data_context = Arc::new(Mutex::new(data_context));
 
   analysis::run_analysis(project_root, audit_id, &data_context)?;
 
+  let output_dir = project_root.join(OUTPUT_DIR_NAME);
+
+  // Mechanical-trace mode: run Pass 1 + Pass 2 only, write trace, exit.
+  // No LLM calls, no audit.json, no audit.analysis.bin — this is a
+  // diagnostic-only mode for the deterministic name resolver.
+  if semantic_linking.mechanical_trace {
+    std::fs::create_dir_all(&output_dir)?;
+    let path = semantic_linking::trace::run_mechanical_trace(
+      data_context.clone(),
+      audit_id,
+      &output_dir,
+    )?;
+    tracing::info!(
+      "mechanical-trace complete; exiting before pipeline. Trace: {}",
+      path.display()
+    );
+    return Ok(());
+  }
+
   let pipeline_state = PipelineState {
     data_context: data_context.clone(),
+    semantic_linking,
+    output_dir: Some(output_dir.clone()),
   };
 
   pipeline::run_full_pipeline(&pipeline_state, audit_id).await?;
@@ -95,7 +159,6 @@ async fn do_run(project_root: &Path, audit_id: &str) -> Result<(), RunError> {
     }
   }
 
-  let output_dir = project_root.join(OUTPUT_DIR_NAME);
   std::fs::create_dir_all(&output_dir)?;
 
   let ctx = data_context

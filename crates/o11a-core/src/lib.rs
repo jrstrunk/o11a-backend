@@ -1,4 +1,5 @@
 pub mod analysis_artifact;
+pub mod audit_dump;
 pub mod code_refs;
 pub mod collaborator;
 pub mod db;

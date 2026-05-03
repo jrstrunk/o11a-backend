@@ -2942,6 +2942,8 @@ pub async fn create_user_functional_semantic(
         documentation_topics,
         author: payload.author,
         created_at: Some(created_at),
+        // User-authored semantics carry no workflow provenance.
+        match_source: None,
       },
     );
 

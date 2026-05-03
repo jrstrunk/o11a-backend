@@ -268,6 +268,46 @@ pub struct SemanticLink {
   pub declaration_topic: topic::Topic,
   /// The semantic meaning derived from this link
   pub description: String,
+  /// Provenance: which workflow variant produced the (section, member) match
+  /// that this link was derived from.
+  pub match_source: MatchSource,
+}
+
+/// Provenance for a semantic link: which workflow variant produced the
+/// (section, member) match. See `docs/specs/semantic-linking.md`.
+///
+/// Serialized as a lowercase string for clarity in `audit.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MatchSource {
+  /// The match came from the mechanical layer alone (inline reference
+  /// resolution + scope walking + state-variable mutation fanout).
+  Mechanical,
+  /// The match came from BM25 expansion within an anchored contract.
+  Bm25,
+  /// The match came from an LLM Pass 1 or Pass 2 call.
+  Llm,
+}
+
+impl MatchSource {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      MatchSource::Mechanical => "mechanical",
+      MatchSource::Bm25 => "bm25",
+      MatchSource::Llm => "llm",
+    }
+  }
+
+  /// Higher confidence wins when condensation merges links from different
+  /// sources. Order: mechanical > bm25 > llm.
+  pub fn merge(self, other: MatchSource) -> MatchSource {
+    use MatchSource::*;
+    match (self, other) {
+      (Mechanical, _) | (_, Mechanical) => Mechanical,
+      (Bm25, _) | (_, Bm25) => Bm25,
+      _ => Llm,
+    }
+  }
 }
 
 /// A behavioral requirement belonging to a feature.
@@ -1595,6 +1635,11 @@ pub enum TopicMetadata {
     author: crate::collaborator::models::Author,
     /// `None` for pipeline-produced entities — see FeatureTopic for rationale.
     created_at: Option<String>,
+    /// Provenance: which workflow variant produced the underlying match.
+    /// `None` for entries authored by humans (only pipeline-produced
+    /// semantics carry a match source).
+    #[serde(default)]
+    match_source: Option<MatchSource>,
   },
   /// A threat on a non-pure source code subject
   ThreatTopic {

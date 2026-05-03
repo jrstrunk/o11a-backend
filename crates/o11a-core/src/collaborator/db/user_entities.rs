@@ -527,6 +527,8 @@ pub fn apply_user_entities_snapshot(
         documentation_topics,
         author: s.author,
         created_at: Some(s.created_at.clone()),
+        // User-authored semantics carry no workflow provenance.
+        match_source: None,
       },
     );
   }

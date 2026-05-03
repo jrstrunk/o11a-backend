@@ -21,7 +21,7 @@
 //! Current version: 2 (alpha — stability not yet guaranteed)
 
 use crate::collaborator::models::Author;
-use crate::domain::{AuditData, Requirement, TopicMetadata};
+use crate::domain::{AuditData, MatchSource, Requirement, TopicMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -116,6 +116,11 @@ pub struct ReportFunctionalSemantic {
   pub declaration_topic: String,
   /// D-prefixed documentation topics this semantic was derived from.
   pub documentation_topics: Vec<String>,
+  /// Provenance: which workflow variant produced the underlying match.
+  /// Optional for backward compatibility with reports written before this
+  /// field was added.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub match_source: Option<MatchSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,6 +274,7 @@ fn collect_functional_semantics(
         description,
         declaration_topic,
         documentation_topics,
+        match_source,
         ..
       } => Some(ReportFunctionalSemantic {
         topic: topic.id().to_string(),
@@ -278,6 +284,7 @@ fn collect_functional_semantics(
           .iter()
           .map(|t| t.id().to_string())
           .collect(),
+        match_source: *match_source,
       }),
       _ => None,
     })
@@ -454,6 +461,7 @@ pub fn apply_report(
         documentation_topics,
         author: Author::System,
         created_at: None,
+        match_source: s.match_source,
       },
     );
   }
