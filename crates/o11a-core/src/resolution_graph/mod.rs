@@ -8,11 +8,13 @@
 pub mod builder;
 pub mod edge;
 pub mod graph;
+pub mod pagerank;
 pub mod solidity_extractor;
 
 pub use builder::{Extractor, build};
 pub use edge::{Direction, EdgeType};
 pub use graph::{OutEdge, ResolutionGraph};
+pub use pagerank::personalized_pagerank;
 pub use solidity_extractor::SolidityExtractor;
 
 #[cfg(test)]
