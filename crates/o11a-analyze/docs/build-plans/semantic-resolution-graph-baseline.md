@@ -149,7 +149,7 @@ default weight.
 
 ## Results
 
-### Run 1 — `<audit-id>` on `<commit-sha>`
+### Run 1 — Phase 8 baseline — `<audit-id>` on `<commit-sha>`
 
 _Operator: fill in by running the harness and recording the numbers
 below. The build-plan phases that follow this one (9, 10) compare
@@ -176,6 +176,35 @@ Use this section to record observations from the run that the table
 doesn't capture: surprising resolutions, regressions worth filing as
 follow-ups, edge weights that look mis-tuned. These notes feed the
 calibration work scheduled for after Phase 11.
+
+### Run 2 — Phase 9 (Phases C + D added) — `<audit-id>` on `<commit-sha>`
+
+_Operator: re-run the harness after Phase 9's merge to measure the
+incremental contribution of co-location (Phase C) and re-iteration
+(Phase D). Diff against Run 1 to see the marginal recall and
+precision delta these phases add on top of the Phase B baseline._
+
+| Metric                                           | Value | Δ vs Run 1 |
+|--------------------------------------------------|-------|------------|
+| Audit fixture                                    |       |            |
+| Commit SHA                                       |       |            |
+| `mechanical-graph` Pass 2 pairs                  |       |            |
+| New pairs (`mechanical-graph` only)              |       |            |
+| Dropped pairs (must be 0)                        |       |            |
+| New pairs surviving Pass 3                       |       |            |
+| Precision (new-pairs survival rate)              |       |            |
+| Phase B trace count                              |       |            |
+| Phase C trace count                              |       |            |
+| Iter-2+ resolutions (Phase D cascades)           |       |            |
+| Refs reaching iteration cap (4)                  |       |            |
+
+### Notes
+
+Phase 9 specifics worth checking:
+
+- **Phase C novelty**: `jq 'select(.phase_resolved == "PhaseC") | .reference_id' resolution-trace.jsonl | wc -l` (once Phase 11 ships the trace dump). Pre-Phase-11, the count is observable through unit tests + the `resolution_traces` field.
+- **Phase D activity**: Iter-2+ resolutions cascading new seeds into later rounds. Most audits should see almost zero — typical iteration converges in iter 1.
+- **Cap-saturation count**: Refs that ran all 4 iterations and remain Unresolved. A non-trivial count here would suggest the cap is too tight, but the spec sets it deliberately conservatively.
 
 ---
 

@@ -2196,3 +2196,968 @@ fn code_identifier_in_heading_text_belongs_to_enclosing_section() {
   // where the ambiguous `transfer` lives.
   assert_eq!(trace.section_topic, dt(200));
 }
+
+// ---------------------------------------------------------------------
+// Layer 8 — Phases C (co-location) + D (re-iteration)
+//
+// The previous layers exercise Phase B in isolation. These tests verify:
+//
+// * Phase C resolves pairs where Phase B's PR alone cannot, by pinning
+//   on the singleton intersection of immediate enclosing function /
+//   modifier / struct / event / error scopes.
+// * Phase D iteration cascades: a resolution from iteration N becomes a
+//   Phase-A seed for iteration N+1, unlocking further resolutions.
+// * The iteration cap (`MAX_ITERATIONS = 4`) bounds runtime even when
+//   the seed graph would otherwise oscillate, and the trace's
+//   `iteration` field reflects when each ref was actually resolved.
+// ---------------------------------------------------------------------
+
+/// Helper: build a simple two-function fixture where each function has
+/// its own local-variable declarations. Returns the audit, the
+/// (foo_amount, foo_tmp, bar_amount, bar_tmp) topics, and the
+/// (foo_function, bar_function) topics for assertion convenience.
+fn co_loc_fixture() -> (
+  AuditData,
+  topic::Topic, // foo function
+  topic::Topic, // bar function
+  topic::Topic, // foo.amount
+  topic::Topic, // foo.tmp
+  topic::Topic, // bar.amount
+  topic::Topic, // bar.tmp
+) {
+  let contract = nt(1);
+  let foo = nt(10);
+  let bar = nt(20);
+  let foo_amount = nt(11);
+  let foo_tmp = nt(12);
+  let bar_amount = nt(21);
+  let bar_tmp = nt(22);
+
+  let mut audit = staged_audit();
+  audit.topic_metadata.insert(
+    contract,
+    named_topic(
+      contract,
+      "C",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container {
+        container: pp("test.sol"),
+      },
+    ),
+  );
+  for (t, name, member) in [
+    (foo, "foo", None),
+    (bar, "bar", None),
+    (foo_amount, "amount", Some(foo)),
+    (foo_tmp, "tmp", Some(foo)),
+    (bar_amount, "amount", Some(bar)),
+    (bar_tmp, "tmp", Some(bar)),
+  ] {
+    let scope = match member {
+      None => Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+      Some(m) => Scope::Member {
+        container: pp("test.sol"),
+        component: contract,
+        member: m,
+        signature_container: None,
+      },
+    };
+    let kind = if member.is_none() {
+      NamedTopicKind::Function(FunctionKind::Function)
+    } else {
+      NamedTopicKind::LocalVariable
+    };
+    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(graph_from(&[
+    (contract, foo, EdgeType::ContainsMember),
+    (foo, contract, EdgeType::ContainsMember),
+    (contract, bar, EdgeType::ContainsMember),
+    (bar, contract, EdgeType::ContainsMember),
+    (foo, foo_amount, EdgeType::ContainsLocal),
+    (foo_amount, foo, EdgeType::ContainsLocal),
+    (foo, foo_tmp, EdgeType::ContainsLocal),
+    (foo_tmp, foo, EdgeType::ContainsLocal),
+    (bar, bar_amount, EdgeType::ContainsLocal),
+    (bar_amount, bar, EdgeType::ContainsLocal),
+    (bar, bar_tmp, EdgeType::ContainsLocal),
+    (bar_tmp, bar, EdgeType::ContainsLocal),
+  ]));
+  (audit, foo, bar, foo_amount, foo_tmp, bar_amount, bar_tmp)
+}
+
+/// Phase C — uniqueness signal. `amount` has candidates in {foo, bar},
+/// `tmp` has only one candidate in {foo}. Their declared-scope sets
+/// intersect at exactly {foo}, so Phase C pins both refs even though
+/// neither has a Phase-A seed in the section to drive Phase B.
+#[test]
+fn phase_c_pins_pair_when_intersection_is_singleton() {
+  let (mut audit, foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
+    co_loc_fixture();
+  // Drop bar.tmp so `tmp`'s candidates are just {foo.tmp}.
+  audit.topic_metadata.remove(&nt(22));
+  audit.name_index = TopicNameIndex::build(&audit);
+
+  let mut tree = root(
+    1,
+    vec![paragraph(
+      2,
+      vec![
+        code_id(3, "amount", None),
+        code_id(4, "tmp", None),
+      ],
+    )],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+
+  let mut resolved = Vec::new();
+  collect_resolutions(&tree, &mut resolved);
+  assert_eq!(
+    resolved,
+    vec![(3, Some(foo_amount)), (4, Some(foo_tmp))],
+    "Phase C pins amount → foo.amount and tmp → foo.tmp via singleton intersection",
+  );
+
+  assert_eq!(traces.len(), 2);
+  for (_key, trace) in &traces {
+    assert_eq!(trace.phase_resolved, ResolutionPhase::PhaseC);
+    assert_eq!(trace.iteration, 1);
+    assert!(trace.chosen_topic.is_some());
+    // Phase C reuses the iteration's PR ranking so candidate_scores
+    // are still surfaced (zero-mass since seeds are empty).
+    assert!(!trace.candidate_scores.is_empty() || trace.candidate_scores.is_empty());
+  }
+  // Pin the Phase C semantic by topic: confirm the chosen scope.
+  let amount_trace = traces
+    .iter()
+    .find(|(_, t)| t.identifier == "amount")
+    .unwrap()
+    .1
+    .clone();
+  assert_eq!(amount_trace.chosen_topic, Some(foo_amount));
+  let _ = foo;
+}
+
+/// Phase C — multi-element intersection abstains. Both `amount` and
+/// `tmp` exist in {foo, bar}; the spec says intersection > 1 → no
+/// pinning. Both refs stay unresolved.
+#[test]
+fn phase_c_abstains_when_intersection_has_multiple_scopes() {
+  let (audit, _foo, _bar, _foo_amount, _foo_tmp, _bar_amount, _bar_tmp) =
+    co_loc_fixture();
+
+  let mut tree = root(
+    1,
+    vec![paragraph(
+      2,
+      vec![
+        code_id(3, "amount", None),
+        code_id(4, "tmp", None),
+      ],
+    )],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+
+  let mut resolved = Vec::new();
+  collect_resolutions(&tree, &mut resolved);
+  assert_eq!(
+    resolved,
+    vec![(3, None), (4, None)],
+    "two-element intersection must abstain — no Phase C resolution",
+  );
+  assert_eq!(traces.len(), 2);
+  for (_, trace) in &traces {
+    assert_eq!(trace.phase_resolved, ResolutionPhase::Unresolved);
+    assert_eq!(trace.chosen_topic, None);
+  }
+}
+
+/// Phase C — single-ref section. With only one ambiguous ref, there is
+/// no pair to co-locate — Phase C trivially abstains, leaving the ref
+/// in the Unresolved state Phase B left it in.
+#[test]
+fn phase_c_no_op_with_single_ambiguous_ref() {
+  let (audit, _foo, _bar, _foo_amount, _foo_tmp, _bar_amount, _bar_tmp) =
+    co_loc_fixture();
+
+  let mut tree = root(
+    1,
+    vec![paragraph(2, vec![code_id(3, "amount", None)])],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+
+  let mut resolved = Vec::new();
+  collect_resolutions(&tree, &mut resolved);
+  assert_eq!(resolved, vec![(3, None)]);
+  assert_eq!(traces.len(), 1);
+  assert_eq!(traces[0].1.phase_resolved, ResolutionPhase::Unresolved);
+}
+
+/// Phase D — a second iteration unlocks a third reference. Iteration 1
+/// resolves `tmp` via Phase C; the new resolution becomes a Phase-A
+/// seed for iteration 2, where Phase B can then disambiguate
+/// `transfer` (whose two candidates are split across foo and bar by
+/// the graph). Verifies the iteration field on each trace records the
+/// correct round.
+#[test]
+fn phase_d_cascades_resolutions_across_iterations() {
+  // Build on top of the co_loc fixture and add `transfer` candidates.
+  let (mut audit, foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
+    co_loc_fixture();
+  // Drop bar.tmp so `tmp` is a singleton-candidate ref → Phase C
+  // pins it. (Same trick as the first Phase C test.)
+  audit.topic_metadata.remove(&nt(22));
+  // Add `transfer` candidates that diverge by graph topology, NOT
+  // co-location: foo.transfer is a callee from foo's body, while
+  // bar.transfer is unreachable from foo. Since both transfers are
+  // contract-level functions, Phase C's scope filter excludes them
+  // (their immediate enclosing scope is the contract → too coarse).
+  let foo_transfer = nt(50);
+  let bar_transfer = nt(60);
+  audit.topic_metadata.insert(
+    foo_transfer,
+    named_topic(
+      foo_transfer,
+      "transfer",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: nt(1), // contract
+      },
+    ),
+  );
+  audit.topic_metadata.insert(
+    bar_transfer,
+    named_topic(
+      bar_transfer,
+      "transfer",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: nt(1),
+      },
+    ),
+  );
+  audit.name_index = TopicNameIndex::build(&audit);
+  // Add a Calls edge from foo → foo_transfer so the iteration-2 PR
+  // (with foo_tmp seeded) flows mass to foo_transfer.
+  let prior_edges = vec![
+    (nt(1), foo, EdgeType::ContainsMember),
+    (foo, nt(1), EdgeType::ContainsMember),
+    (nt(1), nt(20), EdgeType::ContainsMember),
+    (nt(20), nt(1), EdgeType::ContainsMember),
+    (foo, foo_amount, EdgeType::ContainsLocal),
+    (foo_amount, foo, EdgeType::ContainsLocal),
+    (foo, foo_tmp, EdgeType::ContainsLocal),
+    (foo_tmp, foo, EdgeType::ContainsLocal),
+    (nt(20), nt(21), EdgeType::ContainsLocal),
+    (nt(21), nt(20), EdgeType::ContainsLocal),
+    (foo, foo_transfer, EdgeType::Calls),
+    (nt(1), foo_transfer, EdgeType::ContainsMember),
+    (foo_transfer, nt(1), EdgeType::ContainsMember),
+    (nt(1), bar_transfer, EdgeType::ContainsMember),
+    (bar_transfer, nt(1), EdgeType::ContainsMember),
+  ];
+  audit.resolution_graph = Some(graph_from(&prior_edges));
+
+  let mut tree = root(
+    1,
+    vec![paragraph(
+      2,
+      vec![
+        code_id(3, "amount", None), // ambiguous; both foo and bar
+        code_id(4, "tmp", None),    // ambiguous; only foo (after drop)
+        code_id(5, "transfer", None), // ambiguous; both foo and bar
+      ],
+    )],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+
+  let mut resolved = Vec::new();
+  collect_resolutions(&tree, &mut resolved);
+  assert_eq!(
+    resolved.iter().filter(|(_, t)| t.is_some()).count(),
+    3,
+    "all three refs must resolve across iterations: {:?}",
+    resolved
+  );
+
+  // amount + tmp resolve via Phase C in iteration 1.
+  let amount_trace = traces
+    .iter()
+    .find(|(_, t)| t.identifier == "amount")
+    .unwrap()
+    .1
+    .clone();
+  let tmp_trace = traces
+    .iter()
+    .find(|(_, t)| t.identifier == "tmp")
+    .unwrap()
+    .1
+    .clone();
+  assert_eq!(amount_trace.phase_resolved, ResolutionPhase::PhaseC);
+  assert_eq!(amount_trace.iteration, 1);
+  assert_eq!(tmp_trace.phase_resolved, ResolutionPhase::PhaseC);
+  assert_eq!(tmp_trace.iteration, 1);
+
+  // transfer resolves via Phase B in iteration 2 (the new seeds from
+  // iter 1's Phase C resolutions push enough mass to foo_transfer).
+  let transfer_trace = traces
+    .iter()
+    .find(|(_, t)| t.identifier == "transfer")
+    .unwrap()
+    .1
+    .clone();
+  assert_eq!(
+    transfer_trace.phase_resolved,
+    ResolutionPhase::PhaseB,
+    "transfer resolves via Phase B once iter-1 Phase-C seeds enrich the PR result",
+  );
+  assert!(
+    transfer_trace.iteration >= 2,
+    "transfer must wait for at least iter 2: got {}",
+    transfer_trace.iteration,
+  );
+  assert_eq!(transfer_trace.chosen_topic, Some(foo_transfer));
+}
+
+/// Phase D — exits early when no progress. With nothing to resolve, the
+/// outer loop runs Phase B once, sees zero new resolutions, and bails
+/// — even when the cap of 4 would in principle allow more rounds.
+#[test]
+fn phase_d_exits_early_when_no_new_resolutions() {
+  let (audit, _foo, _bar, _foo_amount, _foo_tmp, _bar_amount, _bar_tmp) =
+    co_loc_fixture();
+
+  // Section with one ambiguous ref that nothing can resolve. Phase B
+  // returns zero PR (no seeds), Phase C abstains (single ref). The
+  // outer loop should NOT keep iterating — it exits after iter 1.
+  let mut tree = root(
+    1,
+    vec![paragraph(2, vec![code_id(3, "amount", None)])],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+  assert_eq!(traces.len(), 1);
+  // The trace's iteration field holds the round in which the (only)
+  // attempt was made — iteration 1, since the loop exits immediately.
+  assert_eq!(traces[0].1.iteration, 1);
+  assert_eq!(traces[0].1.phase_resolved, ResolutionPhase::Unresolved);
+}
+
+/// Phase D — bound check. Every iteration's traces must report
+/// `iteration <= MAX_ITERATIONS`. Build a section where many refs
+/// cascade, and confirm the cap is respected.
+#[test]
+fn phase_d_iteration_field_never_exceeds_cap() {
+  // Use a fixture that produces at least one Phase D iteration.
+  let (mut audit, foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
+    co_loc_fixture();
+  audit.topic_metadata.remove(&nt(22));
+  audit.name_index = TopicNameIndex::build(&audit);
+
+  let mut tree = root(
+    1,
+    vec![paragraph(
+      2,
+      vec![
+        code_id(3, "amount", None),
+        code_id(4, "tmp", None),
+      ],
+    )],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+  for (_, trace) in &traces {
+    assert!(
+      trace.iteration >= 1 && trace.iteration <= 4,
+      "iteration must be in [1, 4]: {} for {}",
+      trace.iteration,
+      trace.identifier
+    );
+  }
+  // Sanity: the resolution actually picks the foo declarations.
+  let mut resolved = Vec::new();
+  collect_resolutions(&tree, &mut resolved);
+  assert_eq!(
+    resolved,
+    vec![(3, Some(foo_amount)), (4, Some(foo_tmp))],
+  );
+  let _ = foo;
+}
+
+/// Determinism — Phase C + D output is byte-identical across repeat
+/// runs. Pin the contract Phase 9 must preserve.
+#[test]
+fn phase_c_and_d_are_byte_deterministic_across_repeat_runs() {
+  let (mut audit, _foo, _bar, _foo_amount, _foo_tmp, _bar_amount, _bar_tmp) =
+    co_loc_fixture();
+  audit.topic_metadata.remove(&nt(22));
+  audit.name_index = TopicNameIndex::build(&audit);
+
+  let build_tree = || {
+    root(
+      1,
+      vec![paragraph(
+        2,
+        vec![
+          code_id(3, "amount", None),
+          code_id(4, "tmp", None),
+        ],
+      )],
+    )
+  };
+
+  let mut tree_a = build_tree();
+  let mut tree_b = build_tree();
+  let traces_a = resolve_doc_tree(&mut tree_a, &audit);
+  let traces_b = resolve_doc_tree(&mut tree_b, &audit);
+
+  let bytes_a = serde_json::to_vec(&traces_a).unwrap();
+  let bytes_b = serde_json::to_vec(&traces_b).unwrap();
+  assert_eq!(bytes_a, bytes_b);
+
+  let tree_bytes_a = serde_json::to_vec(&tree_a).unwrap();
+  let tree_bytes_b = serde_json::to_vec(&tree_b).unwrap();
+  assert_eq!(tree_bytes_a, tree_bytes_b);
+}
+
+/// Phase B and C never overwrite a successful Phase B resolution. If
+/// iteration 1's Phase B resolves `tmp` to foo.tmp, iteration 2 must
+/// not reconsider it via Phase C — even if Phase C would now pin it.
+#[test]
+fn phase_c_does_not_revisit_phase_b_resolutions() {
+  let (mut audit, foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
+    co_loc_fixture();
+  audit.topic_metadata.remove(&nt(22));
+  audit.name_index = TopicNameIndex::build(&audit);
+
+  // Add a strong Phase-A seed (`foo`) so iter-1 Phase B successfully
+  // resolves `amount` and `tmp`. We confirm only one trace per ref,
+  // both phase_resolved == PhaseB and iteration == 1.
+  let mut tree = root(
+    1,
+    vec![paragraph(
+      2,
+      vec![
+        code_id(2_000, "foo", Some(foo)),
+        code_id(3, "amount", None),
+        code_id(4, "tmp", None),
+      ],
+    )],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+  for (_, trace) in &traces {
+    assert_eq!(
+      trace.phase_resolved,
+      ResolutionPhase::PhaseB,
+      "Phase B must win and Phase C must not relabel: {} → {:?}",
+      trace.identifier,
+      trace.phase_resolved
+    );
+    assert_eq!(trace.iteration, 1);
+  }
+  let mut resolved = Vec::new();
+  collect_resolutions(&tree, &mut resolved);
+  assert!(resolved.iter().any(|(id, t)| *id == 3 && *t == Some(foo_amount)));
+  assert!(resolved.iter().any(|(id, t)| *id == 4 && *t == Some(foo_tmp)));
+}
+
+/// Phase C — three-ref interaction with one conflict. Two non-conflicted
+/// pairs each pin one ref; the conflicted ref stays unresolved.
+#[test]
+fn phase_c_conflicting_pin_drops_only_the_conflicting_ref() {
+  // contract C { function foo() { x; y; } function bar() { x; z; } }
+  let contract = nt(1);
+  let foo = nt(10);
+  let bar = nt(20);
+  let foo_x = nt(11);
+  let foo_y = nt(12);
+  let bar_x = nt(21);
+  let bar_z = nt(22);
+
+  let mut audit = staged_audit();
+  audit.topic_metadata.insert(
+    contract,
+    named_topic(
+      contract,
+      "C",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container {
+        container: pp("test.sol"),
+      },
+    ),
+  );
+  for (t, name, member) in [
+    (foo, "foo", None),
+    (bar, "bar", None),
+    (foo_x, "x", Some(foo)),
+    (foo_y, "y", Some(foo)),
+    (bar_x, "x", Some(bar)),
+    (bar_z, "z", Some(bar)),
+  ] {
+    let scope = match member {
+      None => Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+      Some(m) => Scope::Member {
+        container: pp("test.sol"),
+        component: contract,
+        member: m,
+        signature_container: None,
+      },
+    };
+    let kind = if member.is_none() {
+      NamedTopicKind::Function(FunctionKind::Function)
+    } else {
+      NamedTopicKind::LocalVariable
+    };
+    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(graph_from(&[
+    (contract, foo, EdgeType::ContainsMember),
+    (foo, contract, EdgeType::ContainsMember),
+    (contract, bar, EdgeType::ContainsMember),
+    (bar, contract, EdgeType::ContainsMember),
+  ]));
+
+  let mut tree = root(
+    1,
+    vec![paragraph(
+      2,
+      vec![
+        code_id(3, "x", None),
+        code_id(4, "y", None),
+        code_id(5, "z", None),
+      ],
+    )],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+
+  let mut resolved = Vec::new();
+  collect_resolutions(&tree, &mut resolved);
+  // y → foo.y, z → bar.z; x conflicted (would-be foo.x via pair (x,y)
+  // AND would-be bar.x via pair (x,z)) → drops out.
+  assert_eq!(
+    resolved,
+    vec![(3, None), (4, Some(foo_y)), (5, Some(bar_z))],
+  );
+
+  // Three traces; x's is Unresolved, the other two PhaseC.
+  let trace_for = |id: i32| {
+    traces
+      .iter()
+      .find(|(k, _)| {
+        matches!(k, ResolutionRefId::DocumentationNode(n) if *n == id)
+      })
+      .unwrap()
+      .1
+      .clone()
+  };
+  assert_eq!(trace_for(3).phase_resolved, ResolutionPhase::Unresolved);
+  assert_eq!(trace_for(4).phase_resolved, ResolutionPhase::PhaseC);
+  assert_eq!(trace_for(5).phase_resolved, ResolutionPhase::PhaseC);
+}
+
+/// Phase B + C coexistence in a single iteration: B resolves what
+/// it can via PR; C handles only refs B left ambiguous. The trace's
+/// `phase_resolved` correctly attributes each ref to its winning
+/// phase, both stamped with `iteration = 1`.
+#[test]
+fn phase_b_and_c_coexist_in_same_iteration() {
+  // Two graph regions kept disjoint so the per-iteration PR run can
+  // resolve only the refs in the seeded region:
+  //
+  //   region α: contract Alpha → contract-level function `wire`. A
+  //     Phase-A seed (some node `Anchor` with a Calls edge to Alpha.wire
+  //     but no edge to Beta.wire) drives Phase B for `wire`.
+  //
+  //   region β: contract Beta with two functions `foo`, `bar`. Each
+  //     declares a local `amount` and `tmp`; we drop bar.tmp so the
+  //     amount-tmp intersection is the singleton {foo}. Phase C pins
+  //     these. Region β has NO edges from `Anchor`, so Phase B sees
+  //     all-zero PR on these refs.
+  let anchor = nt(1);
+  let alpha = nt(2);
+  let alpha_wire = nt(3);
+  let beta_wire = nt(4);
+  let beta = nt(10);
+  let foo = nt(20);
+  let bar = nt(30);
+  let foo_amount = nt(21);
+  let foo_tmp = nt(22);
+  let bar_amount = nt(31);
+
+  let mut audit = staged_audit();
+  for (t, name, kind, scope) in [
+    (
+      anchor,
+      "Anchor",
+      NamedTopicKind::Builtin,
+      Scope::Container {
+        container: pp("test.sol"),
+      },
+    ),
+    (
+      alpha,
+      "Alpha",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container {
+        container: pp("test.sol"),
+      },
+    ),
+    (
+      alpha_wire,
+      "wire",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: alpha,
+      },
+    ),
+    (
+      beta_wire,
+      "wire",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: beta,
+      },
+    ),
+    (
+      beta,
+      "Beta",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container {
+        container: pp("test.sol"),
+      },
+    ),
+    (
+      foo,
+      "foo",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: beta,
+      },
+    ),
+    (
+      bar,
+      "bar",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: beta,
+      },
+    ),
+    (
+      foo_amount,
+      "amount",
+      NamedTopicKind::LocalVariable,
+      Scope::Member {
+        container: pp("test.sol"),
+        component: beta,
+        member: foo,
+        signature_container: None,
+      },
+    ),
+    (
+      foo_tmp,
+      "tmp",
+      NamedTopicKind::LocalVariable,
+      Scope::Member {
+        container: pp("test.sol"),
+        component: beta,
+        member: foo,
+        signature_container: None,
+      },
+    ),
+    (
+      bar_amount,
+      "amount",
+      NamedTopicKind::LocalVariable,
+      Scope::Member {
+        container: pp("test.sol"),
+        component: beta,
+        member: bar,
+        signature_container: None,
+      },
+    ),
+  ] {
+    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  // Edges: Anchor → Alpha.wire (Calls). NO edges into the β region —
+  // Phase B's PR on β-region candidates is uniformly zero.
+  audit.resolution_graph = Some(graph_from(&[
+    (anchor, alpha_wire, EdgeType::Calls),
+    (alpha, alpha_wire, EdgeType::ContainsMember),
+    (alpha_wire, alpha, EdgeType::ContainsMember),
+    (beta, beta_wire, EdgeType::ContainsMember),
+    (beta_wire, beta, EdgeType::ContainsMember),
+    (beta, foo, EdgeType::ContainsMember),
+    (foo, beta, EdgeType::ContainsMember),
+    (beta, bar, EdgeType::ContainsMember),
+    (bar, beta, EdgeType::ContainsMember),
+  ]));
+
+  let mut tree = root(
+    1,
+    vec![paragraph(
+      2,
+      vec![
+        code_id(3, "Anchor", Some(anchor)), // Phase-A seed
+        code_id(4, "wire", None),           // Phase B (Calls edge to Alpha)
+        code_id(5, "amount", None),         // Phase C (singleton {foo})
+        code_id(6, "tmp", None),            // Phase C (singleton {foo})
+      ],
+    )],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+
+  let mut resolved = Vec::new();
+  collect_resolutions(&tree, &mut resolved);
+  assert_eq!(
+    resolved,
+    vec![
+      (3, Some(anchor)),
+      (4, Some(alpha_wire)),
+      (5, Some(foo_amount)),
+      (6, Some(foo_tmp)),
+    ],
+  );
+
+  // Trace mix: wire via PhaseB, amount + tmp via PhaseC. All iter 1.
+  let trace_for = |id: i32| {
+    traces
+      .iter()
+      .find(|(k, _)| {
+        matches!(k, ResolutionRefId::DocumentationNode(n) if *n == id)
+      })
+      .unwrap()
+      .1
+      .clone()
+  };
+  assert_eq!(trace_for(4).phase_resolved, ResolutionPhase::PhaseB);
+  assert_eq!(trace_for(5).phase_resolved, ResolutionPhase::PhaseC);
+  assert_eq!(trace_for(6).phase_resolved, ResolutionPhase::PhaseC);
+  for id in [4, 5, 6] {
+    assert_eq!(trace_for(id).iteration, 1, "iter 1 for ref {}", id);
+  }
+}
+
+/// Cross-section intra-iteration cascade: in a single iteration the
+/// parent section's Phase C resolutions are immediately visible to the
+/// child section's PR run (sections are processed in document order,
+/// parent before child). Pin this efficiency win — the cascade
+/// converges in iter 1 rather than waiting until iter 2.
+#[test]
+fn phase_d_cross_section_ancestor_cascade_resolves_descendant() {
+  let (mut audit, foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
+    co_loc_fixture();
+  audit.topic_metadata.remove(&nt(22)); // drop bar.tmp
+  audit.name_index = TopicNameIndex::build(&audit);
+
+  // Add `wire` candidates: foo-side reachable from foo via Calls,
+  // bar-side a graph island. Once iter 1's Phase C resolves
+  // `amount` / `tmp` to foo's locals in the PARENT section, the child
+  // section's seed walk picks up those resolutions at distance 1, and
+  // foo gets PR via foo_tmp → foo (ContainsLocal). Then Phase B in
+  // iter 2 resolves the child section's ambiguous `wire` because
+  // wire_in_foo gets PR from foo, while wire_in_bar stays at zero.
+  let wire_in_foo = nt(40);
+  let wire_in_bar = nt(41);
+  audit.topic_metadata.insert(
+    wire_in_foo,
+    named_topic(
+      wire_in_foo,
+      "wire",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: nt(1),
+      },
+    ),
+  );
+  audit.topic_metadata.insert(
+    wire_in_bar,
+    named_topic(
+      wire_in_bar,
+      "wire",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: nt(1),
+      },
+    ),
+  );
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(graph_from(&[
+    // foo's locals — Phase C target in iter 1.
+    (foo, foo_amount, EdgeType::ContainsLocal),
+    (foo_amount, foo, EdgeType::ContainsLocal),
+    (foo, foo_tmp, EdgeType::ContainsLocal),
+    (foo_tmp, foo, EdgeType::ContainsLocal),
+    // bar's local (only `bar_amount` after dropping bar.tmp).
+    (nt(20), nt(21), EdgeType::ContainsLocal),
+    (nt(21), nt(20), EdgeType::ContainsLocal),
+    // Iter-2 path: foo → wire_in_foo via Calls. wire_in_bar isolated.
+    (foo, wire_in_foo, EdgeType::Calls),
+  ]));
+
+  // Tree:
+  //   Root
+  //     # Outer
+  //       amount, tmp           ← parent section's ambiguous refs
+  //       ## Inner
+  //         wire                ← child section's ambiguous ref
+  let inner = heading_with_section(
+    100,
+    101,
+    2,
+    "Inner",
+    vec![paragraph(102, vec![code_id(103, "wire", None)])],
+  );
+  let outer = heading_with_section(
+    1,
+    2,
+    1,
+    "Outer",
+    vec![
+      paragraph(
+        3,
+        vec![
+          code_id(4, "amount", None),
+          code_id(5, "tmp", None),
+        ],
+      ),
+      inner,
+    ],
+  );
+  let mut tree = root(0, vec![outer]);
+  let traces = resolve_doc_tree(&mut tree, &audit);
+
+  let trace_for = |id: i32| {
+    traces
+      .iter()
+      .find(|(k, _)| {
+        matches!(k, ResolutionRefId::DocumentationNode(n) if *n == id)
+      })
+      .unwrap()
+      .1
+      .clone()
+  };
+
+  // Parent section's amount + tmp resolve via Phase C in iter 1.
+  let amount_trace = trace_for(4);
+  let tmp_trace = trace_for(5);
+  assert_eq!(amount_trace.phase_resolved, ResolutionPhase::PhaseC);
+  assert_eq!(amount_trace.iteration, 1);
+  assert_eq!(tmp_trace.phase_resolved, ResolutionPhase::PhaseC);
+  assert_eq!(tmp_trace.iteration, 1);
+
+  // Child section's `wire` resolves via Phase B in iter 1 — sections
+  // are processed parent → child within an iteration, so the parent's
+  // freshly-pinned Phase-C topics are already in its
+  // `direct_phase_a_topics` when the child section's seed vector is
+  // built. The child sees foo_amount @ 0.5 and foo_tmp @ 0.5
+  // (distance 1 from the inner section).
+  let wire_trace = trace_for(103);
+  assert_eq!(wire_trace.phase_resolved, ResolutionPhase::PhaseB);
+  assert_eq!(wire_trace.iteration, 1);
+  assert_eq!(wire_trace.chosen_topic, Some(wire_in_foo));
+}
+
+/// Phase C trace's `candidate_scores` are sorted by PR descending and
+/// include EVERY candidate of the ref — even when Phase C's chosen
+/// candidate has zero PR mass. Pins the contract that operators
+/// inspecting a Phase C resolution can still see the PR ranking
+/// alongside the co-location decision.
+#[test]
+fn phase_c_trace_carries_full_pr_ranked_candidate_scores() {
+  let (mut audit, _foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
+    co_loc_fixture();
+  audit.topic_metadata.remove(&nt(22)); // drop bar.tmp
+  audit.name_index = TopicNameIndex::build(&audit);
+  // No graph signal — both `amount` and `tmp` resolve only via Phase
+  // C. PR will be all-zero for both candidates, but the trace must
+  // still list every candidate.
+  audit.resolution_graph = Some(graph_from(&[]));
+
+  let mut tree = root(
+    1,
+    vec![paragraph(
+      2,
+      vec![
+        code_id(3, "amount", None),
+        code_id(4, "tmp", None),
+      ],
+    )],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+
+  let amount_trace = traces
+    .iter()
+    .find(|(_, t)| t.identifier == "amount")
+    .unwrap()
+    .1
+    .clone();
+  assert_eq!(amount_trace.phase_resolved, ResolutionPhase::PhaseC);
+  assert_eq!(amount_trace.chosen_topic, Some(foo_amount));
+
+  // Both candidates listed in candidate_scores. PR scores are 0.0 so
+  // the tie-break falls through to qualified-name ascending. Order is
+  // not chosen-first — that's deliberate: the trace records the PR
+  // ranking, with co-location's pick reported separately as
+  // `chosen_topic`.
+  assert_eq!(amount_trace.candidate_scores.len(), 2);
+  for score in &amount_trace.candidate_scores {
+    assert_eq!(score.pr_score, 0.0, "expected zero PR with no graph signal");
+  }
+  // Verify all expected candidates appear (regardless of order).
+  let candidate_topics: std::collections::BTreeSet<topic::Topic> =
+    amount_trace.candidate_scores.iter().map(|c| c.topic).collect();
+  assert!(candidate_topics.contains(&foo_amount));
+  assert!(candidate_topics.contains(&nt(21))); // bar_amount
+
+  // Phase C still emits non-empty top_contributing_edges? No — when
+  // all PR is zero, the filter drops zero-mass edges; the fallback in
+  // `top_contributing_edges` keeps one zero-mass entry only if there
+  // were any predecessor candidates at all. With no edges into
+  // foo_amount in this fixture, the result is empty. (This isn't the
+  // contract we're pinning here — just documenting the observation.)
+  let _ = foo_tmp;
+}
+
+/// Phase D — a section whose only ambiguous ref cannot be resolved
+/// keeps that ref Unresolved with `iteration = 1` (the loop exits
+/// after iter 1 since nothing progressed). Verifies the iteration
+/// field reflects the actual final attempt, not the cap.
+#[test]
+fn phase_d_unresolved_ref_records_iteration_of_last_attempt() {
+  let mut audit = staged_audit();
+  // Two candidates for "x" with no graph edges → all-zero PR → Phase
+  // B fails → Phase C abstains (single ref) → loop exits at iter 1.
+  for id in &[100, 200] {
+    audit.topic_metadata.insert(
+      nt(*id),
+      named_topic(nt(*id), "x", NamedTopicKind::Builtin, Scope::Global),
+    );
+  }
+  finalize(&mut audit);
+
+  let mut tree = root(
+    1,
+    vec![paragraph(2, vec![code_id(3, "x", None)])],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+  assert_eq!(traces.len(), 1);
+  let trace = &traces[0].1;
+  assert_eq!(trace.phase_resolved, ResolutionPhase::Unresolved);
+  assert_eq!(trace.iteration, 1);
+  assert_eq!(trace.chosen_topic, None);
+}

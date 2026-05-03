@@ -1,4 +1,4 @@
-//! Phase B of the resolution pipeline for synthetic developer
+//! Phases B + C + D of the resolution pipeline for synthetic developer
 //! documentation: NatSpec docstrings on contracts/functions/modifiers,
 //! per-parameter `@param` blocks, and SemanticBlock inline source
 //! comments. Mirrors the doc-tree pass in
@@ -13,7 +13,7 @@
 //! solidity::analyzer::analyze
 //! resolution_graph::build              ← graph populated
 //! inject_developer_documentation       ← synthetic CommentTopics + Phase A
-//! resolve_dev_doc_comments             ← THIS pass (Phase B)
+//! resolve_dev_doc_comments             ← THIS pass (Phases B + C + D)
 //! documentation::analyzer::analyze
 //! ```
 //!
@@ -41,6 +41,11 @@
 //! the graph's `contains-member` and `contains-local` edges — siblings
 //! are deliberately NOT seeded individually (that is a calibration
 //! knob, per the spec).
+//!
+//! Phase D (re-iteration) runs Phases B + C until either no new
+//! resolutions appear or the iteration cap (`MAX_ITERATIONS = 4`) is
+//! hit. Each iteration's resolutions feed the next iteration's seed
+//! vector, so cascading disambiguation is automatic.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -50,8 +55,9 @@ use o11a_core::domain;
 use o11a_core::domain::Node;
 use o11a_core::domain::topic;
 use o11a_core::resolution_graph::{
-  CandidateScore, EdgeContribution, OutEdge, ResolutionGraph, ResolutionPhase,
-  ResolutionRefId, ResolutionTrace, personalized_pagerank,
+  CandidateScore, CoLocInput, EdgeContribution, OutEdge, ResolutionGraph,
+  ResolutionPhase, ResolutionRefId, ResolutionTrace, co_locate,
+  personalized_pagerank,
 };
 
 /// Confidence threshold from the spec's "Confidence threshold and
@@ -67,14 +73,20 @@ const MAX_SEED_DEPTH: u32 = 6;
 /// Spec's "top three contributing edges" cap for the resolution trace.
 const MAX_TOP_EDGES: usize = 3;
 
+/// Phase D iteration cap. Same as the doc-tree pass — most ambiguity
+/// converges in 1-2 iterations; the cap protects pathological cases.
+const MAX_ITERATIONS: u32 = 4;
+
 /// Walks every dev-doc CommentTopic in `audit_data` and resolves
 /// ambiguous `CommentNode::CodeIdentifier` nodes inside each comment's
 /// stored node tree using personalized PageRank seeded by the target
-/// topic's scope chain. Mutates the comment's node tree in place,
-/// merges newly-resolved references into `audit_data.mentions_index`
-/// and the `mentioned_topics` field on each `CommentTopic`, and
-/// records one `ResolutionTrace` per attempted ambiguous reference on
-/// `audit_data.resolution_traces`.
+/// topic's scope chain (Phase B), co-location pinning of remaining
+/// pairs (Phase C), and re-iteration of B + C until a fixed point or
+/// `MAX_ITERATIONS` rounds (Phase D). Mutates the comment's node tree
+/// in place, merges newly-resolved references into
+/// `audit_data.mentions_index` and the `mentioned_topics` field on
+/// each `CommentTopic`, and records one `ResolutionTrace` per
+/// attempted ambiguous reference on `audit_data.resolution_traces`.
 ///
 /// No-op when the audit's `resolution_graph` has not been built (Phase
 /// 4 of the build plan didn't run): the early-exit guard returns
@@ -91,20 +103,18 @@ pub fn resolve_dev_doc_comments(audit_data: &mut domain::AuditData) {
   // CodeIdentifier. Because Pass 2 needs read access to most of
   // `AuditData`, we collect plans into an owned vector first instead
   // of streaming.
-  let plans = collect_plans(audit_data);
+  let mut plans = collect_plans(audit_data);
   if plans.is_empty() {
     return;
   }
 
-  // Pass 2 — score: for each plan, build the seed vector, run PR,
-  // rank candidates, apply the threshold rule. Returns one
-  // `AppliedResolution` per winning candidate (keyed on
-  // `(comment_topic, occurrence)`) and one `ResolutionTrace` per
-  // attempted ambiguous reference.
+  // Pass 2 — score: Phases B + C run inside a Phase D iteration loop.
+  // Each iteration mutates `plans` (pinning resolved refs into the
+  // plan's `phase_a_topics`) and accumulates resolutions + traces.
   // The graph is borrowed for the duration of this call; we re-borrow
   // it inside `compute_resolutions` rather than passing it, since it
   // can be read off `audit_data` directly.
-  let (resolutions, traces) = compute_resolutions(&plans, audit_data);
+  let (resolutions, traces) = compute_resolutions(&mut plans, audit_data);
 
   // Pass 3 — mutate. Apply each resolution to its comment's node tree,
   // merge newly-resolved mentions into `mentions_index` and the
@@ -129,11 +139,13 @@ struct CommentPlan {
   scope_chain: Vec<topic::Topic>,
   /// Phase-A-resolved `referenced_topic` values harvested from this
   /// comment's `CodeIdentifier` nodes. Sorted ascending and deduped so
-  /// the seed-vector builder's iteration order is deterministic.
+  /// the seed-vector builder's iteration order is deterministic. Phase
+  /// D appends new resolutions here at the end of each iteration.
   phase_a_topics: Vec<topic::Topic>,
-  /// `(occurrence_index, identifier)` for every ambiguous
+  /// `(occurrence_index, identifier)` for every still-ambiguous
   /// `CodeIdentifier` in the comment's node tree, in depth-first
-  /// document order. The occurrence index is the one used to key into
+  /// document order. As Phase D iterates, resolved refs are removed.
+  /// The occurrence index is the one used to key into
   /// `ResolutionRefId::DevDocComment`.
   ambiguous_refs: Vec<AmbiguousRef>,
 }
@@ -264,7 +276,7 @@ fn collect_refs(
 }
 
 // ---------------------------------------------------------------------
-// Pass 2 — scoring
+// Pass 2 — scoring (Phases B + C inside Phase D loop)
 // ---------------------------------------------------------------------
 
 /// One winning resolution. Carried out of Pass 2 and applied to the
@@ -283,90 +295,258 @@ struct AppliedResolution {
 /// `CodeIdentifier` it walks.
 type ResolutionMap = BTreeMap<(topic::Topic, u32), AppliedResolution>;
 
-/// One trace per attempted ambiguous reference. Pass 3 inserts these
-/// into `audit_data.resolution_traces` after the mutation walk.
-type TraceList = Vec<(ResolutionRefId, ResolutionTrace)>;
+/// Trace map keyed by ref id. Each iteration overwrites entries for
+/// refs it attempted, so the final map carries the *latest* attempt
+/// per ref — exactly what Phase 11's dump tooling expects.
+type TraceMap = BTreeMap<ResolutionRefId, ResolutionTrace>;
 
 /// Compute every comment's resolutions. Resolutions are keyed by
 /// `(comment_topic, occurrence)`; traces are keyed by
 /// `ResolutionRefId::DevDocComment { comment_topic, occurrence }`.
+///
+/// Plans are mutated across Phase D iterations: pinned refs migrate
+/// from `ambiguous_refs` into `phase_a_topics` so the next iteration's
+/// seed vector reflects them.
 fn compute_resolutions(
-  plans: &[CommentPlan],
+  plans: &mut [CommentPlan],
   audit_data: &domain::AuditData,
-) -> (ResolutionMap, TraceList) {
+) -> (ResolutionMap, TraceMap) {
   let graph = audit_data
     .resolution_graph
     .as_ref()
     .expect("graph existence checked by caller");
 
   let mut resolutions: ResolutionMap = BTreeMap::new();
-  let mut traces: TraceList = Vec::new();
+  let mut traces: TraceMap = BTreeMap::new();
 
-  for plan in plans {
-    let seeds = build_seed_vector(plan);
-
-    // PR with an empty seed vector returns all-zero per the engine's
-    // contract; no candidate could clear the threshold, so skip the
-    // (nontrivial) PR work and emit Unresolved traces directly.
-    let pr_result = if seeds.is_empty() {
-      BTreeMap::new()
-    } else {
-      personalized_pagerank(graph, &seeds)
-    };
-
-    for ambiguous in &plan.ambiguous_refs {
-      let trace_key = ResolutionRefId::DevDocComment {
-        comment_topic: plan.comment_topic,
-        occurrence: ambiguous.occurrence,
-      };
-
-      let candidates = audit_data
-        .name_index
-        .candidates_by_simple_name(&ambiguous.identifier);
-
-      let candidate_scores =
-        rank_candidates(candidates, audit_data, &pr_result);
-
-      let (chosen, edges) = pick_winner(&candidate_scores, graph, &pr_result);
-
-      let phase_resolved = if chosen.is_some() {
-        ResolutionPhase::PhaseB
-      } else {
-        ResolutionPhase::Unresolved
-      };
-
-      if let Some(chosen_topic) = chosen {
-        let (kind, referenced_name) =
-          lookup_kind_and_name(chosen_topic, audit_data);
-        resolutions.insert(
-          (plan.comment_topic, ambiguous.occurrence),
-          AppliedResolution {
-            chosen_topic,
-            kind,
-            referenced_name,
-          },
-        );
+  for iteration in 1..=MAX_ITERATIONS {
+    let mut newly_resolved: usize = 0;
+    for plan_idx in 0..plans.len() {
+      if plans[plan_idx].ambiguous_refs.is_empty() {
+        continue;
       }
 
-      traces.push((
+      // Phase B — PR scoring of this comment's still-ambiguous refs.
+      let pr_result = run_phase_b(
+        plans,
+        plan_idx,
+        audit_data,
+        graph,
+        iteration,
+        &mut resolutions,
+        &mut traces,
+        &mut newly_resolved,
+      );
+
+      if plans[plan_idx].ambiguous_refs.is_empty() {
+        continue;
+      }
+
+      // Phase C — co-location pinning of remaining pairs.
+      run_phase_c(
+        plans,
+        plan_idx,
+        audit_data,
+        graph,
+        iteration,
+        &pr_result,
+        &mut resolutions,
+        &mut traces,
+        &mut newly_resolved,
+      );
+    }
+
+    if newly_resolved == 0 {
+      break;
+    }
+  }
+
+  (resolutions, traces)
+}
+
+/// Run Phase B for one comment plan: build the seed vector, run PR,
+/// score remaining ambiguous refs, apply the threshold rule. Resolved
+/// refs migrate to the plan's `phase_a_topics`; survivors stay in
+/// `ambiguous_refs` for Phase C. Returns the PR result so Phase C can
+/// reuse it for trace candidate scores without re-running the engine.
+#[allow(clippy::too_many_arguments)]
+fn run_phase_b(
+  plans: &mut [CommentPlan],
+  plan_idx: usize,
+  audit_data: &domain::AuditData,
+  graph: &ResolutionGraph,
+  iteration: u32,
+  resolutions: &mut ResolutionMap,
+  traces: &mut TraceMap,
+  newly_resolved: &mut usize,
+) -> BTreeMap<topic::Topic, f32> {
+  let seeds = build_seed_vector(&plans[plan_idx]);
+
+  // PR with an empty seed vector returns all-zero per the engine's
+  // contract; emit Unresolved traces and skip the PR work in that case.
+  let pr_result = if seeds.is_empty() {
+    BTreeMap::new()
+  } else {
+    personalized_pagerank(graph, &seeds)
+  };
+
+  let comment_topic = plans[plan_idx].comment_topic;
+
+  let mut survivors: Vec<AmbiguousRef> = Vec::new();
+  let mut resolved_here: u32 = 0;
+  for ambiguous in std::mem::take(&mut plans[plan_idx].ambiguous_refs) {
+    let trace_key = ResolutionRefId::DevDocComment {
+      comment_topic,
+      occurrence: ambiguous.occurrence,
+    };
+    let candidates = audit_data
+      .name_index
+      .candidates_by_simple_name(&ambiguous.identifier);
+    let candidate_scores = rank_candidates(candidates, audit_data, &pr_result);
+    let (chosen, edges) =
+      pick_phase_b_winner(&candidate_scores, graph, &pr_result);
+
+    if let Some(chosen_topic) = chosen {
+      let (kind, referenced_name) = lookup_kind_and_name(chosen_topic, audit_data);
+      resolutions.insert(
+        (comment_topic, ambiguous.occurrence),
+        AppliedResolution {
+          chosen_topic,
+          kind,
+          referenced_name,
+        },
+      );
+      plans[plan_idx].phase_a_topics.push(chosen_topic);
+      resolved_here += 1;
+      traces.insert(
         trace_key.clone(),
         ResolutionTrace {
           reference_id: trace_key,
           identifier: ambiguous.identifier.clone(),
           // For dev-doc resolution, the "section" is the synthetic
           // CommentTopic — each comment owns one PR run.
-          section_topic: plan.comment_topic,
-          phase_resolved,
-          iteration: 1,
-          chosen_topic: chosen,
+          section_topic: comment_topic,
+          phase_resolved: ResolutionPhase::PhaseB,
+          iteration,
+          chosen_topic: Some(chosen_topic),
           candidate_scores,
           top_contributing_edges: edges,
         },
-      ));
+      );
+    } else {
+      // Tentative Unresolved trace; Phase C may overwrite.
+      traces.insert(
+        trace_key.clone(),
+        ResolutionTrace {
+          reference_id: trace_key,
+          identifier: ambiguous.identifier.clone(),
+          section_topic: comment_topic,
+          phase_resolved: ResolutionPhase::Unresolved,
+          iteration,
+          chosen_topic: None,
+          candidate_scores,
+          top_contributing_edges: Vec::new(),
+        },
+      );
+      survivors.push(ambiguous);
     }
   }
 
-  (resolutions, traces)
+  plans[plan_idx].ambiguous_refs = survivors;
+  if resolved_here > 0 {
+    plans[plan_idx].phase_a_topics.sort();
+    plans[plan_idx].phase_a_topics.dedup();
+    *newly_resolved += resolved_here as usize;
+  }
+
+  pr_result
+}
+
+/// Run Phase C for one comment plan: builds CoLocInput entries from
+/// the comment's still-ambiguous refs, runs the shared `co_locate`
+/// algorithm, and applies any pinnings it produces. Each pinned ref's
+/// trace is rewritten to `PhaseC`, with the `candidate_scores` and
+/// `top_contributing_edges` reused from the iteration's PR run so
+/// operators see the PR ranking alongside the co-location decision.
+#[allow(clippy::too_many_arguments)]
+fn run_phase_c(
+  plans: &mut [CommentPlan],
+  plan_idx: usize,
+  audit_data: &domain::AuditData,
+  graph: &ResolutionGraph,
+  iteration: u32,
+  pr_result: &BTreeMap<topic::Topic, f32>,
+  resolutions: &mut ResolutionMap,
+  traces: &mut TraceMap,
+  newly_resolved: &mut usize,
+) {
+  let comment_topic = plans[plan_idx].comment_topic;
+
+  let inputs: Vec<CoLocInput<u32>> = plans[plan_idx]
+    .ambiguous_refs
+    .iter()
+    .map(|a| CoLocInput {
+      ref_id: a.occurrence,
+      candidates: audit_data
+        .name_index
+        .candidates_by_simple_name(&a.identifier)
+        .to_vec(),
+    })
+    .collect();
+
+  let pinnings = co_locate(audit_data, &inputs);
+  if pinnings.is_empty() {
+    return;
+  }
+
+  let pinned_ids: BTreeMap<u32, topic::Topic> =
+    pinnings.iter().map(|r| (r.ref_id, r.chosen_topic)).collect();
+
+  let mut survivors: Vec<AmbiguousRef> = Vec::new();
+  for ambiguous in std::mem::take(&mut plans[plan_idx].ambiguous_refs) {
+    if let Some(&chosen_topic) = pinned_ids.get(&ambiguous.occurrence) {
+      let trace_key = ResolutionRefId::DevDocComment {
+        comment_topic,
+        occurrence: ambiguous.occurrence,
+      };
+      let (kind, referenced_name) = lookup_kind_and_name(chosen_topic, audit_data);
+      resolutions.insert(
+        (comment_topic, ambiguous.occurrence),
+        AppliedResolution {
+          chosen_topic,
+          kind,
+          referenced_name,
+        },
+      );
+      plans[plan_idx].phase_a_topics.push(chosen_topic);
+      *newly_resolved += 1;
+
+      let candidates = audit_data
+        .name_index
+        .candidates_by_simple_name(&ambiguous.identifier);
+      let candidate_scores = rank_candidates(candidates, audit_data, pr_result);
+      let edges = top_contributing_edges(graph, pr_result, chosen_topic);
+
+      traces.insert(
+        trace_key.clone(),
+        ResolutionTrace {
+          reference_id: trace_key,
+          identifier: ambiguous.identifier.clone(),
+          section_topic: comment_topic,
+          phase_resolved: ResolutionPhase::PhaseC,
+          iteration,
+          chosen_topic: Some(chosen_topic),
+          candidate_scores,
+          top_contributing_edges: edges,
+        },
+      );
+    } else {
+      survivors.push(ambiguous);
+    }
+  }
+  plans[plan_idx].ambiguous_refs = survivors;
+  plans[plan_idx].phase_a_topics.sort();
+  plans[plan_idx].phase_a_topics.dedup();
 }
 
 /// Build the seed vector for one comment plan: scope-chain entries at
@@ -388,7 +568,8 @@ fn build_seed_vector(plan: &CommentPlan) -> BTreeMap<topic::Topic, f32> {
 
   // Phase-A-resolved references in the comment text — distance 0,
   // alongside the target topic. Already sorted+deduped during plan
-  // collection, so iteration order is deterministic.
+  // collection (and after each Phase D iteration), so iteration order
+  // is deterministic.
   for topic in &plan.phase_a_topics {
     *seeds.entry(*topic).or_insert(0.0) += 1.0;
   }
@@ -434,9 +615,9 @@ fn rank_candidates(
   scored
 }
 
-/// Apply the spec's confidence rule. Returns the chosen topic (if any)
+/// Apply Phase B's confidence rule. Returns the chosen topic (if any)
 /// and the top-three contributing-edge breakdown when it does.
-fn pick_winner(
+fn pick_phase_b_winner(
   candidate_scores: &[CandidateScore],
   graph: &ResolutionGraph,
   pr_result: &BTreeMap<topic::Topic, f32>,
@@ -535,9 +716,9 @@ fn top_contributing_edges(
 }
 
 /// Look up the `kind` and `referenced_name` snapshot fields the comment
-/// parser stamps next to `referenced_topic`. Phase-B winners must be
-/// indistinguishable from Phase-A winners downstream, so the snapshot
-/// fields are rewritten alongside `referenced_topic`.
+/// parser stamps next to `referenced_topic`. Phase-B / C winners must
+/// be indistinguishable from Phase-A winners downstream, so the
+/// snapshot fields are rewritten alongside `referenced_topic`.
 fn lookup_kind_and_name(
   topic: topic::Topic,
   audit_data: &domain::AuditData,
@@ -562,7 +743,7 @@ fn apply_pass(
   audit_data: &mut domain::AuditData,
   plans: &[CommentPlan],
   resolutions: &ResolutionMap,
-  traces: TraceList,
+  traces: TraceMap,
 ) {
   for plan in plans {
     let new_mentions =

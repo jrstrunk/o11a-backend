@@ -6,6 +6,7 @@
 //! `crates/o11a-analyze/docs/build-plans/semantic-resolution-graph.md`.
 
 pub mod builder;
+pub mod coloc;
 pub mod edge;
 pub mod graph;
 pub mod pagerank;
@@ -13,6 +14,7 @@ pub mod solidity_extractor;
 pub mod trace;
 
 pub use builder::{Extractor, build};
+pub use coloc::{CoLocInput, CoLocResolution, co_locate, enclosing_member_scope};
 pub use edge::{Direction, EdgeType};
 pub use graph::{OutEdge, ResolutionGraph};
 pub use pagerank::personalized_pagerank;

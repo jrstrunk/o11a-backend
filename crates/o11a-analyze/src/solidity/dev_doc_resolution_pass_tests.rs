@@ -2809,3 +2809,951 @@ fn phase_b_does_not_touch_referenced_topic_candidates_field() {
     );
   }
 }
+
+// ---------------------------------------------------------------------
+// Layer 8 — Phases C (co-location) + D (re-iteration)
+//
+// Mirrors Layer 8 of the doc-tree pass tests but exercises the dev-doc
+// consumer: per-comment co-location of locals declared inside the same
+// function/modifier/struct/event/error scope, plus the iteration loop
+// that lets new resolutions feed forward into the next round's seeds.
+// ---------------------------------------------------------------------
+
+/// Helper: build a contract with two functions, each declaring local
+/// variables. Returns the audit and useful topics for assertions.
+fn dev_doc_co_loc_fixture() -> (
+  AuditData,
+  topic::Topic, // contract C
+  topic::Topic, // foo function (in C)
+  topic::Topic, // bar function (in C)
+  topic::Topic, // foo.amount
+  topic::Topic, // foo.tmp
+  topic::Topic, // bar.amount
+  topic::Topic, // bar.tmp
+) {
+  let contract = nt(1);
+  let foo = nt(10);
+  let bar = nt(20);
+  let foo_amount = nt(11);
+  let foo_tmp = nt(12);
+  let bar_amount = nt(21);
+  let bar_tmp = nt(22);
+
+  let mut audit = staged_audit();
+  audit.topic_metadata.insert(
+    contract,
+    named_topic(
+      contract,
+      "C",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container {
+        container: pp("test.sol"),
+      },
+    ),
+  );
+  for (t, name, member) in [
+    (foo, "foo", None),
+    (bar, "bar", None),
+    (foo_amount, "amount", Some(foo)),
+    (foo_tmp, "tmp", Some(foo)),
+    (bar_amount, "amount", Some(bar)),
+    (bar_tmp, "tmp", Some(bar)),
+  ] {
+    let scope = match member {
+      None => Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+      Some(m) => Scope::Member {
+        container: pp("test.sol"),
+        component: contract,
+        member: m,
+        signature_container: None,
+      },
+    };
+    let kind = if member.is_none() {
+      NamedTopicKind::Function(FunctionKind::Function)
+    } else {
+      NamedTopicKind::LocalVariable
+    };
+    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(graph_from(&[
+    (contract, foo, EdgeType::ContainsMember),
+    (foo, contract, EdgeType::ContainsMember),
+    (contract, bar, EdgeType::ContainsMember),
+    (bar, contract, EdgeType::ContainsMember),
+    (foo, foo_amount, EdgeType::ContainsLocal),
+    (foo_amount, foo, EdgeType::ContainsLocal),
+    (foo, foo_tmp, EdgeType::ContainsLocal),
+    (foo_tmp, foo, EdgeType::ContainsLocal),
+    (bar, bar_amount, EdgeType::ContainsLocal),
+    (bar_amount, bar, EdgeType::ContainsLocal),
+    (bar, bar_tmp, EdgeType::ContainsLocal),
+    (bar_tmp, bar, EdgeType::ContainsLocal),
+  ]));
+  (audit, contract, foo, bar, foo_amount, foo_tmp, bar_amount, bar_tmp)
+}
+
+/// Phase C — singleton intersection. NatSpec attached to a sibling
+/// function `helper` mentions `amount` and `tmp`. By dropping
+/// `bar.tmp`, only `foo` declares both locals; Phase C pins both refs
+/// to foo's declarations even though Phase B's PR (with `helper`'s
+/// scope chain seeded) does not flow into either local.
+#[test]
+fn phase_c_pins_pair_in_dev_doc_when_intersection_is_singleton() {
+  let (mut audit, contract, _foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
+    dev_doc_co_loc_fixture();
+  // Drop bar.tmp so Phase C can find a singleton intersection.
+  audit.topic_metadata.remove(&nt(22));
+  audit.name_index = TopicNameIndex::build(&audit);
+
+  // Add a sibling function `helper` whose NatSpec is the test target.
+  let helper = nt(50);
+  audit.topic_metadata.insert(
+    helper,
+    named_topic(
+      helper,
+      "helper",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+    ),
+  );
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(resolution_graph::build(&audit));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    helper,
+    Author::DevTechnical,
+    vec![code_id("amount", None), code_id("tmp", None)],
+  );
+
+  resolve_dev_doc_comments(&mut audit);
+
+  let res = comment_resolutions(&audit, comment);
+  assert_eq!(
+    res,
+    vec![
+      ("amount".to_string(), Some(foo_amount)),
+      ("tmp".to_string(), Some(foo_tmp)),
+    ],
+  );
+
+  // Both refs phase_resolved == PhaseC, iteration == 1.
+  for occ in [0u32, 1] {
+    let trace = audit
+      .resolution_traces
+      .get(&ResolutionRefId::DevDocComment {
+        comment_topic: comment,
+        occurrence: occ,
+      })
+      .unwrap();
+    assert_eq!(trace.phase_resolved, ResolutionPhase::PhaseC);
+    assert_eq!(trace.iteration, 1);
+  }
+}
+
+/// Phase C — multi-element intersection. Both `amount` and `tmp` exist
+/// in {foo, bar}. Phase C abstains; the refs stay Unresolved.
+#[test]
+fn phase_c_dev_doc_abstains_on_multi_element_intersection() {
+  let (mut audit, contract, _foo, _bar, _fa, _ft, _ba, _bt) =
+    dev_doc_co_loc_fixture();
+  // Add helper function as the comment target — a sibling that doesn't
+  // declare amount or tmp, so the seed chain doesn't push PR mass into
+  // either function's locals.
+  let helper = nt(50);
+  audit.topic_metadata.insert(
+    helper,
+    named_topic(
+      helper,
+      "helper",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+    ),
+  );
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(resolution_graph::build(&audit));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    helper,
+    Author::DevTechnical,
+    vec![code_id("amount", None), code_id("tmp", None)],
+  );
+
+  resolve_dev_doc_comments(&mut audit);
+
+  let res = comment_resolutions(&audit, comment);
+  assert_eq!(
+    res,
+    vec![
+      ("amount".to_string(), None),
+      ("tmp".to_string(), None),
+    ],
+    "two-element intersection must abstain",
+  );
+
+  for occ in [0u32, 1] {
+    let trace = audit
+      .resolution_traces
+      .get(&ResolutionRefId::DevDocComment {
+        comment_topic: comment,
+        occurrence: occ,
+      })
+      .unwrap();
+    assert_eq!(trace.phase_resolved, ResolutionPhase::Unresolved);
+  }
+}
+
+/// Phase D — second iteration unlocks a third reference. Iter 1's
+/// Phase C resolves `amount` and `tmp` (singleton scope foo). The new
+/// foo / foo_tmp seeds become Phase-A inputs for iter 2, where
+/// Phase B's PR mass flows into `wire_in_foo` via a Calls edge.
+/// `wire_in_bar` is a graph island (zero PR), so the threshold check
+/// `top/(top+0) = 1.0` clears trivially. Verifies the cascade:
+/// PhaseC (iter 1) → PhaseB (iter 2).
+#[test]
+fn phase_d_dev_doc_cascades_resolutions_across_iterations() {
+  let (mut audit, contract, foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
+    dev_doc_co_loc_fixture();
+  audit.topic_metadata.remove(&nt(22)); // drop bar.tmp
+
+  // Sibling function `helper` is the comment target. To force Phase C
+  // (not Phase B) to resolve amount/tmp in iter 1, we use a graph
+  // where neither candidate is reachable from helper's scope chain —
+  // the foo and bar regions are disconnected from the seeds entirely.
+  let helper = nt(50);
+  audit.topic_metadata.insert(
+    helper,
+    named_topic(
+      helper,
+      "helper",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+    ),
+  );
+
+  // `wire` is a contract-level function — Phase C cannot pin it (its
+  // immediate enclosing scope is the contract, too coarse). The only
+  // path to a Phase B win for `wire` is graph mass from a foo-side
+  // Phase-A seed (added by iter 1's Phase C). wire_in_bar is a graph
+  // island so its PR is always zero.
+  let wire_in_foo = nt(40);
+  let wire_in_bar = nt(41);
+  audit.topic_metadata.insert(
+    wire_in_foo,
+    named_topic(
+      wire_in_foo,
+      "wire",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+    ),
+  );
+  audit.topic_metadata.insert(
+    wire_in_bar,
+    named_topic(
+      wire_in_bar,
+      "wire",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+    ),
+  );
+  audit.name_index = TopicNameIndex::build(&audit);
+
+  // Disconnected graph regions: helper has no graph edges (so iter 1
+  // PR is empty), foo / foo_amount / foo_tmp form one cluster, bar /
+  // bar_amount form another. iter 1: zero PR everywhere → Phase B
+  // fails → Phase C pins amount + tmp via singleton {foo}. iter 2:
+  // foo_amount and foo_tmp seeded → PR mass flows via foo_tmp →
+  // wire_in_foo. wire_in_bar untouched.
+  audit.resolution_graph = Some(graph_from(&[
+    // Foo's locals.
+    (foo, foo_amount, EdgeType::ContainsLocal),
+    (foo_amount, foo, EdgeType::ContainsLocal),
+    (foo, foo_tmp, EdgeType::ContainsLocal),
+    (foo_tmp, foo, EdgeType::ContainsLocal),
+    // Bar's only local.
+    (nt(20), nt(21), EdgeType::ContainsLocal),
+    (nt(21), nt(20), EdgeType::ContainsLocal),
+    // Iter-2 path: foo_tmp → wire_in_foo via Calls.
+    (foo_tmp, wire_in_foo, EdgeType::Calls),
+  ]));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    helper,
+    Author::DevTechnical,
+    vec![
+      code_id("amount", None),
+      code_id("tmp", None),
+      code_id("wire", None),
+    ],
+  );
+
+  resolve_dev_doc_comments(&mut audit);
+
+  let res = comment_resolutions(&audit, comment);
+  assert!(
+    res.iter().all(|(_, t)| t.is_some()),
+    "all three refs must resolve across iterations: {:?}",
+    res
+  );
+
+  let trace_for = |occ: u32| {
+    audit
+      .resolution_traces
+      .get(&ResolutionRefId::DevDocComment {
+        comment_topic: comment,
+        occurrence: occ,
+      })
+      .unwrap()
+      .clone()
+  };
+  let amount_trace = trace_for(0);
+  let tmp_trace = trace_for(1);
+  let wire_trace = trace_for(2);
+
+  // amount + tmp via PhaseC iter 1.
+  assert_eq!(amount_trace.phase_resolved, ResolutionPhase::PhaseC);
+  assert_eq!(amount_trace.iteration, 1);
+  assert_eq!(tmp_trace.phase_resolved, ResolutionPhase::PhaseC);
+  assert_eq!(tmp_trace.iteration, 1);
+
+  // wire via PhaseB iter 2 once foo / foo_tmp are Phase-A seeds.
+  assert_eq!(wire_trace.phase_resolved, ResolutionPhase::PhaseB);
+  assert!(
+    wire_trace.iteration >= 2,
+    "wire must resolve in iteration ≥ 2: got {}",
+    wire_trace.iteration
+  );
+  assert_eq!(wire_trace.chosen_topic, Some(wire_in_foo));
+}
+
+/// Phase D — exits early when no progress. Single ambiguous ref with
+/// no candidates → Phase B fails → Phase C abstains (single ref) →
+/// loop exits after iteration 1.
+#[test]
+fn phase_d_dev_doc_exits_early_when_no_new_resolutions() {
+  let mut audit = staged_audit();
+  let func = nt(10);
+  audit.topic_metadata.insert(
+    func,
+    named_topic(
+      func,
+      "f",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Container {
+        container: pp("test.sol"),
+      },
+    ),
+  );
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(resolution_graph::build(&audit));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    func,
+    Author::DevTechnical,
+    vec![code_id("missing", None)],
+  );
+  resolve_dev_doc_comments(&mut audit);
+  let trace = audit
+    .resolution_traces
+    .get(&ResolutionRefId::DevDocComment {
+      comment_topic: comment,
+      occurrence: 0,
+    })
+    .unwrap();
+  assert_eq!(trace.iteration, 1);
+  assert_eq!(trace.phase_resolved, ResolutionPhase::Unresolved);
+}
+
+/// Phase D — iteration field never exceeds the cap.
+#[test]
+fn phase_d_dev_doc_iteration_field_never_exceeds_cap() {
+  let (mut audit, contract, _foo, _bar, _fa, _ft, _ba, _bt) =
+    dev_doc_co_loc_fixture();
+  audit.topic_metadata.remove(&nt(22));
+  audit.name_index = TopicNameIndex::build(&audit);
+
+  let helper = nt(50);
+  audit.topic_metadata.insert(
+    helper,
+    named_topic(
+      helper,
+      "helper",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+    ),
+  );
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(resolution_graph::build(&audit));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    helper,
+    Author::DevTechnical,
+    vec![code_id("amount", None), code_id("tmp", None)],
+  );
+  resolve_dev_doc_comments(&mut audit);
+
+  for trace in audit.resolution_traces.values() {
+    assert!(
+      trace.iteration >= 1 && trace.iteration <= 4,
+      "iteration must be in [1, 4]: {} ({})",
+      trace.iteration,
+      trace.identifier
+    );
+  }
+  let _ = comment;
+}
+
+/// Determinism — Phase C + D output is byte-identical across repeat
+/// runs of the dev-doc consumer.
+#[test]
+fn phase_c_and_d_dev_doc_byte_deterministic_across_repeat_runs() {
+  let build_audit = || {
+    let (mut audit, contract, _foo, _bar, _fa, _ft, _ba, _bt) =
+      dev_doc_co_loc_fixture();
+    audit.topic_metadata.remove(&nt(22));
+    let helper = nt(50);
+    audit.topic_metadata.insert(
+      helper,
+      named_topic(
+        helper,
+        "helper",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component {
+          container: pp("test.sol"),
+          component: contract,
+        },
+      ),
+    );
+    audit.name_index = TopicNameIndex::build(&audit);
+    // Build the graph with explicit edges so PR has signal to flow.
+    audit.resolution_graph = Some(graph_from(&[
+      (contract, helper, EdgeType::ContainsMember),
+      (helper, contract, EdgeType::ContainsMember),
+      (contract, nt(10), EdgeType::ContainsMember),
+      (nt(10), contract, EdgeType::ContainsMember),
+      (contract, nt(20), EdgeType::ContainsMember),
+      (nt(20), contract, EdgeType::ContainsMember),
+      (nt(10), nt(11), EdgeType::ContainsLocal),
+      (nt(11), nt(10), EdgeType::ContainsLocal),
+      (nt(10), nt(12), EdgeType::ContainsLocal),
+      (nt(12), nt(10), EdgeType::ContainsLocal),
+      (nt(20), nt(21), EdgeType::ContainsLocal),
+      (nt(21), nt(20), EdgeType::ContainsLocal),
+    ]));
+    insert_dev_doc(
+      &mut audit,
+      -10,
+      helper,
+      Author::DevTechnical,
+      vec![code_id("amount", None), code_id("tmp", None)],
+    );
+    audit
+  };
+
+  let mut audit_a = build_audit();
+  let mut audit_b = build_audit();
+  resolve_dev_doc_comments(&mut audit_a);
+  resolve_dev_doc_comments(&mut audit_b);
+
+  // Project BTreeMap → sorted Vec<(K, V)> for serde_json (the trace
+  // map's ResolutionRefId key is an enum, not a string, and serde_json
+  // rejects non-string map keys).
+  let traces_a: Vec<_> = audit_a.resolution_traces.iter().collect();
+  let traces_b: Vec<_> = audit_b.resolution_traces.iter().collect();
+  let bytes_a = serde_json::to_vec(&traces_a).unwrap();
+  let bytes_b = serde_json::to_vec(&traces_b).unwrap();
+  assert_eq!(bytes_a, bytes_b);
+
+  // Compare the post-pass comment tree byte-for-byte — the actual
+  // mutation Phase B / C / D produced.
+  let comment = ct(-10);
+  let nodes_a = serde_json::to_vec(audit_a.nodes.get(&comment).unwrap()).unwrap();
+  let nodes_b = serde_json::to_vec(audit_b.nodes.get(&comment).unwrap()).unwrap();
+  assert_eq!(nodes_a, nodes_b);
+}
+
+/// Phase C — newly-resolved mentions still flow into mentions_index
+/// and the comment's `mentioned_topics` field. The accumulator merge
+/// is shared with Phase B's mentions logic, so a Phase C win must end
+/// up in both maps.
+#[test]
+fn phase_c_dev_doc_resolutions_appear_in_mentions_index() {
+  let (mut audit, contract, _foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
+    dev_doc_co_loc_fixture();
+  audit.topic_metadata.remove(&nt(22));
+  audit.name_index = TopicNameIndex::build(&audit);
+
+  let helper = nt(50);
+  audit.topic_metadata.insert(
+    helper,
+    named_topic(
+      helper,
+      "helper",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+    ),
+  );
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(resolution_graph::build(&audit));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    helper,
+    Author::DevTechnical,
+    vec![code_id("amount", None), code_id("tmp", None)],
+  );
+
+  resolve_dev_doc_comments(&mut audit);
+
+  // Both topics now key into mentions_index pointing at this comment.
+  assert!(audit
+    .mentions_index
+    .get(&foo_amount)
+    .map(|v| v.contains(&comment))
+    .unwrap_or(false));
+  assert!(audit
+    .mentions_index
+    .get(&foo_tmp)
+    .map(|v| v.contains(&comment))
+    .unwrap_or(false));
+
+  let TopicMetadata::CommentTopic { mentioned_topics, .. } =
+    audit.topic_metadata.get(&comment).unwrap()
+  else {
+    panic!("expected CommentTopic")
+  };
+  assert!(mentioned_topics.contains(&foo_amount));
+  assert!(mentioned_topics.contains(&foo_tmp));
+}
+
+/// Phase C — three-ref interaction with one conflict. Two non-
+/// conflicting pairs each pin one ref; the conflicted ref stays
+/// unresolved. Mirrors the doc-tree counterpart.
+#[test]
+fn phase_c_dev_doc_conflicting_pin_drops_only_the_conflicting_ref() {
+  let contract = nt(1);
+  let foo = nt(10);
+  let bar = nt(20);
+  let foo_x = nt(11);
+  let foo_y = nt(12);
+  let bar_x = nt(21);
+  let bar_z = nt(22);
+  let helper = nt(50);
+
+  let mut audit = staged_audit();
+  audit.topic_metadata.insert(
+    contract,
+    named_topic(
+      contract,
+      "C",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container {
+        container: pp("test.sol"),
+      },
+    ),
+  );
+  for (t, name, member) in [
+    (foo, "foo", None),
+    (bar, "bar", None),
+    (helper, "helper", None),
+    (foo_x, "x", Some(foo)),
+    (foo_y, "y", Some(foo)),
+    (bar_x, "x", Some(bar)),
+    (bar_z, "z", Some(bar)),
+  ] {
+    let scope = match member {
+      None => Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+      Some(m) => Scope::Member {
+        container: pp("test.sol"),
+        component: contract,
+        member: m,
+        signature_container: None,
+      },
+    };
+    let kind = if member.is_none() {
+      NamedTopicKind::Function(FunctionKind::Function)
+    } else {
+      NamedTopicKind::LocalVariable
+    };
+    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(graph_from(&[
+    (contract, foo, EdgeType::ContainsMember),
+    (foo, contract, EdgeType::ContainsMember),
+    (contract, bar, EdgeType::ContainsMember),
+    (bar, contract, EdgeType::ContainsMember),
+    (contract, helper, EdgeType::ContainsMember),
+    (helper, contract, EdgeType::ContainsMember),
+  ]));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    helper,
+    Author::DevTechnical,
+    vec![code_id("x", None), code_id("y", None), code_id("z", None)],
+  );
+  resolve_dev_doc_comments(&mut audit);
+
+  let res = comment_resolutions(&audit, comment);
+  assert_eq!(
+    res,
+    vec![
+      ("x".to_string(), None),
+      ("y".to_string(), Some(foo_y)),
+      ("z".to_string(), Some(bar_z)),
+    ]
+  );
+
+  let trace_for = |occ: u32| {
+    audit
+      .resolution_traces
+      .get(&ResolutionRefId::DevDocComment {
+        comment_topic: comment,
+        occurrence: occ,
+      })
+      .unwrap()
+      .clone()
+  };
+  assert_eq!(trace_for(0).phase_resolved, ResolutionPhase::Unresolved);
+  assert_eq!(trace_for(1).phase_resolved, ResolutionPhase::PhaseC);
+  assert_eq!(trace_for(2).phase_resolved, ResolutionPhase::PhaseC);
+  let _ = bar_x;
+  let _ = foo_x;
+}
+
+/// Phase C — does not revisit Phase B resolutions. Once Phase B
+/// resolves a ref in iter 1, Phase C must leave it alone — even when
+/// its co-location signal would also fire.
+///
+/// Setup: comment attached to foo. The graph has ONLY foo's edges into
+/// foo_amount / foo_tmp; bar is a graph island so bar_amount has zero
+/// PR. Phase B's threshold (`top/(top+0) = 1.0`) clears trivially for
+/// both refs in iter 1. Phase C would also pin them (singleton {foo}
+/// since we drop bar.tmp), but Phase B wins first and Phase C must
+/// not relabel.
+#[test]
+fn phase_c_dev_doc_does_not_revisit_phase_b_resolutions() {
+  let (mut audit, _contract, foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
+    dev_doc_co_loc_fixture();
+  audit.topic_metadata.remove(&nt(22)); // drop bar.tmp
+
+  // Replace the symmetric fixture graph with one that ONLY connects
+  // foo's locals — bar is an island. This forces Phase B to win
+  // decisively (zero PR on bar_amount → ratio = 1.0 ≥ 0.65).
+  audit.resolution_graph = Some(graph_from(&[
+    (foo, foo_amount, EdgeType::ContainsLocal),
+    (foo_amount, foo, EdgeType::ContainsLocal),
+    (foo, foo_tmp, EdgeType::ContainsLocal),
+    (foo_tmp, foo, EdgeType::ContainsLocal),
+  ]));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    foo,
+    Author::DevTechnical,
+    vec![code_id("amount", None), code_id("tmp", None)],
+  );
+  resolve_dev_doc_comments(&mut audit);
+
+  let res = comment_resolutions(&audit, comment);
+  assert_eq!(
+    res,
+    vec![
+      ("amount".to_string(), Some(foo_amount)),
+      ("tmp".to_string(), Some(foo_tmp)),
+    ],
+  );
+
+  for occ in [0u32, 1] {
+    let trace = audit
+      .resolution_traces
+      .get(&ResolutionRefId::DevDocComment {
+        comment_topic: comment,
+        occurrence: occ,
+      })
+      .unwrap();
+    assert_eq!(
+      trace.phase_resolved,
+      ResolutionPhase::PhaseB,
+      "Phase B resolutions must NOT be relabeled by Phase C: {} → {:?}",
+      trace.identifier,
+      trace.phase_resolved
+    );
+    assert_eq!(trace.iteration, 1);
+  }
+}
+
+/// Phase D — unresolved ref's trace records the iteration of the LAST
+/// attempt, not the cap. With nothing to cascade, the loop exits at
+/// iter 1 and the trace's `iteration` field is `1`.
+#[test]
+fn phase_d_dev_doc_unresolved_ref_records_iteration_of_last_attempt() {
+  let mut audit = staged_audit();
+  let func = nt(10);
+  audit.topic_metadata.insert(
+    func,
+    named_topic(
+      func,
+      "f",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Container {
+        container: pp("test.sol"),
+      },
+    ),
+  );
+  // Two candidates for "x" → ambiguous, no graph signal → unresolved.
+  for id in &[100, 200] {
+    audit.topic_metadata.insert(
+      nt(*id),
+      named_topic(nt(*id), "x", NamedTopicKind::Builtin, Scope::Global),
+    );
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(graph_from(&[]));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    func,
+    Author::DevTechnical,
+    vec![code_id("x", None)],
+  );
+  resolve_dev_doc_comments(&mut audit);
+
+  let trace = audit
+    .resolution_traces
+    .get(&ResolutionRefId::DevDocComment {
+      comment_topic: comment,
+      occurrence: 0,
+    })
+    .unwrap();
+  assert_eq!(trace.phase_resolved, ResolutionPhase::Unresolved);
+  assert_eq!(trace.iteration, 1);
+}
+
+/// Phase C — singleton intersection but multiple candidates inside the
+/// singleton scope (e.g., shadowing) → abstain. Mirrors the doc-tree
+/// counterpart and the coloc-module unit test, exercised through the
+/// dev-doc consumer's full pipeline.
+#[test]
+fn phase_c_dev_doc_abstains_when_singleton_scope_holds_multiple_candidates() {
+  // contract C { function foo() { /* two `amount`s */ } }. Phase C
+  // sees `tmp`'s candidate set {foo.tmp} and `amount`'s {foo.amount1,
+  // foo.amount2}. Intersection is {foo} (singleton) but foo holds two
+  // candidates of `amount` → ambiguous pin → abstain.
+  let contract = nt(1);
+  let foo = nt(10);
+  let amount1 = nt(11);
+  let amount2 = nt(12);
+  let foo_tmp = nt(13);
+  let helper = nt(50);
+
+  let mut audit = staged_audit();
+  audit.topic_metadata.insert(
+    contract,
+    named_topic(
+      contract,
+      "C",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container {
+        container: pp("test.sol"),
+      },
+    ),
+  );
+  audit.topic_metadata.insert(
+    foo,
+    named_topic(
+      foo,
+      "foo",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+    ),
+  );
+  audit.topic_metadata.insert(
+    helper,
+    named_topic(
+      helper,
+      "helper",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+    ),
+  );
+  for (t, name) in [(amount1, "amount"), (amount2, "amount"), (foo_tmp, "tmp")] {
+    audit.topic_metadata.insert(
+      t,
+      named_topic(
+        t,
+        name,
+        NamedTopicKind::LocalVariable,
+        Scope::Member {
+          container: pp("test.sol"),
+          component: contract,
+          member: foo,
+          signature_container: None,
+        },
+      ),
+    );
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(graph_from(&[]));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    helper,
+    Author::DevTechnical,
+    vec![code_id("amount", None), code_id("tmp", None)],
+  );
+  resolve_dev_doc_comments(&mut audit);
+
+  // Both refs stay Unresolved — Phase C abstains because foo holds
+  // two `amount` candidates.
+  for occ in [0u32, 1] {
+    let trace = audit
+      .resolution_traces
+      .get(&ResolutionRefId::DevDocComment {
+        comment_topic: comment,
+        occurrence: occ,
+      })
+      .unwrap();
+    assert_eq!(
+      trace.phase_resolved,
+      ResolutionPhase::Unresolved,
+      "Phase C must abstain on multi-candidate singleton scope: {} → {:?}",
+      trace.identifier,
+      trace.phase_resolved,
+    );
+  }
+}
+
+/// Two independent comments — each runs its own Phase D loop; one
+/// comment's resolutions do not feed another's seed vector. Verifies
+/// the per-comment isolation contract: dev-doc plans are independent
+/// during iteration even though they share the trace + resolution
+/// maps.
+#[test]
+fn phase_d_dev_doc_per_comment_isolation_during_iteration() {
+  let (mut audit, contract, _foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
+    dev_doc_co_loc_fixture();
+  audit.topic_metadata.remove(&nt(22));
+  audit.name_index = TopicNameIndex::build(&audit);
+
+  // Two helpers, each owning its own comment with the same body.
+  let helper_a = nt(50);
+  let helper_b = nt(60);
+  for h in [helper_a, helper_b] {
+    audit.topic_metadata.insert(
+      h,
+      named_topic(
+        h,
+        "helper",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component {
+          container: pp("test.sol"),
+          component: contract,
+        },
+      ),
+    );
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  // Disconnected graph — Phase B fails, Phase C must do the work for
+  // both comments independently.
+  audit.resolution_graph = Some(graph_from(&[
+    (nt(10), foo_amount, EdgeType::ContainsLocal),
+    (foo_amount, nt(10), EdgeType::ContainsLocal),
+    (nt(10), foo_tmp, EdgeType::ContainsLocal),
+    (foo_tmp, nt(10), EdgeType::ContainsLocal),
+    (nt(20), nt(21), EdgeType::ContainsLocal),
+    (nt(21), nt(20), EdgeType::ContainsLocal),
+  ]));
+
+  let comment_a = insert_dev_doc(
+    &mut audit,
+    -10,
+    helper_a,
+    Author::DevTechnical,
+    vec![code_id("amount", None), code_id("tmp", None)],
+  );
+  let comment_b = insert_dev_doc(
+    &mut audit,
+    -11,
+    helper_b,
+    Author::DevTechnical,
+    vec![code_id("amount", None), code_id("tmp", None)],
+  );
+
+  resolve_dev_doc_comments(&mut audit);
+
+  // Both comments resolved their refs to the same foo locals via
+  // Phase C, independently of each other.
+  for c in [comment_a, comment_b] {
+    let res = comment_resolutions(&audit, c);
+    assert_eq!(
+      res,
+      vec![
+        ("amount".to_string(), Some(foo_amount)),
+        ("tmp".to_string(), Some(foo_tmp)),
+      ],
+      "comment {:?} must resolve independently",
+      c,
+    );
+    for occ in [0u32, 1] {
+      let trace = audit
+        .resolution_traces
+        .get(&ResolutionRefId::DevDocComment {
+          comment_topic: c,
+          occurrence: occ,
+        })
+        .unwrap();
+      assert_eq!(trace.phase_resolved, ResolutionPhase::PhaseC);
+      assert_eq!(trace.iteration, 1);
+    }
+  }
+}
