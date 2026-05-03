@@ -41,6 +41,14 @@ pub fn analyze(
   let first_pass_source_topics =
     first_pass(&ast_map, &audit_data.in_scope_files)?;
 
+  // Persist contract inheritance from first-pass `base_contracts` before
+  // tree_shake consumes (and drops) that data. Used by the resolution-graph
+  // builder to emit `implements` edges.
+  collect_contract_inheritance(
+    &first_pass_source_topics,
+    &mut audit_data.inheritance,
+  );
+
   // Ancestry pass: collect variable ancestry and relatives relationships
   let (all_ancestors, all_relatives) = ancestry_pass(&ast_map);
 
@@ -127,6 +135,10 @@ pub fn analyze(
 pub struct FirstPassRevert {
   pub statement_node: i32,
   pub kind: RevertConstraintKind,
+  /// Node ID of the custom error referenced by `revert MyError(...)`.
+  /// `None` for `require(cond, "string")` and bare `revert("string")` —
+  /// those have no associated error declaration.
+  pub error_node: Option<i32>,
 }
 
 // ============================================================================
@@ -161,6 +173,10 @@ pub enum FirstPassDeclaration {
     reverts: Vec<FirstPassRevert>,
     function_calls: Vec<i32>,
     variable_mutations: Vec<ReferencedNode>,
+    /// Node IDs of events emitted by this function/modifier (from
+    /// `EmitStatement` AST nodes). Unsorted; sort/dedup happens in
+    /// second_pass.
+    events_emitted: Vec<i32>,
   },
   Contract {
     /// The file where this contract is defined. Used to determine if the
@@ -340,6 +356,7 @@ pub enum InScopeDeclaration {
     reverts: Vec<FirstPassRevert>,
     function_calls: Vec<i32>,
     variable_mutations: Vec<ReferencedNode>,
+    events_emitted: Vec<i32>,
   },
   Contract {
     container_file: domain::ProjectPath,
@@ -724,6 +741,7 @@ fn process_first_pass_ast_nodes(
         let mut reverts = Vec::new();
         let mut function_calls = Vec::new();
         let mut variable_mutations = Vec::new();
+        let mut events_emitted = Vec::new();
 
         // Process entire function node to find references and reverts
         collect_references_and_statements(
@@ -733,6 +751,7 @@ fn process_first_pass_ast_nodes(
           &mut reverts,
           &mut function_calls,
           &mut variable_mutations,
+          &mut events_emitted,
         );
 
         first_pass_declarations.insert(
@@ -746,6 +765,7 @@ fn process_first_pass_ast_nodes(
             reverts,
             function_calls,
             variable_mutations,
+            events_emitted,
           },
         );
 
@@ -772,6 +792,7 @@ fn process_first_pass_ast_nodes(
         let mut reverts = Vec::new();
         let mut function_calls = Vec::new();
         let mut variable_mutations = Vec::new();
+        let mut events_emitted = Vec::new();
 
         // Process entire modifier node to find references and reverts
         collect_references_and_statements(
@@ -781,6 +802,7 @@ fn process_first_pass_ast_nodes(
           &mut reverts,
           &mut function_calls,
           &mut variable_mutations,
+          &mut events_emitted,
         );
 
         // Modifiers are always internal visibility
@@ -795,6 +817,7 @@ fn process_first_pass_ast_nodes(
             reverts,
             function_calls,
             variable_mutations,
+            events_emitted,
           },
         );
 
@@ -1542,18 +1565,20 @@ fn process_second_pass_nodes(
           reverts: first_pass_reverts,
           function_calls,
           variable_mutations,
+          events_emitted: first_pass_events,
           ..
         } if transitive_topic.is_none() => {
           // Skip function properties for transitive declarations (e.g., interface
           // functions with one implementation) — they have empty bodies and their
           // implementation counterpart provides the real properties.
 
-          // Convert first-pass reverts to RevertInfo (topic + kind)
+          // Convert first-pass reverts to RevertInfo (topic + kind + error_topic)
           let reverts: Vec<domain::RevertInfo> = first_pass_reverts
             .iter()
             .map(|fp| domain::RevertInfo {
               topic: topic::new_node_topic(&fp.statement_node),
               kind: fp.kind,
+              error_topic: fp.error_node.map(|n| topic::new_node_topic(&n)),
             })
             .collect();
 
@@ -1565,6 +1590,12 @@ fn process_second_pass_nodes(
             .iter()
             .map(|ref_node| topic::new_node_topic(&ref_node.referenced_node))
             .collect();
+          let mut event_topics: Vec<topic::Topic> = first_pass_events
+            .iter()
+            .map(|&id| topic::new_node_topic(&id))
+            .collect();
+          event_topics.sort();
+          event_topics.dedup();
 
           match node {
             ASTNode::FunctionDefinition { .. } => {
@@ -1574,6 +1605,7 @@ fn process_second_pass_nodes(
                   reverts,
                   calls: call_topics,
                   mutations: mutation_topics,
+                  events_emitted: event_topics,
                 },
               );
             }
@@ -1584,6 +1616,7 @@ fn process_second_pass_nodes(
                   reverts,
                   calls: call_topics,
                   mutations: mutation_topics,
+                  events_emitted: event_topics,
                 },
               );
             }
@@ -2208,6 +2241,7 @@ fn collect_references_and_statements(
   reverts: &mut Vec<FirstPassRevert>,
   function_calls: &mut Vec<i32>,
   variable_mutations: &mut Vec<ReferencedNode>,
+  events_emitted: &mut Vec<i32>,
 ) {
   // Update current_containing_block when entering a block-like node.
   let containing_block = if node.is_containing_block() {
@@ -2274,11 +2308,14 @@ fn collect_references_and_statements(
           reverts.push(FirstPassRevert {
             statement_node: *node_id,
             kind: RevertConstraintKind::Require,
+            error_node: None,
           });
         } else if name == "revert" {
+          // Bare `revert("string")` — no custom error declaration.
           reverts.push(FirstPassRevert {
             statement_node: *node_id,
             kind: RevertConstraintKind::Revert,
+            error_node: None,
           });
         } else {
           // For other function calls, extract the function reference
@@ -2287,12 +2324,65 @@ fn collect_references_and_statements(
       }
     }
 
-    // RevertStatement
-    ASTNode::RevertStatement { node_id, .. } => {
+    // RevertStatement: `revert MyError(args)` or `revert C.MyError(args)`.
+    // The error declaration is the `referenced_declaration` of the inner
+    // FunctionCall's expression.
+    //
+    // We handle the inner FunctionCall manually instead of falling through
+    // to the generic child walk so the error identifier lands only in
+    // `reverts.error_node` — never in `function_calls`. Arguments and any
+    // return-decl references still flow through the normal recursion.
+    ASTNode::RevertStatement {
+      node_id,
+      error_call,
+      ..
+    } => {
+      let error_node = if let ASTNode::FunctionCall { expression, .. } =
+        error_call.as_ref()
+      {
+        extract_referenced_declaration(expression)
+      } else {
+        None
+      };
       reverts.push(FirstPassRevert {
         statement_node: *node_id,
         kind: RevertConstraintKind::Revert,
+        error_node,
       });
+      walk_call_skipping_callee(
+        error_call,
+        containing_block,
+        referenced_nodes,
+        reverts,
+        function_calls,
+        variable_mutations,
+        events_emitted,
+      );
+      return;
+    }
+
+    // EmitStatement: `emit SomeEvent(args)`. The event declaration is the
+    // `referenced_declaration` of the inner FunctionCall's expression.
+    //
+    // Same pattern as RevertStatement: walk the inner call manually so the
+    // event identifier lands only in `events_emitted` — never in
+    // `function_calls`.
+    ASTNode::EmitStatement { event_call, .. } => {
+      if let ASTNode::FunctionCall { expression, .. } = event_call.as_ref()
+        && let Some(event_decl) = extract_referenced_declaration(expression)
+      {
+        events_emitted.push(event_decl);
+      }
+      walk_call_skipping_callee(
+        event_call,
+        containing_block,
+        referenced_nodes,
+        reverts,
+        function_calls,
+        variable_mutations,
+        events_emitted,
+      );
+      return;
     }
 
     // Mutations - Assignments (including compound assignments like +=, -=, etc.)
@@ -2346,7 +2436,87 @@ fn collect_references_and_statements(
       reverts,
       function_calls,
       variable_mutations,
+      events_emitted,
     );
+  }
+}
+
+/// Walk an `emit Foo(...)` / `revert Bar(...)`'s inner FunctionCall
+/// like the generic visitor would, but bypass the FunctionCall arm
+/// itself — its only side effect on this path is pushing the callee
+/// into `function_calls`, which is exactly the double-bookkeeping we
+/// want to avoid. The expression is still walked recursively so the
+/// event/error identifier flows into `referenced_nodes` through the
+/// Identifier / IdentifierPath / MemberAccess arms as before.
+/// Arguments and `referenced_return_declarations` are also collected
+/// so references inside them survive.
+fn walk_call_skipping_callee(
+  call: &ASTNode,
+  containing_block: Option<i32>,
+  referenced_nodes: &mut Vec<ReferencedNode>,
+  reverts: &mut Vec<FirstPassRevert>,
+  function_calls: &mut Vec<i32>,
+  variable_mutations: &mut Vec<ReferencedNode>,
+  events_emitted: &mut Vec<i32>,
+) {
+  let ASTNode::FunctionCall {
+    expression,
+    arguments,
+    referenced_return_declarations,
+    ..
+  } = call
+  else {
+    return;
+  };
+  if let Some(block_id) = containing_block {
+    for &return_decl_id in referenced_return_declarations {
+      referenced_nodes.push(ReferencedNode {
+        statement_node: block_id,
+        referenced_node: return_decl_id,
+      });
+    }
+  }
+  collect_references_and_statements(
+    expression,
+    containing_block,
+    referenced_nodes,
+    reverts,
+    function_calls,
+    variable_mutations,
+    events_emitted,
+  );
+  for arg in arguments {
+    collect_references_and_statements(
+      arg,
+      containing_block,
+      referenced_nodes,
+      reverts,
+      function_calls,
+      variable_mutations,
+      events_emitted,
+    );
+  }
+}
+
+/// Pulls a declaration node ID out of an expression that names a
+/// declaration directly (`Identifier`, `IdentifierPath`) or via member
+/// access (`C.MyError`, `lib.SomeEvent`). Returns `None` for expressions
+/// whose declaration cannot be resolved without further context.
+fn extract_referenced_declaration(expr: &ASTNode) -> Option<i32> {
+  match expr {
+    ASTNode::Identifier {
+      referenced_declaration,
+      ..
+    }
+    | ASTNode::IdentifierPath {
+      referenced_declaration,
+      ..
+    } => Some(*referenced_declaration),
+    ASTNode::MemberAccess {
+      referenced_declaration: Some(referenced_declaration),
+      ..
+    } => Some(*referenced_declaration),
+    _ => None,
   }
 }
 
@@ -2473,6 +2643,29 @@ fn visibility_to_named_topic_visibility(
   }
 }
 
+/// Walk the first-pass declarations and write each contract's
+/// `base_contracts` into `inheritance`, sorted ascending by topic ID.
+/// Contracts with no bases are absent (sparse storage). Run before
+/// `tree_shake`, which otherwise drops `base_contracts`.
+fn collect_contract_inheritance(
+  first_pass_declarations: &BTreeMap<i32, FirstPassDeclaration>,
+  inheritance: &mut BTreeMap<topic::Topic, Vec<topic::Topic>>,
+) {
+  for (&node_id, decl) in first_pass_declarations {
+    if let FirstPassDeclaration::Contract { base_contracts, .. } = decl
+      && !base_contracts.is_empty()
+    {
+      let mut bases: Vec<topic::Topic> = base_contracts
+        .iter()
+        .map(|r| topic::new_node_topic(&r.referenced_node))
+        .collect();
+      bases.sort();
+      bases.dedup();
+      inheritance.insert(topic::new_node_topic(&node_id), bases);
+    }
+  }
+}
+
 /// Tree shake the first pass declarations to include only in-scope and used declarations.
 /// Returns a tuple of:
 /// - A map of node_id to InScopeDeclaration containing all nodes that reference each declaration
@@ -2563,6 +2756,7 @@ fn process_tree_shake_declarations(
       reverts,
       function_calls,
       variable_mutations,
+      events_emitted,
       ..
     } => {
       // Filter function calls to exclude events, errors, and modifiers
@@ -2603,6 +2797,7 @@ fn process_tree_shake_declarations(
         reverts: reverts.clone(),
         function_calls: filtered_function_calls,
         variable_mutations: variable_mutations.clone(),
+        events_emitted: events_emitted.clone(),
       }
     }
     FirstPassDeclaration::Flat {
@@ -4356,21 +4551,738 @@ mod tests {
     let revert = FirstPassRevert {
       statement_node: 100,
       kind: RevertConstraintKind::Require,
+      error_node: None,
     };
 
     assert_eq!(revert.statement_node, 100);
     assert_eq!(revert.kind, RevertConstraintKind::Require);
+    assert_eq!(revert.error_node, None);
   }
 
   #[test]
-  fn test_first_pass_revert_revert() {
+  fn test_first_pass_revert_revert_with_error() {
     let revert = FirstPassRevert {
       statement_node: 200,
       kind: RevertConstraintKind::Revert,
+      error_node: Some(42),
     };
 
     assert_eq!(revert.statement_node, 200);
     assert_eq!(revert.kind, RevertConstraintKind::Revert);
+    assert_eq!(revert.error_node, Some(42));
+  }
+
+  // =========================================================================
+  // Emit / Revert Visitor Tests
+  // =========================================================================
+
+  fn make_identifier(node_id: i32, name: &str, ref_decl: i32) -> ASTNode {
+    ASTNode::Identifier {
+      node_id,
+      src_location: dummy_src_location(),
+      name: name.to_string(),
+      overloaded_declarations: Vec::new(),
+      referenced_declaration: ref_decl,
+    }
+  }
+
+  fn make_identifier_path(node_id: i32, name: &str, ref_decl: i32) -> ASTNode {
+    ASTNode::IdentifierPath {
+      node_id,
+      src_location: dummy_src_location(),
+      name: name.to_string(),
+      name_locations: Vec::new(),
+      referenced_declaration: ref_decl,
+    }
+  }
+
+  fn make_member_access(
+    node_id: i32,
+    base: ASTNode,
+    member_name: &str,
+    ref_decl: Option<i32>,
+  ) -> ASTNode {
+    ASTNode::MemberAccess {
+      node_id,
+      src_location: dummy_src_location(),
+      expression: Box::new(base),
+      member_location: dummy_src_location(),
+      member_name: member_name.to_string(),
+      referenced_declaration: ref_decl,
+      type_descriptions: ast::TypeDescriptions {
+        type_identifier: String::new(),
+        type_string: String::new(),
+      },
+    }
+  }
+
+  fn make_function_call(node_id: i32, expression: ASTNode) -> ASTNode {
+    ASTNode::FunctionCall {
+      node_id,
+      src_location: dummy_src_location(),
+      arguments: Vec::new(),
+      expression: Box::new(expression),
+      name_locations: Vec::new(),
+      names: Vec::new(),
+      try_call: false,
+      type_descriptions: ast::TypeDescriptions {
+        type_identifier: String::new(),
+        type_string: String::new(),
+      },
+      referenced_return_declarations: Vec::new(),
+    }
+  }
+
+  fn make_function_call_with_args(
+    node_id: i32,
+    expression: ASTNode,
+    arguments: Vec<ASTNode>,
+  ) -> ASTNode {
+    ASTNode::FunctionCall {
+      node_id,
+      src_location: dummy_src_location(),
+      arguments,
+      expression: Box::new(expression),
+      name_locations: Vec::new(),
+      names: Vec::new(),
+      try_call: false,
+      type_descriptions: ast::TypeDescriptions {
+        type_identifier: String::new(),
+        type_string: String::new(),
+      },
+      referenced_return_declarations: Vec::new(),
+    }
+  }
+
+  fn make_emit(node_id: i32, expression: ASTNode) -> ASTNode {
+    ASTNode::EmitStatement {
+      node_id,
+      src_location: dummy_src_location(),
+      event_call: Box::new(make_function_call(node_id + 1, expression)),
+    }
+  }
+
+  fn make_emit_with_args(
+    node_id: i32,
+    expression: ASTNode,
+    arguments: Vec<ASTNode>,
+  ) -> ASTNode {
+    ASTNode::EmitStatement {
+      node_id,
+      src_location: dummy_src_location(),
+      event_call: Box::new(make_function_call_with_args(
+        node_id + 1,
+        expression,
+        arguments,
+      )),
+    }
+  }
+
+  fn make_revert(node_id: i32, expression: ASTNode) -> ASTNode {
+    ASTNode::RevertStatement {
+      node_id,
+      src_location: dummy_src_location(),
+      error_call: Box::new(make_function_call(node_id + 1, expression)),
+    }
+  }
+
+  fn make_revert_with_args(
+    node_id: i32,
+    expression: ASTNode,
+    arguments: Vec<ASTNode>,
+  ) -> ASTNode {
+    ASTNode::RevertStatement {
+      node_id,
+      src_location: dummy_src_location(),
+      error_call: Box::new(make_function_call_with_args(
+        node_id + 1,
+        expression,
+        arguments,
+      )),
+    }
+  }
+
+  fn make_block(node_id: i32, statements: Vec<ASTNode>) -> ASTNode {
+    ASTNode::Block {
+      node_id,
+      src_location: dummy_src_location(),
+      statements,
+    }
+  }
+
+  fn make_if(
+    node_id: i32,
+    condition: ASTNode,
+    true_body: ASTNode,
+    false_body: Option<ASTNode>,
+  ) -> ASTNode {
+    ASTNode::IfStatement {
+      node_id,
+      src_location: dummy_src_location(),
+      condition: Box::new(condition),
+      true_body: Box::new(true_body),
+      false_body: false_body.map(Box::new),
+    }
+  }
+
+  /// Collected output of `collect_references_and_statements` for tests
+  /// that need to inspect more than `reverts` + `events_emitted`.
+  struct VisitorOutput {
+    referenced_nodes: Vec<ReferencedNode>,
+    reverts: Vec<FirstPassRevert>,
+    function_calls: Vec<i32>,
+    variable_mutations: Vec<ReferencedNode>,
+    events_emitted: Vec<i32>,
+  }
+
+  fn run_visitor_full(
+    node: &ASTNode,
+    containing_block: Option<i32>,
+  ) -> VisitorOutput {
+    let mut out = VisitorOutput {
+      referenced_nodes: Vec::new(),
+      reverts: Vec::new(),
+      function_calls: Vec::new(),
+      variable_mutations: Vec::new(),
+      events_emitted: Vec::new(),
+    };
+    collect_references_and_statements(
+      node,
+      containing_block,
+      &mut out.referenced_nodes,
+      &mut out.reverts,
+      &mut out.function_calls,
+      &mut out.variable_mutations,
+      &mut out.events_emitted,
+    );
+    out
+  }
+
+  fn run_visitor(node: &ASTNode) -> (Vec<FirstPassRevert>, Vec<i32>) {
+    let out = run_visitor_full(node, None);
+    (out.reverts, out.events_emitted)
+  }
+
+  #[test]
+  fn collect_events_emitted_records_emit_statements() {
+    // emit Transfer(...) where Transfer is declared at node 42.
+    let emit = make_emit(1, make_identifier(3, "Transfer", 42));
+    let (_reverts, events) = run_visitor(&emit);
+    assert_eq!(events, vec![42]);
+  }
+
+  #[test]
+  fn collect_events_emitted_via_member_access() {
+    // emit Lib.SomeEvent(...) — event referenced through MemberAccess.
+    // The MemberAccess node carries `referenced_declaration: Some(N)`.
+    let base = make_identifier(2, "Lib", 1000);
+    let member = make_member_access(3, base, "SomeEvent", Some(77));
+    let emit = make_emit(4, member);
+    let (_reverts, events) = run_visitor(&emit);
+    assert_eq!(events, vec![77]);
+  }
+
+  #[test]
+  fn collect_events_emitted_via_identifier_path() {
+    // IdentifierPath form (qualified name in NatSpec/inheritance contexts).
+    let path = make_identifier_path(5, "OtherContract.Event", 88);
+    let emit = make_emit(6, path);
+    let (_reverts, events) = run_visitor(&emit);
+    assert_eq!(events, vec![88]);
+  }
+
+  #[test]
+  fn collect_events_emitted_via_unresolved_member_access_yields_none() {
+    // MemberAccess.referenced_declaration is None when the compiler did
+    // not resolve the call target (e.g., dynamic call). The visitor
+    // skips the emit rather than recording a bogus node ID.
+    let base = make_identifier(7, "x", 0);
+    let member = make_member_access(8, base, "Pulse", None);
+    let emit = make_emit(9, member);
+    let (_reverts, events) = run_visitor(&emit);
+    assert!(events.is_empty());
+  }
+
+  #[test]
+  fn collect_events_emitted_multiple_in_nested_blocks() {
+    // function body { emit A(); if (cond) { emit B(); } emit C(); }
+    let emit_a = make_emit(10, make_identifier(11, "A", 1));
+    let emit_b = make_emit(12, make_identifier(13, "B", 2));
+    let emit_c = make_emit(14, make_identifier(15, "C", 3));
+    let if_stmt = make_if(
+      20,
+      make_identifier(21, "cond", 99),
+      make_block(22, vec![emit_b]),
+      None,
+    );
+    let body = make_block(30, vec![emit_a, if_stmt, emit_c]);
+
+    let (_reverts, events) = run_visitor(&body);
+    // Walker visits in source order; sort/dedup happens in second_pass.
+    assert_eq!(events, vec![1, 2, 3]);
+  }
+
+  #[test]
+  fn collect_events_emitted_does_not_pollute_function_calls() {
+    // The event topic lands in `events_emitted` only — never in
+    // `function_calls`. Pre-fix, the inner FunctionCall walk would also
+    // push the event identifier into `function_calls`, leaving
+    // tree_shake to filter it out by `NamedTopicKind::Event`. We now
+    // suppress the push at the source.
+    let emit = make_emit(1, make_identifier(2, "Pinged", 5));
+    let out = run_visitor_full(&emit, None);
+    assert_eq!(out.events_emitted, vec![5]);
+    assert!(
+      out.function_calls.is_empty(),
+      "event identifier must not appear in function_calls; got {:?}",
+      out.function_calls
+    );
+  }
+
+  #[test]
+  fn collect_events_emitted_via_member_access_does_not_pollute_function_calls() {
+    // `emit Lib.Transfer(...)` already avoided the pollution pre-fix
+    // (the FunctionCall arm only pushes when expression is `Identifier`).
+    // Lock the behavior in for the MemberAccess form so a future
+    // refactor can't reintroduce it asymmetrically across the call
+    // shapes.
+    let base = make_identifier(2, "Lib", 1000);
+    let member = make_member_access(3, base, "Transfer", Some(77));
+    let emit = make_emit(4, member);
+    let out = run_visitor_full(&emit, None);
+    assert_eq!(out.events_emitted, vec![77]);
+    assert!(out.function_calls.is_empty());
+  }
+
+  #[test]
+  fn collect_revert_does_not_pollute_function_calls() {
+    // Symmetric to `collect_events_emitted_does_not_pollute_function_calls`
+    // for `revert MyError(...)`. The error topic is bookkept only in
+    // `reverts.error_node`.
+    let revert = make_revert(1, make_identifier(2, "MyError", 5));
+    let out = run_visitor_full(&revert, None);
+    assert_eq!(out.reverts.len(), 1);
+    assert_eq!(out.reverts[0].error_node, Some(5));
+    assert!(
+      out.function_calls.is_empty(),
+      "error identifier must not appear in function_calls; got {:?}",
+      out.function_calls
+    );
+  }
+
+  #[test]
+  fn collect_emit_preserves_argument_references() {
+    // The fix walks the inner FunctionCall manually instead of via the
+    // generic child walk. Make sure that rewrite still records
+    // references to argument identifiers — without them, callers of a
+    // state variable that's only read inside an emit's argument list
+    // would lose the reference edge.
+    //
+    // `containing_block = Some(1)` simulates being inside a function
+    // body's scope, so the Identifier arm pushes references
+    // (it only fires when containing_block is set).
+    let emit = make_emit_with_args(
+      2,
+      make_identifier(7, "Transfer", 42),
+      vec![
+        make_identifier(4, "from", 100),
+        make_identifier(5, "to", 200),
+        make_identifier(6, "amount", 300),
+      ],
+    );
+    let out = run_visitor_full(&emit, Some(1));
+
+    assert_eq!(out.events_emitted, vec![42]);
+    assert!(out.function_calls.is_empty());
+
+    // Every argument identifier (and the event identifier itself, via
+    // the expression walk) flowed into `referenced_nodes`.
+    let arg_refs: Vec<i32> = out
+      .referenced_nodes
+      .iter()
+      .filter(|r| r.statement_node == 1)
+      .map(|r| r.referenced_node)
+      .collect();
+    assert!(arg_refs.contains(&100), "missing `from`: {:?}", arg_refs);
+    assert!(arg_refs.contains(&200), "missing `to`: {:?}", arg_refs);
+    assert!(arg_refs.contains(&300), "missing `amount`: {:?}", arg_refs);
+    assert!(
+      arg_refs.contains(&42),
+      "event identifier should still be in referenced_nodes (only \
+       function_calls is suppressed); got {:?}",
+      arg_refs
+    );
+  }
+
+  #[test]
+  fn collect_revert_preserves_argument_references() {
+    // Same argument-walk preservation contract for `revert MyError(arg)`.
+    let revert = make_revert_with_args(
+      2,
+      make_identifier(5, "MyError", 42),
+      vec![make_identifier(4, "code", 100)],
+    );
+    let out = run_visitor_full(&revert, Some(1));
+
+    assert_eq!(out.reverts.len(), 1);
+    assert_eq!(out.reverts[0].error_node, Some(42));
+    assert!(out.function_calls.is_empty());
+
+    let arg_refs: Vec<i32> = out
+      .referenced_nodes
+      .iter()
+      .filter(|r| r.statement_node == 1)
+      .map(|r| r.referenced_node)
+      .collect();
+    assert!(arg_refs.contains(&100), "missing `code`: {:?}", arg_refs);
+    assert!(
+      arg_refs.contains(&42),
+      "error identifier should still be in referenced_nodes; got {:?}",
+      arg_refs
+    );
+  }
+
+  #[test]
+  fn collect_emit_with_nested_assignment_in_args_records_mutation() {
+    // Defensive: the helper that walks emit/revert arguments must
+    // recurse fully — not just one level — so a mutation buried inside
+    // an argument expression still lands in `variable_mutations`. This
+    // would catch a future rewrite that walked arguments shallowly.
+    let emit = make_emit_with_args(
+      2,
+      make_identifier(7, "Transfer", 42),
+      vec![ASTNode::Assignment {
+        node_id: 10,
+        src_location: dummy_src_location(),
+        left_hand_side: Box::new(make_identifier(11, "x", 99)),
+        operator: ast::AssignmentOperator::Assign,
+        right_hand_side: Box::new(make_identifier(12, "y", 100)),
+      }],
+    );
+    let out = run_visitor_full(&emit, Some(1));
+
+    assert_eq!(out.events_emitted, vec![42]);
+    assert_eq!(out.variable_mutations.len(), 1);
+    assert_eq!(out.variable_mutations[0].referenced_node, 99);
+  }
+
+  #[test]
+  fn collect_interleaved_emit_revert_and_call_keeps_buckets_separate() {
+    // function body {
+    //   emit A();          // → events_emitted only
+    //   revert B();        // → reverts only
+    //   doWork();          // → function_calls only
+    //   emit C();          // → events_emitted only
+    // }
+    // The custom EmitStatement / RevertStatement walk paths must not
+    // bleed identifiers across buckets. Locks down the contract that
+    // the new helper preserves.
+    let body = make_block(
+      1,
+      vec![
+        make_emit(10, make_identifier(11, "A", 100)),
+        make_revert(20, make_identifier(21, "B", 200)),
+        make_function_call(30, make_identifier(31, "doWork", 300)),
+        make_emit(40, make_identifier(41, "C", 400)),
+      ],
+    );
+    let out = run_visitor_full(&body, Some(1));
+
+    assert_eq!(out.events_emitted, vec![100, 400]);
+    assert_eq!(out.reverts.len(), 1);
+    assert_eq!(out.reverts[0].error_node, Some(200));
+    // Only `doWork` lands in function_calls — A, B, C are bucketed
+    // elsewhere.
+    assert_eq!(out.function_calls, vec![300]);
+  }
+
+  #[test]
+  fn collect_emit_inside_revert_arguments_still_extracts_event() {
+    // Pathological but legal-by-AST: an emit nested inside a revert's
+    // argument list. The visitor must recurse into the revert's
+    // arguments and still record the event in `events_emitted`.
+    // (Solidity rejects this at compile time, but the visitor is a
+    // pure AST walker — its contract is "walk completely," not "walk
+    // only what compiles.")
+    let revert = make_revert_with_args(
+      10,
+      make_identifier(11, "OuterError", 100),
+      vec![make_emit(20, make_identifier(21, "Inner", 200))],
+    );
+    let out = run_visitor_full(&revert, Some(1));
+
+    assert_eq!(out.events_emitted, vec![200]);
+    assert_eq!(out.reverts.len(), 1);
+    assert_eq!(out.reverts[0].error_node, Some(100));
+    assert!(out.function_calls.is_empty());
+  }
+
+  #[test]
+  fn collect_revert_with_custom_error_records_error_node() {
+    // revert MyError(...) where MyError is declared at node 99.
+    let revert = make_revert(10, make_identifier(12, "MyError", 99));
+    let (reverts, _events) = run_visitor(&revert);
+
+    assert_eq!(reverts.len(), 1);
+    assert_eq!(reverts[0].kind, RevertConstraintKind::Revert);
+    assert_eq!(reverts[0].error_node, Some(99));
+
+    // RevertInfo (the second-pass conversion) carries the error topic.
+    let revert_info = domain::RevertInfo {
+      topic: topic::new_node_topic(&reverts[0].statement_node),
+      kind: reverts[0].kind,
+      error_topic: reverts[0].error_node.map(|n| topic::new_node_topic(&n)),
+    };
+    assert_eq!(revert_info.error_topic, Some(topic::new_node_topic(&99)));
+  }
+
+  #[test]
+  fn collect_revert_via_member_access() {
+    // revert C.MyError(...) — error referenced through MemberAccess.
+    let base = make_identifier(2, "C", 100);
+    let member = make_member_access(3, base, "MyError", Some(55));
+    let revert = make_revert(4, member);
+    let (reverts, _events) = run_visitor(&revert);
+    assert_eq!(reverts.len(), 1);
+    assert_eq!(reverts[0].error_node, Some(55));
+  }
+
+  #[test]
+  fn collect_revert_via_identifier_path() {
+    let path = make_identifier_path(5, "lib.MyError", 66);
+    let revert = make_revert(6, path);
+    let (reverts, _events) = run_visitor(&revert);
+    assert_eq!(reverts.len(), 1);
+    assert_eq!(reverts[0].error_node, Some(66));
+  }
+
+  #[test]
+  fn collect_revert_unresolved_member_access_yields_no_error_topic() {
+    let base = make_identifier(7, "x", 0);
+    let member = make_member_access(8, base, "Boom", None);
+    let revert = make_revert(9, member);
+    let (reverts, _events) = run_visitor(&revert);
+    assert_eq!(reverts.len(), 1);
+    assert_eq!(reverts[0].error_node, None);
+  }
+
+  #[test]
+  fn collect_require_with_string_has_no_error_topic() {
+    // require(cond, "msg") — built-in require, no custom error.
+    let require = make_function_call(20, make_identifier(21, "require", 0));
+    let (reverts, _events) = run_visitor(&require);
+    assert_eq!(reverts.len(), 1);
+    assert_eq!(reverts[0].kind, RevertConstraintKind::Require);
+    assert_eq!(reverts[0].error_node, None);
+  }
+
+  #[test]
+  fn collect_revert_string_form_has_no_error_topic() {
+    // revert("msg") — built-in revert taking a string, no custom error.
+    let revert_call =
+      make_function_call(30, make_identifier(31, "revert", 0));
+    let (reverts, _events) = run_visitor(&revert_call);
+    assert_eq!(reverts.len(), 1);
+    assert_eq!(reverts[0].kind, RevertConstraintKind::Revert);
+    assert_eq!(reverts[0].error_node, None);
+  }
+
+  #[test]
+  fn collect_multiple_reverts_in_function_body_preserves_order() {
+    let r1 = make_revert(40, make_identifier(41, "ErrA", 100));
+    let r2 = make_revert(42, make_identifier(43, "ErrB", 200));
+    let body = make_block(50, vec![r1, r2]);
+    let (reverts, _events) = run_visitor(&body);
+    assert_eq!(reverts.len(), 2);
+    assert_eq!(reverts[0].error_node, Some(100));
+    assert_eq!(reverts[1].error_node, Some(200));
+  }
+
+  // =========================================================================
+  // Inheritance Collection Tests
+  // =========================================================================
+
+  fn test_contract(name: &str, base_node_ids: &[i32]) -> FirstPassDeclaration {
+    FirstPassDeclaration::Contract {
+      container_file: domain::ProjectPath {
+        file_path: "test.sol".to_string(),
+      },
+      is_publicly_in_scope: true,
+      declaration_kind: NamedTopicKind::Contract(domain::ContractKind::Contract),
+      visibility: Visibility::Public,
+      name: name.to_string(),
+      base_contracts: base_node_ids
+        .iter()
+        .map(|id| ReferencedNode {
+          statement_node: 0,
+          referenced_node: *id,
+        })
+        .collect(),
+      other_contracts: Vec::new(),
+      public_members: Vec::new(),
+      referenced_nodes: Vec::new(),
+    }
+  }
+
+  #[test]
+  fn collect_contract_inheritance_populates_bases_sorted() {
+    let mut decls = BTreeMap::new();
+    // contract A is C, B  — bases sorted ascending in output
+    decls.insert(1, test_contract("A", &[3, 2]));
+    decls.insert(2, test_contract("B", &[]));
+    decls.insert(3, test_contract("C", &[]));
+
+    let mut inheritance = BTreeMap::new();
+    collect_contract_inheritance(&decls, &mut inheritance);
+
+    let topic_a = topic::new_node_topic(&1);
+    let topic_b = topic::new_node_topic(&2);
+    let topic_c = topic::new_node_topic(&3);
+    assert_eq!(inheritance.get(&topic_a), Some(&vec![topic_b, topic_c]));
+    // Sparse: contracts with no bases are absent.
+    assert_eq!(inheritance.get(&topic_b), None);
+    assert_eq!(inheritance.get(&topic_c), None);
+  }
+
+  #[test]
+  fn collect_contract_inheritance_skips_non_contract_decls() {
+    let mut decls = BTreeMap::new();
+    decls.insert(
+      1,
+      FirstPassDeclaration::Flat {
+        parent_contract: None,
+        declaration_kind: NamedTopicKind::Builtin,
+        visibility: Visibility::Public,
+        name: "x".to_string(),
+      },
+    );
+
+    let mut inheritance = BTreeMap::new();
+    collect_contract_inheritance(&decls, &mut inheritance);
+
+    assert!(inheritance.is_empty());
+  }
+
+  #[test]
+  fn collect_contract_inheritance_dedups_duplicate_bases() {
+    // Defensive: if first_pass somehow records `is A, A` (e.g., due to
+    // explicit + linearized ancestor entries), the output must dedup.
+    let mut decls = BTreeMap::new();
+    decls.insert(1, test_contract("A", &[2, 2]));
+    decls.insert(2, test_contract("B", &[]));
+
+    let mut inheritance = BTreeMap::new();
+    collect_contract_inheritance(&decls, &mut inheritance);
+
+    let topic_a = topic::new_node_topic(&1);
+    let topic_b = topic::new_node_topic(&2);
+    assert_eq!(inheritance.get(&topic_a), Some(&vec![topic_b]));
+  }
+
+  #[test]
+  fn collect_contract_inheritance_handles_diamond() {
+    // Diamond: D is B, C; B is A; C is A.
+    let mut decls = BTreeMap::new();
+    decls.insert(1, test_contract("A", &[]));
+    decls.insert(2, test_contract("B", &[1]));
+    decls.insert(3, test_contract("C", &[1]));
+    decls.insert(4, test_contract("D", &[2, 3]));
+
+    let mut inheritance = BTreeMap::new();
+    collect_contract_inheritance(&decls, &mut inheritance);
+
+    let topic_a = topic::new_node_topic(&1);
+    let topic_b = topic::new_node_topic(&2);
+    let topic_c = topic::new_node_topic(&3);
+    let topic_d = topic::new_node_topic(&4);
+
+    assert_eq!(inheritance.get(&topic_a), None);
+    assert_eq!(inheritance.get(&topic_b), Some(&vec![topic_a]));
+    assert_eq!(inheritance.get(&topic_c), Some(&vec![topic_a]));
+    assert_eq!(inheritance.get(&topic_d), Some(&vec![topic_b, topic_c]));
+  }
+
+  #[test]
+  fn collect_contract_inheritance_is_deterministic() {
+    // Building the same map twice produces byte-identical results.
+    let mut decls = BTreeMap::new();
+    decls.insert(1, test_contract("Z", &[5, 3, 4]));
+    decls.insert(2, test_contract("Y", &[]));
+
+    let mut a = BTreeMap::new();
+    let mut b = BTreeMap::new();
+    collect_contract_inheritance(&decls, &mut a);
+    collect_contract_inheritance(&decls, &mut b);
+    assert_eq!(a, b);
+  }
+
+  // =========================================================================
+  // Phase 0 Integration Test
+  // =========================================================================
+  //
+  // Verifies that the second_pass conversion preserves the new fields end
+  // to end: events_emitted is sorted+deduped, and revert error_topics
+  // round-trip through the FirstPassRevert → RevertInfo conversion.
+
+  #[test]
+  fn second_pass_conversion_sorts_and_dedups_events_emitted() {
+    // Walker emits in source order; second_pass sorts ascending and dedups.
+    let body = make_block(
+      1,
+      vec![
+        make_emit(2, make_identifier(3, "C", 30)),
+        make_emit(4, make_identifier(5, "A", 10)),
+        make_emit(6, make_identifier(7, "A", 10)), // duplicate
+        make_emit(8, make_identifier(9, "B", 20)),
+      ],
+    );
+    let (_reverts, events) = run_visitor(&body);
+    assert_eq!(events, vec![30, 10, 10, 20]);
+
+    // Apply the second_pass-side normalization.
+    let mut topics: Vec<topic::Topic> =
+      events.iter().map(|&n| topic::new_node_topic(&n)).collect();
+    topics.sort();
+    topics.dedup();
+    assert_eq!(
+      topics,
+      vec![
+        topic::new_node_topic(&10),
+        topic::new_node_topic(&20),
+        topic::new_node_topic(&30),
+      ]
+    );
+  }
+
+  #[test]
+  fn second_pass_conversion_preserves_revert_error_topic() {
+    let body = make_block(
+      1,
+      vec![
+        make_revert(2, make_identifier(3, "ErrA", 100)),
+        make_function_call(4, make_identifier(5, "require", 0)),
+        make_revert(6, make_identifier(7, "ErrB", 200)),
+      ],
+    );
+    let (reverts, _events) = run_visitor(&body);
+
+    // Apply the same conversion second_pass uses.
+    let infos: Vec<domain::RevertInfo> = reverts
+      .iter()
+      .map(|fp| domain::RevertInfo {
+        topic: topic::new_node_topic(&fp.statement_node),
+        kind: fp.kind,
+        error_topic: fp.error_node.map(|n| topic::new_node_topic(&n)),
+      })
+      .collect();
+
+    assert_eq!(infos.len(), 3);
+    assert_eq!(infos[0].kind, RevertConstraintKind::Revert);
+    assert_eq!(infos[0].error_topic, Some(topic::new_node_topic(&100)));
+    assert_eq!(infos[1].kind, RevertConstraintKind::Require);
+    assert_eq!(infos[1].error_topic, None);
+    assert_eq!(infos[2].kind, RevertConstraintKind::Revert);
+    assert_eq!(infos[2].error_topic, Some(topic::new_node_topic(&200)));
   }
 
   #[test]

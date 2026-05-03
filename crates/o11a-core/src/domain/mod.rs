@@ -193,10 +193,18 @@ pub struct ContainingBlockLayer {
 // ============================================================================
 
 /// Simple revert/require statement info stored on FunctionModProperties.
+///
+/// `error_topic` exposes the custom-error declaration referenced by
+/// `revert MyError(...)` so downstream consumers (e.g. the
+/// resolution-graph extractor's `error-thrown` edges) can recover it
+/// without re-walking the AST. `None` for `require(cond, "string")` and
+/// bare `revert("string")` — those have no associated error declaration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevertInfo {
   pub topic: topic::Topic,
   pub kind: RevertConstraintKind,
+  #[serde(default)]
+  pub error_topic: Option<topic::Topic>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -457,6 +465,17 @@ pub struct AuditData {
   /// Doc-sourced references are not stored here; they live as a static field
   /// (`doc_references`) on the referenced NamedTopic/FeatureTopic metadata.
   pub mentions_index: HashMap<topic::Topic, Vec<topic::Topic>>,
+  /// Contract inheritance edges: contract topic → its base contracts/
+  /// interfaces. Sparse — contracts with no bases are absent. Each
+  /// `Vec<Topic>` is sorted ascending. Populated between first_pass and
+  /// tree_shake from `FirstPassDeclaration::Contract::base_contracts`,
+  /// which is otherwise dropped after tree-shaking.
+  pub inheritance: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Typed weighted graph used by the personalized-PageRank resolver for
+  /// ambiguous code references. Populated by
+  /// `o11a_core::resolution_graph::build` at audit-load time, after every
+  /// language analyzer completes. `None` until that step has run.
+  pub resolution_graph: Option<crate::resolution_graph::ResolutionGraph>,
 }
 
 /// Common short English words that should not match as simple topic names.
@@ -496,6 +515,11 @@ fn is_common_word(name: &str) -> bool {
 pub struct TopicNameIndex {
   by_qualified_name: HashMap<String, topic::Topic>,
   by_simple_name: HashMap<String, topic::Topic>,
+  /// Pre-dedup candidates per simple name: every NamedTopic whose simple
+  /// name matches, regardless of how many candidates exist. Sorted
+  /// ascending by topic ID. Used by the personalized-PageRank resolver
+  /// for ambiguous code references.
+  by_simple_name_candidates: BTreeMap<String, Vec<topic::Topic>>,
 }
 
 impl TopicNameIndex {
@@ -503,6 +527,7 @@ impl TopicNameIndex {
     TopicNameIndex {
       by_qualified_name: HashMap::new(),
       by_simple_name: HashMap::new(),
+      by_simple_name_candidates: BTreeMap::new(),
     }
   }
 
@@ -527,6 +552,16 @@ impl TopicNameIndex {
         }
       }
     }
+
+    let by_simple_name_candidates: BTreeMap<String, Vec<topic::Topic>> =
+      simple_name_candidates
+        .iter()
+        .map(|(name, topics)| {
+          let mut sorted = topics.clone();
+          sorted.sort();
+          (name.clone(), sorted)
+        })
+        .collect();
 
     let by_simple_name = simple_name_candidates
       .into_iter()
@@ -559,6 +594,7 @@ impl TopicNameIndex {
     TopicNameIndex {
       by_qualified_name,
       by_simple_name,
+      by_simple_name_candidates,
     }
   }
 
@@ -568,6 +604,17 @@ impl TopicNameIndex {
 
   pub fn get_by_simple_name(&self, name: &str) -> Option<&topic::Topic> {
     self.by_simple_name.get(name)
+  }
+
+  /// Every NamedTopic whose simple name matches, regardless of how many
+  /// candidates share the name. Returns an empty slice when the name is
+  /// unknown. Sorted ascending by topic ID.
+  pub fn candidates_by_simple_name(&self, name: &str) -> &[topic::Topic] {
+    self
+      .by_simple_name_candidates
+      .get(name)
+      .map(|v| v.as_slice())
+      .unwrap_or(&[])
   }
 
   pub fn qualified_names(&self) -> Vec<&str> {
@@ -1911,11 +1958,19 @@ pub enum FunctionModProperties {
     reverts: Vec<RevertInfo>,
     calls: Vec<topic::Topic>,
     mutations: Vec<topic::Topic>,
+    /// Events this function emits, sorted ascending by topic ID and
+    /// deduped. Populated by the first-pass `EmitStatement` walker.
+    #[serde(default)]
+    events_emitted: Vec<topic::Topic>,
   },
   ModifierProperties {
     reverts: Vec<RevertInfo>,
     calls: Vec<topic::Topic>,
     mutations: Vec<topic::Topic>,
+    /// Events this modifier emits, sorted ascending by topic ID and
+    /// deduped. Populated by the first-pass `EmitStatement` walker.
+    #[serde(default)]
+    events_emitted: Vec<topic::Topic>,
   },
 }
 
@@ -2741,6 +2796,8 @@ pub fn new_audit_data(
     feature_requirement_links: BTreeMap::new(),
     feature_behavior_links: BTreeMap::new(),
     mentions_index: HashMap::new(),
+    inheritance: BTreeMap::new(),
+    resolution_graph: None,
   }
 }
 
@@ -2853,5 +2910,177 @@ mod tests {
     let result = new_project_path(&file_path, &project_root);
 
     assert_eq!(result.file_path, "src/contracts/my.sol");
+  }
+
+  fn test_named_topic(t: topic::Topic, name: &str) -> TopicMetadata {
+    TopicMetadata::NamedTopic {
+      topic: t,
+      scope: Scope::Global,
+      kind: NamedTopicKind::Builtin,
+      visibility: NamedTopicVisibility::Public,
+      name: name.to_string(),
+      is_mutable: false,
+      mutations: Vec::new(),
+      ancestors: Vec::new(),
+      descendants: Vec::new(),
+      relatives: Vec::new(),
+      transitive_topic: None,
+      doc_references: Vec::new(),
+    }
+  }
+
+  #[test]
+  fn candidates_by_simple_name_returns_all_pre_dedup() {
+    let mut audit = new_audit_data(
+      "test".to_string(),
+      HashSet::new(),
+      None,
+    );
+    let t1 = topic::new_node_topic(&100);
+    let t2 = topic::new_node_topic(&200);
+    audit.topic_metadata.insert(t1, test_named_topic(t1, "shared"));
+    audit.topic_metadata.insert(t2, test_named_topic(t2, "shared"));
+
+    let index = TopicNameIndex::build(&audit);
+
+    // Both candidates returned, sorted ascending by topic ID.
+    assert_eq!(index.candidates_by_simple_name("shared"), &[t1, t2]);
+    // Two non-transitive collisions → dedup yields no unique winner.
+    assert_eq!(index.get_by_simple_name("shared"), None);
+    // Unknown name → empty slice.
+    assert_eq!(index.candidates_by_simple_name("missing"), &[]);
+  }
+
+  #[test]
+  fn candidates_by_simple_name_excludes_common_words() {
+    let mut audit = new_audit_data(
+      "test".to_string(),
+      HashSet::new(),
+      None,
+    );
+    let t1 = topic::new_node_topic(&1);
+    audit.topic_metadata.insert(t1, test_named_topic(t1, "for"));
+
+    let index = TopicNameIndex::build(&audit);
+
+    // "for" is filtered as a common English word.
+    assert_eq!(index.candidates_by_simple_name("for"), &[]);
+    assert_eq!(index.get_by_simple_name("for"), None);
+  }
+
+  #[test]
+  fn candidates_by_simple_name_single_unique_candidate() {
+    let mut audit = new_audit_data(
+      "test".to_string(),
+      HashSet::new(),
+      None,
+    );
+    let t1 = topic::new_node_topic(&7);
+    audit.topic_metadata.insert(t1, test_named_topic(t1, "Solo"));
+
+    let index = TopicNameIndex::build(&audit);
+
+    // Single candidate: candidate list contains it AND get_by_simple_name
+    // resolves it.
+    assert_eq!(index.candidates_by_simple_name("Solo"), &[t1]);
+    assert_eq!(index.get_by_simple_name("Solo"), Some(&t1));
+  }
+
+  #[test]
+  fn candidates_by_simple_name_sorted_with_negative_node_ids() {
+    let mut audit = new_audit_data(
+      "test".to_string(),
+      HashSet::new(),
+      None,
+    );
+    // Node topics are signed; negative IDs (built-ins) must sort below
+    // positive IDs.
+    let t_neg = topic::new_node_topic(&-50);
+    let t_pos = topic::new_node_topic(&50);
+    audit.topic_metadata.insert(t_neg, test_named_topic(t_neg, "Mixed"));
+    audit.topic_metadata.insert(t_pos, test_named_topic(t_pos, "Mixed"));
+
+    let index = TopicNameIndex::build(&audit);
+
+    assert_eq!(index.candidates_by_simple_name("Mixed"), &[t_neg, t_pos]);
+  }
+
+  #[test]
+  fn candidates_by_simple_name_returns_disjoint_names_independently() {
+    let mut audit = new_audit_data(
+      "test".to_string(),
+      HashSet::new(),
+      None,
+    );
+    let t1 = topic::new_node_topic(&1);
+    let t2 = topic::new_node_topic(&2);
+    let t3 = topic::new_node_topic(&3);
+    audit.topic_metadata.insert(t1, test_named_topic(t1, "Alpha"));
+    audit.topic_metadata.insert(t2, test_named_topic(t2, "Beta"));
+    audit.topic_metadata.insert(t3, test_named_topic(t3, "Beta"));
+
+    let index = TopicNameIndex::build(&audit);
+
+    assert_eq!(index.candidates_by_simple_name("Alpha"), &[t1]);
+    assert_eq!(index.candidates_by_simple_name("Beta"), &[t2, t3]);
+  }
+
+  #[test]
+  fn revert_info_with_error_topic_round_trips_through_serde() {
+    let info = RevertInfo {
+      topic: topic::new_node_topic(&10),
+      kind: RevertConstraintKind::Revert,
+      error_topic: Some(topic::new_node_topic(&42)),
+    };
+    let json = serde_json::to_string(&info).unwrap();
+    let back: RevertInfo = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.topic, info.topic);
+    assert_eq!(back.kind, info.kind);
+    assert_eq!(back.error_topic, info.error_topic);
+  }
+
+  #[test]
+  fn revert_info_without_error_topic_deserializes_legacy_payload() {
+    // Payloads written before `error_topic` was added must still
+    // deserialize, with `error_topic = None`.
+    let legacy = r#"{"topic":"N5","kind":"Require"}"#;
+    let info: RevertInfo = serde_json::from_str(legacy).unwrap();
+    assert_eq!(info.topic, topic::new_node_topic(&5));
+    assert_eq!(info.kind, RevertConstraintKind::Require);
+    assert_eq!(info.error_topic, None);
+  }
+
+  #[test]
+  fn function_mod_properties_events_emitted_deserializes_legacy_payload() {
+    // Payloads written before `events_emitted` was added must still
+    // deserialize, with `events_emitted = []`. Tested for both
+    // variants since they gained the field together — a serde-default
+    // regression on either is symmetric tech debt.
+    let legacy_function = r#"{"FunctionProperties":{"reverts":[],"calls":[],"mutations":[]}}"#;
+    match serde_json::from_str::<FunctionModProperties>(legacy_function).unwrap() {
+      FunctionModProperties::FunctionProperties { events_emitted, .. } => {
+        assert!(events_emitted.is_empty());
+      }
+      _ => panic!("expected FunctionProperties"),
+    }
+
+    let legacy_modifier = r#"{"ModifierProperties":{"reverts":[],"calls":[],"mutations":[]}}"#;
+    match serde_json::from_str::<FunctionModProperties>(legacy_modifier).unwrap() {
+      FunctionModProperties::ModifierProperties { events_emitted, .. } => {
+        assert!(events_emitted.is_empty());
+      }
+      _ => panic!("expected ModifierProperties"),
+    }
+  }
+
+  #[test]
+  fn audit_data_phase0_fields_default_empty() {
+    let audit = new_audit_data(
+      "test".to_string(),
+      HashSet::new(),
+      None,
+    );
+    assert!(audit.inheritance.is_empty());
+    assert!(audit.resolution_graph.is_none());
   }
 }

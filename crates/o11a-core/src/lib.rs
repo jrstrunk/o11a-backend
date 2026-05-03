@@ -8,5 +8,6 @@ pub mod domain;
 pub mod feature_lookup;
 pub mod ids;
 pub mod report;
+pub mod resolution_graph;
 pub mod solidity;
 pub mod state;
