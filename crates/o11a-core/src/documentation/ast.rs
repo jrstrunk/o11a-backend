@@ -87,6 +87,13 @@ pub enum DocumentationNode {
     referenced_topic: Option<topic::Topic>,
     kind: Option<domain::NamedTopicKind>,
     referenced_name: Option<String>,
+    /// Phase E fallback list — the full simple-name candidate set when
+    /// neither Phase A (name index) nor Phase B/C/D (graph scoring)
+    /// resolved the reference. Empty in every other case, including
+    /// for resolved references and during the rollout phases that
+    /// introduce graph-driven resolution.
+    #[serde(default)]
+    referenced_topic_candidates: Vec<topic::Topic>,
   },
 
   CodeText {
@@ -408,5 +415,63 @@ impl DocumentationNode {
       }
       _ => self,
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn code_identifier_deserializes_legacy_payload_without_candidates_field() {
+    // Phase 5 added `referenced_topic_candidates` behind
+    // `#[serde(default)]`. Doc-tree payloads written before the field
+    // existed must still load — this is the on-disk compatibility
+    // contract for the upgrade.
+    let legacy = r#"{
+      "CodeIdentifier": {
+        "node_id": 7,
+        "value": "transfer",
+        "referenced_topic": null,
+        "kind": null,
+        "referenced_name": null
+      }
+    }"#;
+    let node: DocumentationNode = serde_json::from_str(legacy)
+      .expect("legacy doc-tree CodeIdentifier must still deserialize");
+    match node {
+      DocumentationNode::CodeIdentifier {
+        node_id,
+        value,
+        referenced_topic_candidates,
+        ..
+      } => {
+        assert_eq!(node_id, 7);
+        assert_eq!(value, "transfer");
+        assert!(
+          referenced_topic_candidates.is_empty(),
+          "missing field must default to []"
+        );
+      }
+      other => panic!("expected CodeIdentifier, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn code_identifier_round_trips_candidates_through_serde() {
+    let original = DocumentationNode::CodeIdentifier {
+      node_id: 42,
+      value: "ambiguous".to_string(),
+      referenced_topic: None,
+      kind: None,
+      referenced_name: None,
+      referenced_topic_candidates: vec![
+        topic::new_node_topic(&3),
+        topic::new_node_topic(&4),
+      ],
+    };
+    let bytes = serde_json::to_vec(&original).unwrap();
+    let decoded: DocumentationNode = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(original, decoded);
   }
 }

@@ -25,6 +25,13 @@ pub enum CommentNode {
     referenced_topic: Option<Topic>,
     kind: Option<domain::NamedTopicKind>,
     referenced_name: Option<String>,
+    /// Phase E fallback list — the full simple-name candidate set when
+    /// neither Phase A (name index) nor Phase B/C/D (graph scoring)
+    /// resolved the reference. Empty in every other case, including
+    /// for resolved references and during the rollout phases that
+    /// introduce graph-driven resolution.
+    #[serde(default)]
+    referenced_topic_candidates: Vec<Topic>,
   },
   CodeText {
     value: String,
@@ -327,6 +334,7 @@ fn tokenize_comment_code(
           referenced_topic,
           kind,
           referenced_name,
+          referenced_topic_candidates: Vec::new(),
         });
       }
       continue;
@@ -364,5 +372,103 @@ fn node_to_plain_text(node: &CommentNode) -> String {
     CommentNode::Emphasis { text } => format!("*{}*", text),
     CommentNode::Strong { text } => format!("**{}**", text),
     CommentNode::Link { text, url } => format!("[{}]({})", text, url),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::domain::new_audit_data;
+  use std::collections::HashSet;
+
+  fn find_code_ident(nodes: &[CommentNode]) -> &CommentNode {
+    for n in nodes {
+      match n {
+        CommentNode::CodeIdentifier { .. } => return n,
+        CommentNode::InlineCode { children, .. } => {
+          for c in children {
+            if let CommentNode::CodeIdentifier { .. } = c {
+              return c;
+            }
+          }
+        }
+        _ => {}
+      }
+    }
+    panic!("no CodeIdentifier found in: {:?}", nodes)
+  }
+
+  #[test]
+  fn parse_comment_initializes_candidates_to_empty_vec() {
+    // The Phase E fallback writes into `referenced_topic_candidates`;
+    // every other code path must leave it empty so that an empty list
+    // is an unambiguous "no fallback recorded" signal for downstream
+    // consumers.
+    let audit = new_audit_data("t".to_string(), HashSet::new(), None);
+    let (_, nodes) = parse_comment("see `someUnknownIdent` here", &audit);
+    let CommentNode::CodeIdentifier {
+      referenced_topic_candidates,
+      ..
+    } = find_code_ident(&nodes)
+    else {
+      unreachable!()
+    };
+    assert!(
+      referenced_topic_candidates.is_empty(),
+      "Phase 5 must initialize candidates to []; got {:?}",
+      referenced_topic_candidates
+    );
+  }
+
+  #[test]
+  fn code_identifier_deserializes_legacy_payload_without_candidates_field() {
+    // Audits persisted before Phase 5 lack
+    // `referenced_topic_candidates`. The `#[serde(default)]`
+    // attribute on the new field guarantees that loading an old
+    // database does not break — verified here by constructing JSON
+    // exactly as the pre-Phase-5 serializer would have written it.
+    let legacy = r#"{
+      "CodeIdentifier": {
+        "value": "foo",
+        "referenced_topic": null,
+        "kind": null,
+        "referenced_name": null
+      }
+    }"#;
+    let node: CommentNode = serde_json::from_str(legacy)
+      .expect("legacy CodeIdentifier payload must still deserialize");
+    match node {
+      CommentNode::CodeIdentifier {
+        value,
+        referenced_topic_candidates,
+        ..
+      } => {
+        assert_eq!(value, "foo");
+        assert!(
+          referenced_topic_candidates.is_empty(),
+          "missing field must default to []"
+        );
+      }
+      other => panic!("expected CodeIdentifier, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn code_identifier_round_trips_candidates_through_serde() {
+    // Sanity check that once the Phase E fallback writes populated
+    // candidates, they survive a JSON round trip.
+    let original = CommentNode::CodeIdentifier {
+      value: "ambiguous".to_string(),
+      referenced_topic: None,
+      kind: None,
+      referenced_name: None,
+      referenced_topic_candidates: vec![
+        crate::domain::topic::new_node_topic(&1),
+        crate::domain::topic::new_node_topic(&2),
+      ],
+    };
+    let bytes = serde_json::to_vec(&original).unwrap();
+    let decoded: CommentNode = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(original, decoded);
   }
 }

@@ -317,6 +317,7 @@ mod tests {
         referenced_topic: None,
         kind: None,
         referenced_name: None,
+        referenced_topic_candidates: Vec::new(),
       }],
     };
     let mut out = String::new();

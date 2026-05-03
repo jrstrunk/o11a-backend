@@ -1,7 +1,8 @@
 //! End-to-end entry point for the o11a-analyze binary's analysis
 //! workflow: parse the Solidity project's solc output, run the Solidity
-//! analyzer, build the per-audit resolution graph, then run the
-//! documentation analyzer. Populates the shared `DataContext` in place.
+//! analyzer, build the per-audit resolution graph, inject synthetic
+//! developer-documentation comments, then run the documentation
+//! analyzer. Populates the shared `DataContext` in place.
 
 use crate::documentation;
 use crate::solidity;
@@ -79,6 +80,16 @@ pub fn run_analysis(
   // the only one that satisfies both constraints.
   populate_resolution_graph(data_context, audit_id)?;
 
+  tracing::info!("Injecting developer documentation...");
+
+  // Synthetic dev-doc CommentTopics (NatSpec docstrings, inline comments
+  // on SemanticBlocks, etc.) must exist before the documentation analyzer
+  // runs because downstream consumers of the doc tree expect to find
+  // them in `comment_index`. They build *after* the resolution graph so
+  // that the future graph-driven dev-doc resolution pass (Phase 7) has
+  // a populated graph to score against.
+  inject_developer_documentation(data_context, audit_id)?;
+
   tracing::info!("Analyzing documentation files...");
 
   // Analyze documentation and augment AuditData
@@ -120,14 +131,37 @@ pub fn populate_resolution_graph(
   Ok(())
 }
 
+/// Inject synthetic dev-doc CommentTopics (NatSpec, inline source
+/// comments) into the in-memory audit. Sits between the resolution-graph
+/// build and the documentation analyzer so the graph is populated when
+/// future passes resolve code references inside dev-doc text.
+///
+/// Wraps `solidity::analyzer::inject_developer_documentation` with the
+/// same `Arc<Mutex<DataContext>>` locking discipline the other pipeline
+/// stages use.
+pub fn inject_developer_documentation(
+  data_context: &Arc<Mutex<DataContext>>,
+  audit_id: &str,
+) -> Result<(), AnalysisError> {
+  let mut ctx = data_context
+    .lock()
+    .map_err(|e| AnalysisError::LockPoisoned(e.to_string()))?;
+  let audit_data = ctx
+    .get_audit_mut(audit_id)
+    .ok_or_else(|| AnalysisError::AuditMissing(audit_id.to_string()))?;
+  solidity::analyzer::inject_developer_documentation(audit_data);
+  Ok(())
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+  use o11a_core::collaborator::models::Author;
   use o11a_core::domain::{
-    self, AST, NamedTopicKind, NamedTopicVisibility, ProjectPath, Scope,
-    TopicMetadata, topic,
+    self, AST, CommentType, NamedTopicKind, NamedTopicVisibility, Node,
+    ProjectPath, Scope, TopicMetadata, UnnamedTopicKind, topic,
   };
-  use o11a_core::solidity::ast::SolidityAST;
+  use o11a_core::solidity::ast::{ASTNode, SolidityAST, SourceLocation};
   use std::collections::HashSet;
   use std::path::PathBuf;
   use std::sync::atomic::{AtomicU64, Ordering};
@@ -434,5 +468,201 @@ mod tests {
       AnalysisError::AuditExists(id) => assert_eq!(id, "audit-1"),
       other => panic!("expected AuditExists, got {:?}", other),
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // inject_developer_documentation wrapper (Phase 5)
+  //
+  // The dev-doc injection pass moved out of `solidity::analyzer::analyze`
+  // and is now driven by `analysis.rs` after the resolution graph build
+  // (see `run_analysis`). The wrapper here exposes the same lock /
+  // missing-audit error surface as `populate_resolution_graph`.
+  // -----------------------------------------------------------------------
+
+  fn dummy_src_location() -> SourceLocation {
+    SourceLocation {
+      start: None,
+      length: None,
+      index: None,
+    }
+  }
+
+  /// A `DataContext` with one audit pre-staged to look like the
+  /// post-Solidity-analyzer state for dev-doc injection: one
+  /// SemanticBlock node with non-empty `documentation`, plus the
+  /// matching `topic_metadata` entry needed for the
+  /// `resolve_transitive_topic` lookup that injection performs.
+  fn staged_doc_context(audit_id: &str) -> Arc<Mutex<DataContext>> {
+    let mut ctx = domain::new_data_context();
+    assert!(ctx.create_audit(
+      audit_id.to_string(),
+      "dev-doc-staged".to_string(),
+      HashSet::new(),
+      None,
+    ));
+    let audit = ctx.get_audit_mut(audit_id).unwrap();
+
+    let block_id = 500;
+    let block_topic = topic::new_node_topic(&block_id);
+    let block_node = ASTNode::SemanticBlock {
+      node_id: block_id,
+      src_location: dummy_src_location(),
+      documentation: Some("inline block doc".to_string()),
+      statements: Vec::new(),
+    };
+    audit
+      .nodes
+      .insert(block_topic, Node::Solidity(block_node));
+    audit.topic_metadata.insert(
+      block_topic,
+      TopicMetadata::UnnamedTopic {
+        topic: block_topic,
+        scope: Scope::Global,
+        kind: UnnamedTopicKind::SemanticBlock,
+        transitive_topic: None,
+      },
+    );
+
+    Arc::new(Mutex::new(ctx))
+  }
+
+  /// Returns the count of synthetic dev-doc CommentTopics across the
+  /// audit, partitioned by author so callers can assert injection
+  /// behavior without re-implementing the walk.
+  fn dev_doc_counts(
+    ctx: &Arc<Mutex<DataContext>>,
+    audit_id: &str,
+  ) -> (usize, usize) {
+    let guard = ctx.lock().unwrap();
+    let audit = guard.get_audit(audit_id).unwrap();
+    let mut technical = 0usize;
+    let mut documentation = 0usize;
+    for meta in audit.topic_metadata.values() {
+      if let TopicMetadata::CommentTopic { author, .. } = meta {
+        match author {
+          Author::DevTechnical => technical += 1,
+          Author::DevDocumentation => documentation += 1,
+          _ => {}
+        }
+      }
+    }
+    (technical, documentation)
+  }
+
+  #[test]
+  fn inject_dev_docs_produces_dev_technical_comment_for_semantic_block() {
+    // Validates the wrapper actually drives
+    // `solidity::analyzer::inject_developer_documentation` and that
+    // SemanticBlock documentation surfaces as a `DevTechnical` comment
+    // — the exact behavior `solidity::analyzer::analyze` used to
+    // perform inline before Phase 5.
+    let ctx = staged_doc_context("a");
+    inject_developer_documentation(&ctx, "a").unwrap();
+
+    let (technical, documentation) = dev_doc_counts(&ctx, "a");
+    assert_eq!(technical, 1, "expected one DevTechnical synthetic comment");
+    assert_eq!(documentation, 0);
+  }
+
+  #[test]
+  fn inject_dev_docs_returns_audit_missing_for_unknown_id() {
+    let ctx = Arc::new(Mutex::new(domain::new_data_context()));
+    let err = inject_developer_documentation(&ctx, "nope").unwrap_err();
+    match err {
+      AnalysisError::AuditMissing(id) => assert_eq!(id, "nope"),
+      other => panic!("expected AuditMissing, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn inject_dev_docs_releases_lock_before_returning() {
+    // If the wrapper still held the lock when it returned, this
+    // re-acquire would deadlock the test thread.
+    let ctx = staged_doc_context("a");
+    inject_developer_documentation(&ctx, "a").unwrap();
+    let _guard = ctx.lock().unwrap();
+  }
+
+  #[test]
+  fn inject_dev_docs_only_touches_the_named_audit() {
+    let ctx = staged_doc_context("a");
+    {
+      let mut guard = ctx.lock().unwrap();
+      assert!(guard.create_audit(
+        "b".to_string(),
+        "second-audit".to_string(),
+        HashSet::new(),
+        None,
+      ));
+    }
+
+    inject_developer_documentation(&ctx, "a").unwrap();
+
+    let (a_tech, _) = dev_doc_counts(&ctx, "a");
+    let (b_tech, b_doc) = dev_doc_counts(&ctx, "b");
+    assert_eq!(a_tech, 1);
+    assert_eq!(b_tech, 0, "audit 'b' must not gain comments");
+    assert_eq!(b_doc, 0);
+  }
+
+  #[test]
+  fn inject_dev_docs_is_deterministic_across_repeat_pipelines() {
+    // Pipeline determinism contract: building the audit twice via the
+    // exact stage order `run_analysis` uses (graph build → dev-doc
+    // injection) must produce byte-identical comment-index entries.
+    fn run_pipeline(audit_id: &str) -> Vec<(topic::Topic, CommentType)> {
+      let ctx = staged_doc_context(audit_id);
+      populate_resolution_graph(&ctx, audit_id).unwrap();
+      inject_developer_documentation(&ctx, audit_id).unwrap();
+      let guard = ctx.lock().unwrap();
+      let audit = guard.get_audit(audit_id).unwrap();
+      let mut out: Vec<(topic::Topic, CommentType)> = audit
+        .topic_metadata
+        .values()
+        .filter_map(|m| match m {
+          TopicMetadata::CommentTopic {
+            target_topic,
+            comment_type,
+            ..
+          } => Some((*target_topic, comment_type.clone())),
+          _ => None,
+        })
+        .collect();
+      out.sort_by_key(|(t, _)| *t);
+      out
+    }
+    let first = run_pipeline("det-a");
+    let second = run_pipeline("det-b");
+    assert_eq!(first, second);
+  }
+
+  #[test]
+  fn run_analysis_drives_both_graph_build_and_dev_doc_injection() {
+    // End-to-end smoke test that `run_analysis` reaches the dev-doc
+    // injection stage — i.e. neither the relocated call nor the new
+    // `inject_developer_documentation` wrapper got dropped from the
+    // pipeline. The minimal fixture has no source, so injection
+    // produces no comments; the assertion is therefore "the graph is
+    // populated and `run_analysis` returned Ok", not "X happened
+    // before Y". Stage ordering is enforced by the code structure of
+    // `run_analysis` (read top-to-bottom) and only becomes runtime-
+    // observable once Phase 7 makes injection depend on graph state.
+    let project = TempProject::new("ordering-test");
+    let data_context = Arc::new(Mutex::new(domain::new_data_context()));
+
+    run_analysis(&project.root, "audit-1", &data_context).unwrap();
+
+    let guard = data_context.lock().unwrap();
+    let audit = guard.get_audit("audit-1").expect("audit created");
+    assert!(
+      audit.resolution_graph.is_some(),
+      "graph must be populated by the time run_analysis returns",
+    );
+    let count = audit
+      .topic_metadata
+      .values()
+      .filter(|m| matches!(m, TopicMetadata::CommentTopic { .. }))
+      .count();
+    assert_eq!(count, 0, "minimal fixture has no source; no comments");
   }
 }

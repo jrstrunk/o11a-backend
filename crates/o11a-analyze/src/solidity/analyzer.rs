@@ -112,14 +112,12 @@ pub fn analyze(
   // documentation analyzer (which resolves inline code tokens).
   audit_data.name_index = domain::TopicNameIndex::build(audit_data);
 
-  // Inject developer documentation from source code as synthetic in-memory
-  // CommentTopics. Inline comments on SemanticBlocks become DevTechnical
-  // comments. NatSpec docstrings on contracts/functions/modifiers are parsed
-  // into @notice (DevDocumentation), @dev (DevTechnical), @param
-  // (DevDocumentation on the parameter), and @return (DevDocumentation on
-  // the return parameter). They are rebuilt from source on every load —
-  // never persisted to the comment database.
-  inject_developer_documentation(audit_data);
+  // Dev-doc injection (`inject_developer_documentation`) is intentionally
+  // *not* called from here. The analysis pipeline orchestrator
+  // (`o11a_analyze::analysis::run_analysis`) drives it after the
+  // resolution graph has been built so that future graph-driven
+  // resolution passes (Phase 7) have a graph available when they parse
+  // synthetic dev-doc comments.
 
   Ok(())
 }
@@ -3989,7 +3987,10 @@ struct ResolvedDoc {
 /// Walk all in-memory nodes to find developer documentation and create
 /// synthetic CommentTopics for each. Runs after the name_index is built so
 /// that code references in the developer's prose can be resolved.
-fn inject_developer_documentation(audit_data: &mut AuditData) {
+///
+/// Public so the top-level analysis pipeline can sequence it after the
+/// resolution-graph build but before the documentation analyzer.
+pub fn inject_developer_documentation(audit_data: &mut AuditData) {
   // ── Phase 1: Collect raw documentation ──────────────────────────────────
 
   let mut semantic_block_docs: Vec<(topic::Topic, String)> = Vec::new();

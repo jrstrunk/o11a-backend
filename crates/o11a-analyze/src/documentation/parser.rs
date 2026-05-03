@@ -103,6 +103,7 @@ fn tokenize_code(
           referenced_topic,
           kind,
           referenced_name,
+          referenced_topic_candidates: Vec::new(),
         });
       }
       continue;
@@ -1028,5 +1029,78 @@ fn node_to_stub(node: DocumentationNode) -> DocumentationNode {
   DocumentationNode::Stub {
     node_id: node.node_id(),
     topic: topic::new_documentation_topic(node.node_id()),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use o11a_core::domain::new_audit_data;
+  use std::collections::HashSet;
+
+  /// Recursively descend into a DocumentationNode tree and return the
+  /// first `CodeIdentifier` we find. Used by the field-default
+  /// regression test below; the parser places identifiers under
+  /// nested Section/Paragraph/Sentence nodes that change shape every
+  /// time the markdown grammar shifts, so we walk instead of
+  /// pattern-matching on a specific path.
+  fn first_code_identifier(node: &DocumentationNode) -> &DocumentationNode {
+    if let DocumentationNode::CodeIdentifier { .. } = node {
+      return node;
+    }
+    for child in node.children() {
+      if let Some(ci) = walk_for_code_identifier(child) {
+        return ci;
+      }
+    }
+    panic!("no CodeIdentifier in tree: {:#?}", node)
+  }
+
+  fn walk_for_code_identifier(
+    node: &DocumentationNode,
+  ) -> Option<&DocumentationNode> {
+    if let DocumentationNode::CodeIdentifier { .. } = node {
+      return Some(node);
+    }
+    for child in node.children() {
+      if let Some(found) = walk_for_code_identifier(child) {
+        return Some(found);
+      }
+    }
+    None
+  }
+
+  #[test]
+  fn parser_initializes_referenced_topic_candidates_to_empty() {
+    // The Phase E fallback writes into `referenced_topic_candidates`;
+    // the parser must surface an empty list so that downstream
+    // consumers can read empty as an unambiguous "no fallback
+    // recorded" signal.
+    let audit = new_audit_data("t".to_string(), HashSet::new(), None);
+    let path = domain::ProjectPath {
+      file_path: "doc.md".to_string(),
+    };
+    let ast = ast_from_markdown(
+      "Reference `someUnknownIdent` in prose.",
+      &path,
+      &audit,
+      &next_node_id,
+    )
+    .expect("markdown parses");
+
+    let root = &ast.nodes[0];
+    let ident = first_code_identifier(root);
+    let DocumentationNode::CodeIdentifier {
+      referenced_topic_candidates,
+      ..
+    } = ident
+    else {
+      unreachable!()
+    };
+    assert!(
+      referenced_topic_candidates.is_empty(),
+      "Phase 5 must initialize candidates to []; got {:?}",
+      referenced_topic_candidates
+    );
   }
 }
