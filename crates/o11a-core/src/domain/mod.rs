@@ -476,6 +476,16 @@ pub struct AuditData {
   /// `o11a_core::resolution_graph::build` at audit-load time, after every
   /// language analyzer completes. `None` until that step has run.
   pub resolution_graph: Option<crate::resolution_graph::ResolutionGraph>,
+  /// Per-resolution explanation records emitted by the graph-driven
+  /// resolution passes (Phases B/C/D/E). One entry per ambiguous
+  /// reference the resolver attempted, regardless of whether a winner
+  /// was picked. Keyed by `ResolutionRefId` so doc-tree nodes (Phase 6)
+  /// and dev-doc references (Phase 7+) share one store. Sorted by key
+  /// for deterministic dump output.
+  pub resolution_traces: BTreeMap<
+    crate::resolution_graph::ResolutionRefId,
+    crate::resolution_graph::ResolutionTrace,
+  >,
 }
 
 /// Common short English words that should not match as simple topic names.
@@ -2798,6 +2808,7 @@ pub fn new_audit_data(
     mentions_index: HashMap::new(),
     inheritance: BTreeMap::new(),
     resolution_graph: None,
+    resolution_traces: BTreeMap::new(),
   }
 }
 

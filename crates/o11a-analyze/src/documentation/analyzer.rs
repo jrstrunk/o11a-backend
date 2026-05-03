@@ -1,4 +1,5 @@
 use crate::documentation::parser;
+use crate::documentation::resolution_pass;
 use o11a_core::documentation::ast::{DocumentationAST, DocumentationNode};
 use o11a_core::domain;
 use o11a_core::domain::topic;
@@ -38,7 +39,27 @@ pub fn analyze(
     .collect();
 
   // Parse document files in the order specified by documents.txt
-  let ast_map = parser::process_files(project_root, &paths, audit_data)?;
+  let mut ast_map = parser::process_files(project_root, &paths, audit_data)?;
+
+  // Phase B: graph-driven resolution of ambiguous CodeIdentifier
+  // references in the parsed doc tree. Mutates `referenced_topic` in
+  // place; downstream passes (mention collection here, semantic-link
+  // analysis later) read the improved values transparently.
+  //
+  // The pass runs *before* mention collection and AST stubbing so the
+  // stubbed copy in `audit_data.asts` and `mentions_by_topic` both
+  // reflect Phase B's resolutions. When `audit_data.resolution_graph`
+  // is `None` (e.g. tests that skip Phase 4), the pass is a no-op.
+  for asts in ast_map.values_mut() {
+    for ast in asts.iter_mut() {
+      for node in &mut ast.nodes {
+        let traces = resolution_pass::resolve_doc_tree(node, audit_data);
+        for (key, trace) in traces {
+          audit_data.resolution_traces.insert(key, trace);
+        }
+      }
+    }
+  }
 
   // Collect mentions during processing: referenced_topic -> [scope]
   // The scope tells us the container (file), component (section), and member (paragraph)

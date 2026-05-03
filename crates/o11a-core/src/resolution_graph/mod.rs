@@ -10,12 +10,17 @@ pub mod edge;
 pub mod graph;
 pub mod pagerank;
 pub mod solidity_extractor;
+pub mod trace;
 
 pub use builder::{Extractor, build};
 pub use edge::{Direction, EdgeType};
 pub use graph::{OutEdge, ResolutionGraph};
 pub use pagerank::personalized_pagerank;
 pub use solidity_extractor::SolidityExtractor;
+pub use trace::{
+  CandidateScore, EdgeContribution, ResolutionPhase, ResolutionRefId,
+  ResolutionTrace,
+};
 
 #[cfg(test)]
 mod tests {
