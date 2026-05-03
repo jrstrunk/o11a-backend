@@ -31,6 +31,17 @@ pub enum ResolutionRefId {
   /// A `DocumentationNode::CodeIdentifier` produced by the doc parser.
   /// Holds the doc node ID.
   DocumentationNode(i32),
+  /// A `CommentNode::CodeIdentifier` inside a synthetic dev-doc
+  /// `CommentTopic` (NatSpec block, SemanticBlock inline comment).
+  /// Identified by the comment's topic plus the 0-based depth-first
+  /// occurrence index of the `CodeIdentifier` within the comment's
+  /// node tree. The pair is unique within an audit because each
+  /// CommentTopic has its own topic ID and the occurrence index
+  /// depth-first-orders the identifiers inside it.
+  DevDocComment {
+    comment_topic: topic::Topic,
+    occurrence: u32,
+  },
 }
 
 /// Which phase of the resolution pipeline produced this trace. Phase 6
@@ -169,6 +180,38 @@ mod tests {
     let id = ResolutionRefId::DocumentationNode(42);
     let s = serde_json::to_string(&id).unwrap();
     assert_eq!(s, r#"{"DocumentationNode":42}"#);
+  }
+
+  /// Same pin for the dev-doc variant added in Phase 7 — its on-disk
+  /// shape is shared with downstream tooling (Phase 11 dump kinds).
+  #[test]
+  fn resolution_ref_id_dev_doc_comment_serializes_predictably() {
+    let id = ResolutionRefId::DevDocComment {
+      comment_topic: topic::new_comment_topic(-7),
+      occurrence: 3,
+    };
+    let s = serde_json::to_string(&id).unwrap();
+    assert!(
+      s.contains(r#""DevDocComment""#)
+        && s.contains(r#""occurrence":3"#),
+      "got: {s}"
+    );
+    let round: ResolutionRefId = serde_json::from_str(&s).unwrap();
+    assert_eq!(round, id);
+  }
+
+  /// `ResolutionRefId` is the BTreeMap key on `resolution_traces`. The
+  /// derived `Ord` orders by variant declaration order, so existing
+  /// `DocumentationNode` keys sort before any newly-added
+  /// `DevDocComment` keys. Pin that.
+  #[test]
+  fn resolution_ref_id_doc_variant_orders_before_dev_doc_variant() {
+    let doc = ResolutionRefId::DocumentationNode(999);
+    let dev = ResolutionRefId::DevDocComment {
+      comment_topic: topic::new_comment_topic(-1),
+      occurrence: 0,
+    };
+    assert!(doc < dev);
   }
 
   /// `ResolutionPhase` similarly has on-disk shape that the trace dump

@@ -1329,9 +1329,9 @@ fn one_trace_per_ambiguous_reference_attempted() {
   assert_eq!(traces.len(), 3);
   let node_ids: Vec<i32> = traces
     .iter()
-    .map(|(k, _)| {
-      let ResolutionRefId::DocumentationNode(id) = k;
-      *id
+    .map(|(k, _)| match k {
+      ResolutionRefId::DocumentationNode(id) => *id,
+      other => panic!("doc-tree pass must only emit DocumentationNode keys, got {:?}", other),
     })
     .collect();
   assert_eq!(node_ids, vec![3, 4, 5]);

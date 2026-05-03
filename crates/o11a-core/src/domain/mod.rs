@@ -717,6 +717,192 @@ impl Scope {
   }
 }
 
+/// Walks up the scope chain starting from `start_topic`, returning the
+/// topic itself followed by each enclosing scope topic from innermost to
+/// outermost. Terminates at `Scope::Container` / `Scope::Global` (which
+/// produce no further ancestors) — for typical Solidity inputs that
+/// means the chain ends at the contract topic.
+///
+/// Used by the dev-doc graph resolution pass (Phase 7 of the
+/// semantic-resolution-graph build plan) to seed personalized PageRank
+/// from the source-tree scope chain of a NatSpec target topic. Read the
+/// seed table in
+/// `crates/o11a-analyze/docs/build-plans/semantic-resolution-graph.md`
+/// (Phase 7 → Context) for the consumer-side weighting rule.
+///
+/// Examples (using `Scope` produced by the Solidity analyzer):
+///
+/// * Contract topic (`Scope::Container`)            → `[contract]`
+/// * Function topic (`Scope::Component { contract }`) →
+///   `[function, contract]`
+/// * State variable                                 → `[state-var, contract]`
+/// * Top-level block in function                    →
+///   `[block, function, contract]`
+/// * Inner block (`ContainingBlock` with one outer) →
+///   `[inner_block, outer_block, function, contract]`
+///
+/// When `start_topic` has no entry in `topic_metadata`, the chain is
+/// just `[start_topic]` — the helper never panics on a missing topic so
+/// callers can pass in any topic without a precondition check.
+pub fn scope_ancestor_chain(
+  audit_data: &AuditData,
+  start_topic: topic::Topic,
+) -> Vec<topic::Topic> {
+  let mut chain = vec![start_topic];
+  let Some(metadata) = audit_data.topic_metadata.get(&start_topic) else {
+    return chain;
+  };
+  // `Scope::ancestor_topics()` yields topics outermost-first
+  // (`[contract, function, block_outer, ..., block_inner]`). The chain
+  // we want is innermost-first (immediate enclosing scope at distance
+  // 1, contract at the tail), so iterate in reverse and skip any
+  // duplicate of `start_topic` itself — defensive against the
+  // (theoretical) case where a topic's scope contains the topic.
+  for ancestor in metadata.scope().ancestor_topics().into_iter().rev() {
+    if *ancestor != start_topic {
+      chain.push(*ancestor);
+    }
+  }
+  chain
+}
+
+#[cfg(test)]
+mod scope_chain_tests {
+  use super::*;
+  use std::collections::HashSet;
+
+  fn audit() -> AuditData {
+    new_audit_data("t".to_string(), HashSet::new(), None)
+  }
+
+  fn nt(id: i32) -> topic::Topic {
+    topic::new_node_topic(&id)
+  }
+
+  fn pp() -> ProjectPath {
+    ProjectPath {
+      file_path: "x.sol".to_string(),
+    }
+  }
+
+  fn named_with_scope(t: topic::Topic, scope: Scope) -> TopicMetadata {
+    TopicMetadata::NamedTopic {
+      topic: t,
+      scope,
+      kind: NamedTopicKind::Builtin,
+      visibility: NamedTopicVisibility::Public,
+      name: "x".to_string(),
+      is_mutable: false,
+      mutations: Vec::new(),
+      ancestors: Vec::new(),
+      descendants: Vec::new(),
+      relatives: Vec::new(),
+      transitive_topic: None,
+      doc_references: Vec::new(),
+    }
+  }
+
+  #[test]
+  fn unknown_topic_yields_just_itself() {
+    let a = audit();
+    assert_eq!(scope_ancestor_chain(&a, nt(99)), vec![nt(99)]);
+  }
+
+  #[test]
+  fn contract_topic_with_container_scope_yields_just_itself() {
+    let mut a = audit();
+    let c = nt(1);
+    a.topic_metadata.insert(
+      c,
+      named_with_scope(c, Scope::Container { container: pp() }),
+    );
+    assert_eq!(scope_ancestor_chain(&a, c), vec![c]);
+  }
+
+  #[test]
+  fn function_topic_yields_function_then_contract() {
+    let mut a = audit();
+    let contract = nt(1);
+    let func = nt(10);
+    a.topic_metadata.insert(
+      contract,
+      named_with_scope(contract, Scope::Container { container: pp() }),
+    );
+    a.topic_metadata.insert(
+      func,
+      named_with_scope(
+        func,
+        Scope::Component {
+          container: pp(),
+          component: contract,
+        },
+      ),
+    );
+    assert_eq!(scope_ancestor_chain(&a, func), vec![func, contract]);
+  }
+
+  #[test]
+  fn parameter_topic_yields_param_then_function_then_contract() {
+    let mut a = audit();
+    let contract = nt(1);
+    let func = nt(10);
+    let param = nt(20);
+    a.topic_metadata.insert(
+      param,
+      named_with_scope(
+        param,
+        Scope::Member {
+          container: pp(),
+          component: contract,
+          member: func,
+          signature_container: None,
+        },
+      ),
+    );
+    assert_eq!(
+      scope_ancestor_chain(&a, param),
+      vec![param, func, contract],
+    );
+  }
+
+  #[test]
+  fn nested_block_yields_innermost_first_chain() {
+    let mut a = audit();
+    let contract = nt(1);
+    let func = nt(10);
+    let outer_block = nt(20);
+    let inner_block = nt(30);
+    a.topic_metadata.insert(
+      inner_block,
+      named_with_scope(
+        inner_block,
+        Scope::ContainingBlock {
+          container: pp(),
+          component: contract,
+          member: func,
+          containing_blocks: vec![ContainingBlockLayer {
+            block: outer_block,
+            annotation: None,
+          }],
+        },
+      ),
+    );
+    assert_eq!(
+      scope_ancestor_chain(&a, inner_block),
+      vec![inner_block, outer_block, func, contract],
+      "nested-block chain runs innermost to outermost",
+    );
+  }
+
+  #[test]
+  fn global_scope_topic_yields_just_itself() {
+    let mut a = audit();
+    let g = nt(1);
+    a.topic_metadata.insert(g, named_with_scope(g, Scope::Global));
+    assert_eq!(scope_ancestor_chain(&a, g), vec![g]);
+  }
+}
+
 pub fn add_to_scope(scope: &Scope, topic: topic::Topic) -> Scope {
   match scope {
     Scope::Global => Scope::Global, // Global scope cannot be nested

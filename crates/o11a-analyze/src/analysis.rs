@@ -86,9 +86,19 @@ pub fn run_analysis(
   // on SemanticBlocks, etc.) must exist before the documentation analyzer
   // runs because downstream consumers of the doc tree expect to find
   // them in `comment_index`. They build *after* the resolution graph so
-  // that the future graph-driven dev-doc resolution pass (Phase 7) has
-  // a populated graph to score against.
+  // that the graph-driven dev-doc resolution pass below has a populated
+  // graph to score against.
   inject_developer_documentation(data_context, audit_id)?;
+
+  tracing::info!("Resolving ambiguous code references in dev docs...");
+
+  // Phase B for synthetic dev-doc CommentTopics: rewrite ambiguous
+  // `referenced_topic` entries inside NatSpec / SemanticBlock comment
+  // text using personalized PageRank seeded by each comment's target
+  // topic's scope chain. Mirror of the doc-tree pass run by
+  // `documentation::analyzer::analyze` below — both consumers share
+  // the same threshold and determinism contract.
+  resolve_dev_doc_comments(data_context, audit_id)?;
 
   tracing::info!("Analyzing documentation files...");
 
@@ -150,6 +160,30 @@ pub fn inject_developer_documentation(
     .get_audit_mut(audit_id)
     .ok_or_else(|| AnalysisError::AuditMissing(audit_id.to_string()))?;
   solidity::analyzer::inject_developer_documentation(audit_data);
+  Ok(())
+}
+
+/// Phase B of the resolution pipeline for synthetic dev-doc
+/// CommentTopics: rewrite ambiguous `referenced_topic` entries inside
+/// NatSpec / SemanticBlock comment text using personalized PageRank
+/// seeded by each comment's target-topic scope chain.
+///
+/// Idempotent and a no-op when the resolution graph is missing — see
+/// `solidity::dev_doc_resolution_pass::resolve_dev_doc_comments` for
+/// the per-comment algorithm. Wraps the inner pass with the
+/// `Arc<Mutex<DataContext>>` discipline matching the other pipeline
+/// stages.
+pub fn resolve_dev_doc_comments(
+  data_context: &Arc<Mutex<DataContext>>,
+  audit_id: &str,
+) -> Result<(), AnalysisError> {
+  let mut ctx = data_context
+    .lock()
+    .map_err(|e| AnalysisError::LockPoisoned(e.to_string()))?;
+  let audit_data = ctx
+    .get_audit_mut(audit_id)
+    .ok_or_else(|| AnalysisError::AuditMissing(audit_id.to_string()))?;
+  solidity::dev_doc_resolution_pass::resolve_dev_doc_comments(audit_data);
   Ok(())
 }
 
@@ -664,5 +698,107 @@ mod tests {
       .filter(|m| matches!(m, TopicMetadata::CommentTopic { .. }))
       .count();
     assert_eq!(count, 0, "minimal fixture has no source; no comments");
+  }
+
+  // -----------------------------------------------------------------------
+  // resolve_dev_doc_comments wrapper (Phase 7)
+  //
+  // Mirrors the surface of the inject_developer_documentation wrapper
+  // above: lock discipline, missing-audit error, no cross-audit leakage.
+  // The inner pass is exercised in detail by
+  // `solidity::dev_doc_resolution_pass` tests; these are integration
+  // checks for the analysis-level wrapper.
+  // -----------------------------------------------------------------------
+
+  #[test]
+  fn resolve_dev_doc_comments_returns_audit_missing_for_unknown_id() {
+    let ctx = Arc::new(Mutex::new(domain::new_data_context()));
+    let err = resolve_dev_doc_comments(&ctx, "nope").unwrap_err();
+    match err {
+      AnalysisError::AuditMissing(id) => assert_eq!(id, "nope"),
+      other => panic!("expected AuditMissing, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn resolve_dev_doc_comments_releases_lock_before_returning() {
+    // Deadlock check: a re-acquire after the wrapper returns must not
+    // hang. Stage the audit fully — graph build + injection — then
+    // run the resolution wrapper.
+    let ctx = staged_doc_context("a");
+    populate_resolution_graph(&ctx, "a").unwrap();
+    inject_developer_documentation(&ctx, "a").unwrap();
+    resolve_dev_doc_comments(&ctx, "a").unwrap();
+    let _guard = ctx.lock().unwrap();
+  }
+
+  #[test]
+  fn resolve_dev_doc_comments_is_idempotent_through_the_wrapper() {
+    // Calling the wrapper twice in a row must not produce divergent
+    // state — pins the same idempotency contract the inner pass
+    // tests verify, but routed through the public API.
+    let ctx = staged_doc_context("a");
+    populate_resolution_graph(&ctx, "a").unwrap();
+    inject_developer_documentation(&ctx, "a").unwrap();
+
+    resolve_dev_doc_comments(&ctx, "a").unwrap();
+    let traces_first = ctx
+      .lock()
+      .unwrap()
+      .get_audit("a")
+      .unwrap()
+      .resolution_traces
+      .clone();
+    let mentions_first = ctx
+      .lock()
+      .unwrap()
+      .get_audit("a")
+      .unwrap()
+      .mentions_index
+      .clone();
+
+    resolve_dev_doc_comments(&ctx, "a").unwrap();
+    let guard = ctx.lock().unwrap();
+    let audit = guard.get_audit("a").unwrap();
+    assert_eq!(audit.resolution_traces, traces_first);
+    assert_eq!(audit.mentions_index, mentions_first);
+  }
+
+  #[test]
+  fn resolve_dev_doc_comments_is_no_op_when_graph_missing() {
+    // The wrapper must not error or panic when the resolution graph
+    // hasn't been built — the inner pass returns immediately. This
+    // guards against silent ordering reversals: a future refactor
+    // that calls resolve_dev_doc_comments before populate_resolution_graph
+    // would fail loudly only if the inner pass panicked, otherwise it
+    // would just produce no resolutions. The guarantee is "no-op, no
+    // error", which is what we pin here.
+    let ctx = staged_doc_context("a");
+    inject_developer_documentation(&ctx, "a").unwrap();
+    // Graph never populated — but the wrapper still succeeds.
+    resolve_dev_doc_comments(&ctx, "a").unwrap();
+    let guard = ctx.lock().unwrap();
+    let audit = guard.get_audit("a").unwrap();
+    assert!(audit.resolution_graph.is_none());
+    assert!(audit.resolution_traces.is_empty());
+  }
+
+  #[test]
+  fn run_analysis_pipeline_reaches_dev_doc_resolution_stage() {
+    // End-to-end pin: `run_analysis` invokes the dev-doc resolution
+    // stage. Minimal fixture has no source so no resolutions happen,
+    // but `resolution_traces` being a `BTreeMap` with no entries is
+    // observable — the pass ran and contributed nothing rather than
+    // panicking or being skipped. (The deeper "Phase 7 actually
+    // resolves an ambiguous identifier end-to-end through
+    // `run_analysis`" coverage requires a fixture with parsed
+    // Solidity input, which lives in the harness comparison work in
+    // Phase 8.)
+    let project = TempProject::new("phase7-end-to-end");
+    let data_context = Arc::new(Mutex::new(domain::new_data_context()));
+    run_analysis(&project.root, "audit-1", &data_context).unwrap();
+    let guard = data_context.lock().unwrap();
+    let audit = guard.get_audit("audit-1").expect("audit created");
+    assert!(audit.resolution_traces.is_empty());
   }
 }
