@@ -51,6 +51,7 @@ impl Extractor for SolidityExtractor {
     extract_inheritance_edges(audit_data, graph, &mut emitted);
     extract_proxy_of_edges(audit_data, graph, &mut emitted);
     extract_function_property_edges(audit_data, graph, &mut emitted);
+    extract_state_variable_type_edges(audit_data, graph, &mut emitted);
     extract_using_for_edges(audit_data, graph, &mut emitted);
     extract_modifier_applied_edges(audit_data, graph, &mut emitted);
   }
@@ -224,7 +225,40 @@ fn extract_containment_edges(
           );
         }
       }
-      Scope::Component { .. } | Scope::Container { .. } | Scope::Global => {}
+      Scope::Component { component, .. } => {
+        // The Solidity analyzer assigns `Scope::Component` to every direct
+        // child of a contract — state variables, functions, modifiers,
+        // events, errors, structs, enums. Without this branch, none of
+        // them would get a containment edge to their contract, leaving
+        // (e.g.) constant state variables completely orphaned in the
+        // graph. Mirrors the Member-scope case below: emit `ContainsMember`
+        // when the parent is a contract, `ContainsField` when it's a
+        // struct/enum.
+        if topic != component
+          && let Some(kind) = named_kind(audit_data, component)
+        {
+          match kind {
+            NamedTopicKind::Contract(_) => add_undirected(
+              audit_data,
+              graph,
+              emitted,
+              *topic,
+              *component,
+              EdgeType::ContainsMember,
+            ),
+            NamedTopicKind::Struct | NamedTopicKind::Enum => add_undirected(
+              audit_data,
+              graph,
+              emitted,
+              *topic,
+              *component,
+              EdgeType::ContainsField,
+            ),
+            _ => {}
+          }
+        }
+      }
+      Scope::Container { .. } | Scope::Global => {}
     }
   }
 }
@@ -371,6 +405,83 @@ fn extract_function_property_edges(
         }
       }
     }
+  }
+}
+
+/// `references` from each state variable to its declared type. Walks
+/// every Solidity AST for state-variable `VariableDeclaration` nodes and
+/// emits a directed `References` edge from the variable's topic to the
+/// type's topic.
+///
+/// Without this, a state variable like `INudgeCampaignFactory factory`
+/// has no outgoing edge to the interface, so PR mass at the holding
+/// contract never reaches the interface — which means cross-contract
+/// reads of constants on the interface (e.g. `factory.SWAP_CALLER_ROLE`)
+/// resolve to the implementation's state variable with `pr=0.0`.
+///
+/// Restricted to *state* variables on purpose: function parameters and
+/// block-locals already get a ContainsLocal edge to their enclosing
+/// member, which carries the function's type signature for free.
+fn extract_state_variable_type_edges(
+  audit_data: &AuditData,
+  graph: &mut ResolutionGraph,
+  emitted: &mut BTreeSet<(topic::Topic, topic::Topic, EdgeType)>,
+) {
+  for ast in audit_data.asts.values() {
+    if let AST::Solidity(sol) = ast {
+      for node in &sol.nodes {
+        walk_for_state_var_types(node, audit_data, graph, emitted);
+      }
+    }
+  }
+}
+
+fn walk_for_state_var_types(
+  node: &ASTNode,
+  audit_data: &AuditData,
+  graph: &mut ResolutionGraph,
+  emitted: &mut BTreeSet<(topic::Topic, topic::Topic, EdgeType)>,
+) {
+  if let ASTNode::VariableDeclaration {
+    node_id,
+    state_variable: true,
+    type_name,
+    ..
+  } = node
+    && let Some(type_topic) = referenced_topic_of(type_name)
+  {
+    let var_topic = topic::new_node_topic(node_id);
+    add_directed(
+      audit_data,
+      graph,
+      emitted,
+      var_topic,
+      type_topic,
+      EdgeType::References,
+    );
+  }
+
+  // Recurse only into containers that can host state-variable
+  // declarations. State variables only ever appear as direct children of
+  // a contract (or wrapped in a ContractMemberGroup); a full AST walk
+  // would be wasteful.
+  match node {
+    ASTNode::SourceUnit { nodes, .. } => {
+      for child in nodes {
+        walk_for_state_var_types(child, audit_data, graph, emitted);
+      }
+    }
+    ASTNode::ContractDefinition { nodes, .. } => {
+      for child in nodes {
+        walk_for_state_var_types(child, audit_data, graph, emitted);
+      }
+    }
+    ASTNode::ContractMemberGroup { members, .. } => {
+      for m in members {
+        walk_for_state_var_types(m, audit_data, graph, emitted);
+      }
+    }
+    _ => {}
   }
 }
 
@@ -863,6 +974,120 @@ mod tests {
         .out_edges(contract)
         .iter()
         .any(|e| e.dest == t(2) && e.edge_type == EdgeType::ContainsMember)
+    );
+  }
+
+  #[test]
+  fn state_variable_at_component_scope_emits_contains_member() {
+    // The Solidity analyzer puts every direct child of a contract at
+    // `Scope::Component`, including state variables. The extractor must
+    // emit ContainsMember from contract to state var anyway. Without
+    // this, constant state vars (which don't even receive a WritesState
+    // edge) become graph orphans and PR mass at the contract never
+    // reaches them.
+    let mut audit = empty_audit();
+    let contract = insert_contract(&mut audit, 1, "Foo");
+    let _state_var = insert_named(
+      &mut audit,
+      2,
+      NamedTopicKind::StateVariable(VariableMutability::Mutable),
+      Scope::Component {
+        container: project_path("test.sol"),
+        component: contract,
+      },
+      "x",
+      None,
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    assert!(
+      graph
+        .out_edges(t(2))
+        .iter()
+        .any(|e| e.dest == contract && e.edge_type == EdgeType::ContainsMember),
+      "state var must emit ContainsMember to its containing contract"
+    );
+    assert!(
+      graph
+        .out_edges(contract)
+        .iter()
+        .any(|e| e.dest == t(2) && e.edge_type == EdgeType::ContainsMember),
+      "ContainsMember is undirected; contract must point back at state var"
+    );
+  }
+
+  #[test]
+  fn function_at_component_scope_emits_contains_member() {
+    // Same issue applies to functions — they're stored at Component
+    // scope, not Member scope, so without the Component branch the
+    // contract has no graph edge to its own functions.
+    let mut audit = empty_audit();
+    let contract = insert_contract(&mut audit, 1, "Foo");
+    let _function = insert_named(
+      &mut audit,
+      2,
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: project_path("test.sol"),
+        component: contract,
+      },
+      "doThing",
+      None,
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    assert!(
+      graph
+        .out_edges(t(2))
+        .iter()
+        .any(|e| e.dest == contract && e.edge_type == EdgeType::ContainsMember)
+    );
+  }
+
+  #[test]
+  fn component_scope_with_non_contract_parent_emits_no_edge() {
+    // The component might be something other than a Contract / Struct /
+    // Enum (e.g. a free function file scope). Don't emit a stray edge.
+    let mut audit = empty_audit();
+    let lib_topic = insert_named(
+      &mut audit,
+      1,
+      NamedTopicKind::Modifier, // arbitrary non-Contract/Struct/Enum kind
+      Scope::Container {
+        container: project_path("test.sol"),
+      },
+      "M",
+      None,
+    );
+    let _child = insert_named(
+      &mut audit,
+      2,
+      NamedTopicKind::LocalVariable,
+      Scope::Component {
+        container: project_path("test.sol"),
+        component: lib_topic,
+      },
+      "x",
+      None,
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    assert!(
+      graph
+        .out_edges(t(2))
+        .iter()
+        .all(|e| e.edge_type != EdgeType::ContainsMember
+          && e.edge_type != EdgeType::ContainsField),
+      "no containment edge when parent is neither contract nor struct/enum"
     );
   }
 
@@ -1530,6 +1755,192 @@ mod tests {
   // -----------------------------------------------------------------------
   // using-for
   // -----------------------------------------------------------------------
+
+  // -----------------------------------------------------------------------
+  // state-variable type references
+  // -----------------------------------------------------------------------
+
+  fn make_state_variable(
+    node_id: i32,
+    name: &str,
+    type_ref_decl: i32,
+  ) -> ASTNode {
+    ASTNode::VariableDeclaration {
+      node_id,
+      src_location: loc(),
+      constant: false,
+      function_selector: None,
+      mutability: VariableMutability::Mutable,
+      name: name.to_string(),
+      name_location: loc(),
+      scope: 0,
+      state_variable: true,
+      storage_location: crate::solidity::ast::StorageLocation::Default,
+      type_name: Box::new(make_user_defined_type_name(node_id + 5000, type_ref_decl)),
+      value: None,
+      visibility: crate::solidity::ast::VariableVisibility::Public,
+      parameter_variable: None,
+      implementation_declaration: None,
+      base_functions: Vec::new(),
+      struct_field: false,
+    }
+  }
+
+  #[test]
+  fn state_variable_emits_references_to_its_type() {
+    let mut audit = empty_audit();
+    let _contract = insert_contract(&mut audit, 1, "Holder");
+    let interface = insert_named(
+      &mut audit,
+      20,
+      NamedTopicKind::Contract(ContractKind::Interface),
+      Scope::Component {
+        container: project_path("test.sol"),
+        component: t(20),
+      },
+      "IExternal",
+      None,
+    );
+    // The state variable's topic itself.
+    let state_var = insert_named(
+      &mut audit,
+      300,
+      NamedTopicKind::StateVariable(VariableMutability::Immutable),
+      Scope::Member {
+        container: project_path("test.sol"),
+        component: t(1),
+        member: t(300),
+        signature_container: None,
+      },
+      "factory",
+      None,
+    );
+
+    let var_decl = make_state_variable(300, "factory", interface.numeric_id());
+    let contract = make_contract_def(
+      1,
+      "Holder",
+      ContractKind::Contract,
+      Vec::new(),
+      vec![var_decl],
+    );
+    audit.asts.insert(
+      project_path("test.sol"),
+      AST::Solidity(make_solidity_ast("test.sol", vec![contract])),
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    assert!(
+      graph
+        .out_edges(state_var)
+        .iter()
+        .any(|e| e.dest == interface && e.edge_type == EdgeType::References),
+      "state var must reference its type"
+    );
+    // Directed: the interface should NOT have an edge back to the state var.
+    assert!(
+      graph
+        .out_edges(interface)
+        .iter()
+        .all(|e| !(e.dest == state_var && e.edge_type == EdgeType::References)),
+      "References is directed; type must not point back at the state var"
+    );
+  }
+
+  #[test]
+  fn state_variable_with_unknown_type_emits_no_edge() {
+    let mut audit = empty_audit();
+    let _contract = insert_contract(&mut audit, 1, "Holder");
+    // No topic for type id 999 — edge must drop.
+    let _state_var = insert_named(
+      &mut audit,
+      300,
+      NamedTopicKind::StateVariable(VariableMutability::Mutable),
+      Scope::Member {
+        container: project_path("test.sol"),
+        component: t(1),
+        member: t(300),
+        signature_container: None,
+      },
+      "x",
+      None,
+    );
+
+    let var_decl = make_state_variable(300, "x", 999);
+    let contract =
+      make_contract_def(1, "Holder", ContractKind::Contract, Vec::new(), vec![var_decl]);
+    audit.asts.insert(
+      project_path("test.sol"),
+      AST::Solidity(make_solidity_ast("test.sol", vec![contract])),
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    assert!(
+      graph
+        .out_edges(t(300))
+        .iter()
+        .all(|e| e.edge_type != EdgeType::References),
+      "edge to unknown type topic must be dropped"
+    );
+  }
+
+  #[test]
+  fn function_parameter_does_not_emit_state_variable_type_edge() {
+    // Parameters look like VariableDeclaration but `state_variable: false`.
+    // The type-references walker must skip them — parameters get their
+    // type signal through ContainsLocal to the enclosing function.
+    let mut audit = empty_audit();
+    let _contract = insert_contract(&mut audit, 1, "C");
+    let interface = insert_named(
+      &mut audit,
+      20,
+      NamedTopicKind::Contract(ContractKind::Interface),
+      Scope::Component {
+        container: project_path("test.sol"),
+        component: t(20),
+      },
+      "IExternal",
+      None,
+    );
+
+    let mut param = make_state_variable(300, "p", interface.numeric_id());
+    if let ASTNode::VariableDeclaration {
+      state_variable, ..
+    } = &mut param
+    {
+      *state_variable = false;
+    }
+    let function = make_function_def(2, "f", Vec::new());
+    let contract = make_contract_def(
+      1,
+      "C",
+      ContractKind::Contract,
+      Vec::new(),
+      vec![function, param],
+    );
+    audit.asts.insert(
+      project_path("test.sol"),
+      AST::Solidity(make_solidity_ast("test.sol", vec![contract])),
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    assert!(
+      graph
+        .out_edges(t(300))
+        .iter()
+        .all(|e| !(e.dest == interface && e.edge_type == EdgeType::References)),
+      "non-state-variable VariableDeclaration must not produce a References edge"
+    );
+  }
 
   #[test]
   fn using_for_in_contract_signature_emits_undirected_edge() {
