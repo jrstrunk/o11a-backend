@@ -49,11 +49,22 @@ Available kinds:
                       due to ambiguity (e.g. one StateVariable plus
                       several function parameters).
 
+  resolution-graph    The full personalized-PageRank ResolutionGraph —
+                      every participating topic and every typed weighted
+                      edge the resolver scores against. Use to inspect
+                      graph structure when a resolution surprises you.
+
+  resolution-trace    One record per ambiguous reference the graph
+                      resolver attempted, with chosen topic, ranked
+                      candidate scores, and top contributing edges. Use
+                      to inspect *why* a name resolved (or didn't).
+
   all                 Shorthand for every kind above.
 
 Examples:
   o11a-analyze dump ./project myaudit interface-mapping
   o11a-analyze dump ./project myaudit interface-mapping name-index
+  o11a-analyze dump ./project myaudit resolution-graph resolution-trace
   o11a-analyze dump ./project myaudit all
 ";
 
