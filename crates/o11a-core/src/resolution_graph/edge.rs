@@ -5,7 +5,16 @@ use serde::{Deserialize, Serialize};
 /// directed entries; this enum is metadata for extractors deciding whether to
 /// emit one or two `add_edge` calls.
 #[derive(
-  Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  PartialOrd,
+  Ord,
+  Hash,
+  Serialize,
+  Deserialize,
 )]
 pub enum Direction {
   Directed,

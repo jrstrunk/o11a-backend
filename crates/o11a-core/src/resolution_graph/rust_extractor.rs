@@ -153,7 +153,9 @@ fn is_rust_topic(
     Scope::Container { container }
     | Scope::Component { container, .. }
     | Scope::Member { container, .. }
-    | Scope::ContainingBlock { container, .. } => rust_files.contains(container),
+    | Scope::ContainingBlock { container, .. } => {
+      rust_files.contains(container)
+    }
     Scope::Global => false,
   }
 }
@@ -247,14 +249,7 @@ fn extract_proxy_of_edges(
     let Some(target) = metadata.transitive_topic() else {
       continue;
     };
-    add_directed(
-      audit_data,
-      graph,
-      emitted,
-      *src,
-      *target,
-      EdgeType::ProxyOf,
-    );
+    add_directed(audit_data, graph, emitted, *src, *target, EdgeType::ProxyOf);
   }
 }
 
@@ -444,9 +439,7 @@ fn walk_for_mutations(
 mod tests {
   use super::*;
 
-  use crate::domain::{
-    NamedTopicKind, NamedTopicVisibility, new_audit_data,
-  };
+  use crate::domain::{NamedTopicKind, NamedTopicVisibility, new_audit_data};
   use crate::rust::ast::{RustAST, SourceLocation};
   use std::collections::HashSet;
 

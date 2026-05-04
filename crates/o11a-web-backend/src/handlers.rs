@@ -43,13 +43,9 @@ pub async fn get_source_text(
   let source_text =
     crate::topic_view::render_source_text_as_block(&topic, audit_data, cache)
       .ok_or_else(|| {
-        tracing::warn!(
-          "Topic '{}' not found in audit '{}'",
-          topic_id,
-          audit_id
-        );
-        StatusCode::NOT_FOUND
-      })?;
+      tracing::warn!("Topic '{}' not found in audit '{}'", topic_id, audit_id);
+      StatusCode::NOT_FOUND
+    })?;
 
   Ok(Html(source_text))
 }

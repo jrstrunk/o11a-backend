@@ -1604,13 +1604,12 @@ pub fn render_entry_tree(
   // When a description container override is provided for an authored topic,
   // render the body directly (bypassing the cache) to avoid stale cache hits
   // where the same topic may need different rendering depending on context.
-  let body_html =
-    if let Some(container) = description_container {
-      let description = metadata.description().unwrap_or("");
-      render_body_html(entry_topic, container, description, audit_data)
-    } else {
-      get_source_text(entry_topic, audit_data, source_text_cache)
-    };
+  let body_html = if let Some(container) = description_container {
+    let description = metadata.description().unwrap_or("");
+    render_body_html(entry_topic, container, description, audit_data)
+  } else {
+    get_source_text(entry_topic, audit_data, source_text_cache)
+  };
 
   let created_at = metadata.created_at().map(|s| s.to_string());
   let children =
@@ -1657,8 +1656,7 @@ pub fn render_entry_html(
   let mut children_html = String::new();
   let n_children = entry.children.len();
   for (i, child) in entry.children.iter().enumerate() {
-    children_html
-      .push_str(&render_entry_html(child, i, n_children, depth + 1));
+    children_html.push_str(&render_entry_html(child, i, n_children, depth + 1));
   }
 
   let mut style = String::from(COMBINED_PANEL_STYLE);
@@ -1762,9 +1760,7 @@ pub fn build_conversation(
     // declaration's scope, so the description container must be the
     // resolved declaration topic, not the semantic topic itself.
     let container = match metadata {
-      TopicMetadata::FunctionalSemanticTopic { .. } => {
-        Some(&resolved_topic)
-      }
+      TopicMetadata::FunctionalSemanticTopic { .. } => Some(&resolved_topic),
       _ => None,
     };
     if let Some(tree) =

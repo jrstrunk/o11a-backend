@@ -23,14 +23,14 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::Serialize;
 
-use super::bm25::{self, MemberDoc};
 use super::CutoffAlgorithm;
+use super::bm25::{self, MemberDoc};
 use crate::collaborator::agent::context;
 use crate::collaborator::agent::task;
 use crate::domain::{
@@ -128,10 +128,8 @@ struct VariantData {
     BTreeMap<topic::Topic, Vec<(topic::Topic, domain::MatchSource)>>,
   >,
   /// section_topic → [(contract, source)] for contract-scoped Pass 3.
-  section_contracts: BTreeMap<
-    topic::Topic,
-    Vec<(topic::Topic, domain::MatchSource)>,
-  >,
+  section_contracts:
+    BTreeMap<topic::Topic, Vec<(topic::Topic, domain::MatchSource)>>,
   /// (section_topic, member_topic) → BM25 provenance, for BM25-source
   /// candidates only. Stamped onto each surviving Pass 3 link.
   bm25_provenance: HashMap<(topic::Topic, topic::Topic), Bm25Provenance>,
@@ -367,8 +365,7 @@ struct CompareIndexes {
   /// File path of the section's parent document, per section topic.
   section_path: HashMap<topic::Topic, String>,
   /// Phase-A-only section→[contracts]: the floor of the benchmark.
-  mechanical_section_to_contracts:
-    HashMap<topic::Topic, Vec<topic::Topic>>,
+  mechanical_section_to_contracts: HashMap<topic::Topic, Vec<topic::Topic>>,
   /// Phase-A-only (section, contract)→[members].
   mechanical_members_by_section_contract:
     HashMap<(topic::Topic, topic::Topic), Vec<topic::Topic>>,
@@ -526,7 +523,9 @@ pub async fn run(
         .iter()
         .map(|c| (*c, domain::MatchSource::Mechanical))
         .collect();
-      mech_graph_data.section_contracts.insert(*section_topic, entry);
+      mech_graph_data
+        .section_contracts
+        .insert(*section_topic, entry);
     }
     if !bm25_contracts.is_empty() {
       for data in [
@@ -700,7 +699,10 @@ pub async fn run(
   let mut llm_data = match run_llm_variant(indexes.clone()).await {
     Ok(d) => d,
     Err(e) => {
-      tracing::warn!("compare llm variant failed (writing partial output): {}", e);
+      tracing::warn!(
+        "compare llm variant failed (writing partial output): {}",
+        e
+      );
       VariantData::empty()
     }
   };
@@ -777,7 +779,10 @@ pub async fn run(
       vp3.batches.len(),
     );
     sort_pass3_records(&mut vp3.records);
-    write_pass3_jsonl(&dir.join(format!("{}.pass3.jsonl", name)), &vp3.records)?;
+    write_pass3_jsonl(
+      &dir.join(format!("{}.pass3.jsonl", name)),
+      &vp3.records,
+    )?;
     all_pass3.insert((*name).to_string(), vp3.by_section_decl);
     all_batches.extend(vp3.batches);
   }
@@ -792,10 +797,7 @@ pub async fn run(
     (a.variant.as_str(), a.batch_id.as_str())
       .cmp(&(b.variant.as_str(), b.batch_id.as_str()))
   });
-  write_pass3_batches(
-    &dir.join("bm25-pass3-batches.jsonl"),
-    &all_batches,
-  )?;
+  write_pass3_batches(&dir.join("bm25-pass3-batches.jsonl"), &all_batches)?;
 
   // Backfill `is_llm_anchor` on Pass1RankingRecord rows now that LLM
   // Pass 1 has run. Then rewrite the Pass 1 ranking file with the
@@ -821,8 +823,7 @@ pub async fn run(
 
   // Per-contract corpus statistics: kind counts, summary doc length.
   // Lets reviewers see what was actually indexed without re-deriving.
-  let corpus_summary =
-    build_corpus_summary(&data_context, audit_id);
+  let corpus_summary = build_corpus_summary(&data_context, audit_id);
   write_corpus_summary(
     &dir.join("bm25-corpus-summary.jsonl"),
     &corpus_summary,
@@ -948,9 +949,7 @@ fn snapshot_indexes(
   let bm25_corpus_by_contract: HashMap<topic::Topic, Vec<MemberDoc>> =
     contracts
       .iter()
-      .map(|(ct, _)| {
-        (*ct, bm25::build_contract_member_corpus(ct, audit_data))
-      })
+      .map(|(ct, _)| (*ct, bm25::build_contract_member_corpus(ct, audit_data)))
       .collect();
 
   // Per-section text + path.
@@ -975,18 +974,31 @@ fn snapshot_indexes(
   > = HashMap::new();
   for s in &sections {
     for (links, out) in [
-      (&mechanical_phase_a, &mut mechanical_members_by_section_contract),
-      (&mechanical_graph, &mut mechanical_graph_members_by_section_contract),
+      (
+        &mechanical_phase_a,
+        &mut mechanical_members_by_section_contract,
+      ),
+      (
+        &mechanical_graph,
+        &mut mechanical_graph_members_by_section_contract,
+      ),
     ] {
       let section_decls = links
         .section_to_declarations
         .get(s)
         .cloned()
         .unwrap_or_default();
-      let cs = links.section_to_contracts.get(s).cloned().unwrap_or_default();
+      let cs = links
+        .section_to_contracts
+        .get(s)
+        .cloned()
+        .unwrap_or_default();
       for ct in &cs {
-        let members =
-          context::mechanical_section_to_members(&section_decls, ct, audit_data);
+        let members = context::mechanical_section_to_members(
+          &section_decls,
+          ct,
+          audit_data,
+        );
         out.insert((*s, *ct), members);
       }
     }
@@ -1116,9 +1128,11 @@ async fn run_llm_variant(
     topic::Topic,
     Vec<(topic::Topic, domain::MatchSource)>,
   > = BTreeMap::new();
-  let mut emitted: std::collections::HashSet<
-    (topic::Topic, topic::Topic, topic::Topic),
-  > = std::collections::HashSet::new();
+  let mut emitted: std::collections::HashSet<(
+    topic::Topic,
+    topic::Topic,
+    topic::Topic,
+  )> = std::collections::HashSet::new();
   for (section_topic, contracts) in &llm_contracts_by_section {
     let section_path = indexes
       .section_path
@@ -1189,8 +1203,9 @@ async fn run_llm_variant(
     }
     let mut confirmed_members: Vec<topic::Topic> = Vec::new();
     for ct in contracts {
-      if let Some(v) =
-        indexes.mechanical_graph_members_by_section_contract.get(&(*section_topic, *ct))
+      if let Some(v) = indexes
+        .mechanical_graph_members_by_section_contract
+        .get(&(*section_topic, *ct))
       {
         for m in v {
           if !confirmed_members.contains(m) {
@@ -1209,13 +1224,9 @@ async fn run_llm_variant(
       let stxt = section_text.clone();
       let confirmed = confirmed_members.clone();
       pass2_handles.push(tokio::spawn(async move {
-        let result = task::semantic_link_pass2(
-          &st,
-          &stxt,
-          &contract_json,
-          &confirmed,
-        )
-        .await;
+        let result =
+          task::semantic_link_pass2(&st, &stxt, &contract_json, &confirmed)
+            .await;
         (st, cct, result)
       }));
     }
@@ -1362,9 +1373,9 @@ fn run_bm25_pass1_and_log(
   audit_id: &str,
   indexes: &CompareIndexes,
 ) -> std::io::Result<Pass1Output> {
-  let ctx = data_context
-    .lock()
-    .map_err(|e| std::io::Error::other(format!("data_context poisoned: {}", e)))?;
+  let ctx = data_context.lock().map_err(|e| {
+    std::io::Error::other(format!("data_context poisoned: {}", e))
+  })?;
   let audit_data = match ctx.get_audit(audit_id) {
     Some(a) => a,
     None => {
@@ -1407,8 +1418,7 @@ fn run_bm25_pass1_and_log(
       .cloned()
       .unwrap_or_default();
 
-    let section_query_length =
-      bm25::tokenize_prose_text(section_text).len();
+    let section_query_length = bm25::tokenize_prose_text(section_text).len();
 
     // `is_mechanical_anchor` reflects the production resolver baseline —
     // a contract counts as mechanically anchored iff Phase A or Phase B
@@ -1603,10 +1613,7 @@ fn build_corpus_summary(
     out.push(CorpusSummaryRecord {
       contract_topic: ct.id().to_string(),
       contract_name,
-      summary_doc_length_signatures: sigs_lengths
-        .get(ct)
-        .copied()
-        .unwrap_or(0),
+      summary_doc_length_signatures: sigs_lengths.get(ct).copied().unwrap_or(0),
       summary_doc_length_body: body_lengths.get(ct).copied().unwrap_or(0),
       member_doc_count,
       member_total_tokens,
@@ -1735,10 +1742,7 @@ fn write_pass1_ranking(
   Ok(())
 }
 
-fn write_jsonl(
-  path: &Path,
-  records: &[MatchRecord],
-) -> std::io::Result<()> {
+fn write_jsonl(path: &Path, records: &[MatchRecord]) -> std::io::Result<()> {
   use std::io::Write;
   let tmp = path.with_extension("jsonl.tmp");
   {
@@ -1803,14 +1807,11 @@ async fn run_pass3_for_variant(
   };
   // (a) Member-scoped: one Pass 3 call per (section, doc_topic) batch.
   for (section_topic, doc_member_map) in &data.doc_members {
-    let (section_text, section_path) = match render_section_payload(
-      section_topic,
-      data_context,
-      audit_id,
-    ) {
-      Some(v) => v,
-      None => continue,
-    };
+    let (section_text, section_path) =
+      match render_section_payload(section_topic, data_context, audit_id) {
+        Some(v) => v,
+        None => continue,
+      };
     for (doc_topic, member_pairs) in doc_member_map {
       let member_topics: Vec<topic::Topic> =
         member_pairs.iter().map(|(t, _)| *t).collect();
@@ -1839,7 +1840,10 @@ async fn run_pass3_for_variant(
         section_topic: section_topic.id().to_string(),
         section_path: section_path.clone(),
         doc_topic: doc_topic.id().to_string(),
-        input_topics: member_topics.iter().map(|t| t.id().to_string()).collect(),
+        input_topics: member_topics
+          .iter()
+          .map(|t| t.id().to_string())
+          .collect(),
         input_names,
         num_links_returned: 0, // backfilled after await
         status: "pending".to_string(),
@@ -1876,14 +1880,11 @@ async fn run_pass3_for_variant(
       .reduce(|a, b| a.merge(b))
       .unwrap_or(domain::MatchSource::Mechanical);
 
-    let (section_text, section_path) = match render_section_payload(
-      section_topic,
-      data_context,
-      audit_id,
-    ) {
-      Some(v) => v,
-      None => continue,
-    };
+    let (section_text, section_path) =
+      match render_section_payload(section_topic, data_context, audit_id) {
+        Some(v) => v,
+        None => continue,
+      };
     let (declarations_json, signatures_source) =
       match render_contract_batch(&contract_topics, data_context, audit_id) {
         Some(v) => v,
@@ -1903,7 +1904,10 @@ async fn run_pass3_for_variant(
       section_topic: section_topic.id().to_string(),
       section_path: section_path.clone(),
       doc_topic: section_topic.id().to_string(),
-      input_topics: contract_topics.iter().map(|t| t.id().to_string()).collect(),
+      input_topics: contract_topics
+        .iter()
+        .map(|t| t.id().to_string())
+        .collect(),
       input_names,
       num_links_returned: 0,
       status: "pending".to_string(),
@@ -1937,8 +1941,7 @@ async fn run_pass3_for_variant(
     match h.await {
       Ok((bid, Ok(result))) => {
         let n = result.links.len();
-        status_by_batch
-          .insert(bid.clone(), ("ok".to_string(), None, n));
+        status_by_batch.insert(bid.clone(), ("ok".to_string(), None, n));
         links_by_batch.insert(bid, result.links);
       }
       Ok((bid, Err(e))) => {
@@ -1949,8 +1952,7 @@ async fn run_pass3_for_variant(
           bid,
           msg
         );
-        status_by_batch
-          .insert(bid, ("failed".to_string(), Some(msg), 0));
+        status_by_batch.insert(bid, ("failed".to_string(), Some(msg), 0));
       }
       Err(e) => {
         // We lost track of the batch_id when the join itself errored
@@ -2041,11 +2043,10 @@ async fn run_pass3_for_variant(
       let declaration_source = decl_source_cache
         .entry(link.declaration_topic)
         .or_insert_with(|| {
-          let member_src =
-            context::render_batched_member_sources_for_semantics(
-              &[link.declaration_topic],
-              audit_data,
-            );
+          let member_src = context::render_batched_member_sources_for_semantics(
+            &[link.declaration_topic],
+            audit_data,
+          );
           if member_src.trim().is_empty() {
             context::render_batched_contract_declaration_signatures(
               &[link.declaration_topic],
@@ -2070,8 +2071,7 @@ async fn run_pass3_for_variant(
       let (kind, is_legacy_corpus) = decl_kind_cache
         .entry(link.declaration_topic)
         .or_insert_with(|| {
-          let (label, legacy) =
-            kind_label(&link.declaration_topic, audit_data);
+          let (label, legacy) = kind_label(&link.declaration_topic, audit_data);
           (label.to_string(), legacy)
         })
         .clone();
@@ -2342,10 +2342,8 @@ fn build_pass3_summary(
   }
 
   out.sort_by(|a, b| {
-    (a.section_topic.as_str(), a.declaration_topic.as_str()).cmp(&(
-      b.section_topic.as_str(),
-      b.declaration_topic.as_str(),
-    ))
+    (a.section_topic.as_str(), a.declaration_topic.as_str())
+      .cmp(&(b.section_topic.as_str(), b.declaration_topic.as_str()))
   });
   out
 }
@@ -2648,8 +2646,10 @@ mod tests {
     // mechanical comes first (the floor), mechanical-graph second
     // (the production resolver), then the other variants.
     let i_mech = VARIANTS.iter().position(|v| *v == "mechanical").unwrap();
-    let i_graph =
-      VARIANTS.iter().position(|v| *v == "mechanical-graph").unwrap();
+    let i_graph = VARIANTS
+      .iter()
+      .position(|v| *v == "mechanical-graph")
+      .unwrap();
     assert!(i_graph == i_mech + 1);
   }
 
@@ -2719,8 +2719,7 @@ mod tests {
   fn graph_resolved_doc_node_ids_skips_dev_doc_comment_traces() {
     let mut traces: BTreeMap<ResolutionRefId, ResolutionTrace> =
       BTreeMap::new();
-    let mut dev_trace =
-      trace_with_edges(99, ResolutionPhase::PhaseB, vec![]);
+    let mut dev_trace = trace_with_edges(99, ResolutionPhase::PhaseB, vec![]);
     dev_trace.reference_id = ResolutionRefId::DevDocComment {
       comment_topic: topic::new_comment_topic(-77),
       occurrence: 0,
@@ -2847,4 +2846,3 @@ mod tests {
     assert_eq!(bytes1, bytes2);
   }
 }
-

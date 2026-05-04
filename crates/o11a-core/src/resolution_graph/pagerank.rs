@@ -180,7 +180,9 @@ mod tests {
   /// Build a graph from a list of `(src, dest, edge_type)` triples
   /// using each edge type's default weight. `finalize()` is invoked so
   /// adjacency ordering matches what the production builder produces.
-  fn graph_from(edges: &[(topic::Topic, topic::Topic, EdgeType)]) -> ResolutionGraph {
+  fn graph_from(
+    edges: &[(topic::Topic, topic::Topic, EdgeType)],
+  ) -> ResolutionGraph {
     let mut g = ResolutionGraph::new();
     for (src, dst, et) in edges {
       g.add_edge(*src, *dst, *et, et.default_weight());
@@ -449,15 +451,45 @@ mod tests {
     // built in one order, once in the reverse order — and asserting
     // bit-identical output.
     let mut g_forward = ResolutionGraph::new();
-    g_forward.add_edge(t(1), t(10), EdgeType::Calls, EdgeType::Calls.default_weight());
-    g_forward.add_edge(t(2), t(10), EdgeType::Calls, EdgeType::Calls.default_weight());
-    g_forward.add_edge(t(3), t(10), EdgeType::Calls, EdgeType::Calls.default_weight());
+    g_forward.add_edge(
+      t(1),
+      t(10),
+      EdgeType::Calls,
+      EdgeType::Calls.default_weight(),
+    );
+    g_forward.add_edge(
+      t(2),
+      t(10),
+      EdgeType::Calls,
+      EdgeType::Calls.default_weight(),
+    );
+    g_forward.add_edge(
+      t(3),
+      t(10),
+      EdgeType::Calls,
+      EdgeType::Calls.default_weight(),
+    );
     g_forward.finalize();
 
     let mut g_reverse = ResolutionGraph::new();
-    g_reverse.add_edge(t(3), t(10), EdgeType::Calls, EdgeType::Calls.default_weight());
-    g_reverse.add_edge(t(2), t(10), EdgeType::Calls, EdgeType::Calls.default_weight());
-    g_reverse.add_edge(t(1), t(10), EdgeType::Calls, EdgeType::Calls.default_weight());
+    g_reverse.add_edge(
+      t(3),
+      t(10),
+      EdgeType::Calls,
+      EdgeType::Calls.default_weight(),
+    );
+    g_reverse.add_edge(
+      t(2),
+      t(10),
+      EdgeType::Calls,
+      EdgeType::Calls.default_weight(),
+    );
+    g_reverse.add_edge(
+      t(1),
+      t(10),
+      EdgeType::Calls,
+      EdgeType::Calls.default_weight(),
+    );
     g_reverse.finalize();
 
     let s = seed(&[(t(1), 1.0), (t(2), 1.0), (t(3), 1.0)]);

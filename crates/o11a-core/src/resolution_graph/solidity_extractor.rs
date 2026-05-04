@@ -299,14 +299,7 @@ fn extract_proxy_of_edges(
     let Some(target) = metadata.transitive_topic() else {
       continue;
     };
-    add_directed(
-      audit_data,
-      graph,
-      emitted,
-      *src,
-      *target,
-      EdgeType::ProxyOf,
-    );
+    add_directed(audit_data, graph, emitted, *src, *target, EdgeType::ProxyOf);
   }
 }
 
@@ -517,14 +510,7 @@ fn walk_for_using_for(
     let lib_topic = library_name.as_deref().and_then(referenced_topic_of);
     let type_topic = type_name.as_deref().and_then(referenced_topic_of);
     if let (Some(lib), Some(ty)) = (lib_topic, type_topic) {
-      add_undirected(
-        audit_data,
-        graph,
-        emitted,
-        ty,
-        lib,
-        EdgeType::UsingFor,
-      );
+      add_undirected(audit_data, graph, emitted, ty, lib, EdgeType::UsingFor);
     }
   }
 
@@ -859,11 +845,7 @@ mod tests {
     }
   }
 
-  fn make_using_for(
-    node_id: i32,
-    library_id: i32,
-    type_id: i32,
-  ) -> ASTNode {
+  fn make_using_for(node_id: i32, library_id: i32, type_id: i32) -> ASTNode {
     ASTNode::UsingForDirective {
       node_id,
       src_location: loc(),
@@ -881,7 +863,11 @@ mod tests {
   }
 
   /// Convenience: install a contract topic at the given scope.
-  fn insert_contract(audit: &mut AuditData, id: i32, name: &str) -> topic::Topic {
+  fn insert_contract(
+    audit: &mut AuditData,
+    id: i32,
+    name: &str,
+  ) -> topic::Topic {
     insert_named(
       audit,
       id,
@@ -1126,12 +1112,9 @@ mod tests {
     SolidityExtractor.extract(&audit, &mut graph);
     graph.finalize();
 
-    assert!(
-      graph
-        .out_edges(t(3))
-        .iter()
-        .any(|e| e.dest == struct_topic && e.edge_type == EdgeType::ContainsField)
-    );
+    assert!(graph.out_edges(t(3)).iter().any(
+      |e| e.dest == struct_topic && e.edge_type == EdgeType::ContainsField
+    ));
     assert!(
       graph
         .out_edges(struct_topic)
@@ -1501,14 +1484,7 @@ mod tests {
     let g = insert_function(&mut audit, 3, "g", contract);
     // Same callee listed three times — the analyzer records each call
     // site, but the graph must end up with one Calls edge.
-    insert_function_props(
-      &mut audit,
-      f,
-      vec![g, g, g],
-      vec![],
-      vec![],
-      vec![],
-    );
+    insert_function_props(&mut audit, f, vec![g, g, g], vec![], vec![], vec![]);
 
     let mut graph = ResolutionGraph::new();
     SolidityExtractor.extract(&audit, &mut graph);
@@ -1776,7 +1752,10 @@ mod tests {
       scope: 0,
       state_variable: true,
       storage_location: crate::solidity::ast::StorageLocation::Default,
-      type_name: Box::new(make_user_defined_type_name(node_id + 5000, type_ref_decl)),
+      type_name: Box::new(make_user_defined_type_name(
+        node_id + 5000,
+        type_ref_decl,
+      )),
       value: None,
       visibility: crate::solidity::ast::VariableVisibility::Public,
       parameter_variable: None,
@@ -1870,8 +1849,13 @@ mod tests {
     );
 
     let var_decl = make_state_variable(300, "x", 999);
-    let contract =
-      make_contract_def(1, "Holder", ContractKind::Contract, Vec::new(), vec![var_decl]);
+    let contract = make_contract_def(
+      1,
+      "Holder",
+      ContractKind::Contract,
+      Vec::new(),
+      vec![var_decl],
+    );
     audit.asts.insert(
       project_path("test.sol"),
       AST::Solidity(make_solidity_ast("test.sol", vec![contract])),
@@ -1910,10 +1894,7 @@ mod tests {
     );
 
     let mut param = make_state_variable(300, "p", interface.numeric_id());
-    if let ASTNode::VariableDeclaration {
-      state_variable, ..
-    } = &mut param
-    {
+    if let ASTNode::VariableDeclaration { state_variable, .. } = &mut param {
       *state_variable = false;
     }
     let function = make_function_def(2, "f", Vec::new());
@@ -1968,7 +1949,8 @@ mod tests {
       None,
     );
     let _contract = insert_contract(&mut audit, 1, "C");
-    let using_for = make_using_for(900, library.numeric_id(), value_type.numeric_id());
+    let using_for =
+      make_using_for(900, library.numeric_id(), value_type.numeric_id());
     let contract = make_contract_def(
       1,
       "C",
@@ -2164,7 +2146,9 @@ mod tests {
     let count = graph
       .out_edges(function)
       .iter()
-      .filter(|e| e.dest == modifier && e.edge_type == EdgeType::ModifierApplied)
+      .filter(|e| {
+        e.dest == modifier && e.edge_type == EdgeType::ModifierApplied
+      })
       .count();
     assert_eq!(count, 1);
   }
@@ -2371,7 +2355,11 @@ mod tests {
       1,
       "Token",
       ContractKind::Contract,
-      vec![make_using_for(800, library.numeric_id(), value_type.numeric_id())],
+      vec![make_using_for(
+        800,
+        library.numeric_id(),
+        value_type.numeric_id(),
+      )],
       vec![function_def],
     );
     audit.asts.insert(
@@ -2446,7 +2434,8 @@ mod tests {
     // (it would not, in Phase 1, since no extractor was registered).
     let audit = integrated_audit();
     let graph = super::super::build(&audit);
-    let edge_count: usize = graph.nodes().map(|n| graph.out_edges(n).len()).sum();
+    let edge_count: usize =
+      graph.nodes().map(|n| graph.out_edges(n).len()).sum();
     assert!(edge_count > 0, "expected at least one edge to be emitted");
   }
 }

@@ -200,7 +200,12 @@ fn collect_plans(audit_data: &domain::AuditData) -> Vec<CommentPlan> {
     let mut ambiguous_refs: Vec<AmbiguousRef> = Vec::new();
     let mut counter: u32 = 0;
     for node in nodes {
-      collect_refs(node, &mut counter, &mut phase_a_topics, &mut ambiguous_refs);
+      collect_refs(
+        node,
+        &mut counter,
+        &mut phase_a_topics,
+        &mut ambiguous_refs,
+      );
     }
 
     // Skip comments with no ambiguous references entirely: nothing for
@@ -468,7 +473,8 @@ fn run_phase_b(
       pick_phase_b_winner(&candidate_scores, graph, &pr_result);
 
     if let Some(chosen_topic) = chosen {
-      let (kind, referenced_name) = lookup_kind_and_name(chosen_topic, audit_data);
+      let (kind, referenced_name) =
+        lookup_kind_and_name(chosen_topic, audit_data);
       resolutions.insert(
         (comment_topic, ambiguous.occurrence),
         AppliedResolution::Resolved {
@@ -560,8 +566,10 @@ fn run_phase_c(
     return;
   }
 
-  let pinned_ids: BTreeMap<u32, topic::Topic> =
-    pinnings.iter().map(|r| (r.ref_id, r.chosen_topic)).collect();
+  let pinned_ids: BTreeMap<u32, topic::Topic> = pinnings
+    .iter()
+    .map(|r| (r.ref_id, r.chosen_topic))
+    .collect();
 
   let mut survivors: Vec<AmbiguousRef> = Vec::new();
   for ambiguous in std::mem::take(&mut plans[plan_idx].ambiguous_refs) {
@@ -570,7 +578,8 @@ fn run_phase_c(
         comment_topic,
         occurrence: ambiguous.occurrence,
       };
-      let (kind, referenced_name) = lookup_kind_and_name(chosen_topic, audit_data);
+      let (kind, referenced_name) =
+        lookup_kind_and_name(chosen_topic, audit_data);
       resolutions.insert(
         (comment_topic, ambiguous.occurrence),
         AppliedResolution::Resolved {
@@ -686,10 +695,8 @@ fn pick_phase_b_winner(
   let Some(top) = candidate_scores.first() else {
     return (None, Vec::new());
   };
-  let runner_up_score = candidate_scores
-    .get(1)
-    .map(|c| c.pr_score)
-    .unwrap_or(0.0);
+  let runner_up_score =
+    candidate_scores.get(1).map(|c| c.pr_score).unwrap_or(0.0);
 
   if !passes_threshold(top.pr_score, runner_up_score) {
     return (None, Vec::new());

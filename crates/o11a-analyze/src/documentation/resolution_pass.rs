@@ -220,8 +220,12 @@ fn collect_sections(
   out: &mut Vec<SectionInfo>,
 ) {
   match node {
-    DocumentationNode::Root { node_id, children, .. }
-    | DocumentationNode::Section { node_id, children, .. } => {
+    DocumentationNode::Root {
+      node_id, children, ..
+    }
+    | DocumentationNode::Section {
+      node_id, children, ..
+    } => {
       let my_index = out.len();
       out.push(SectionInfo {
         topic: topic::new_documentation_topic(*node_id),
@@ -234,7 +238,9 @@ fn collect_sections(
       }
     }
 
-    DocumentationNode::Heading { children, section, .. } => {
+    DocumentationNode::Heading {
+      children, section, ..
+    } => {
       // The heading itself contributes no section level — its inline
       // text children belong to the *enclosing* section, and the
       // boxed `section` child (if present) becomes its own section
@@ -429,15 +435,17 @@ fn run_phase_b(
   for ambiguous in std::mem::take(&mut section.ambiguous_refs) {
     let trace_key = ResolutionRefId::DocumentationNode(ambiguous.node_id);
 
-    let candidates =
-      audit_data.name_index.candidates_by_simple_name(&ambiguous.identifier);
+    let candidates = audit_data
+      .name_index
+      .candidates_by_simple_name(&ambiguous.identifier);
     let candidate_scores =
       rank_candidates(candidates, audit_data, &pr_result, seeds);
     let (chosen, edges) =
       pick_phase_b_winner(&candidate_scores, graph, &pr_result);
 
     if let Some(chosen_topic) = chosen {
-      let (kind, referenced_name) = lookup_kind_and_name(chosen_topic, audit_data);
+      let (kind, referenced_name) =
+        lookup_kind_and_name(chosen_topic, audit_data);
       resolutions.insert(
         ambiguous.node_id,
         AppliedResolution::Resolved {
@@ -537,8 +545,10 @@ fn run_phase_c(
   }
 
   // Apply pinnings.
-  let pinned_ids: BTreeMap<i32, topic::Topic> =
-    pinnings.iter().map(|r| (r.ref_id, r.chosen_topic)).collect();
+  let pinned_ids: BTreeMap<i32, topic::Topic> = pinnings
+    .iter()
+    .map(|r| (r.ref_id, r.chosen_topic))
+    .collect();
 
   // Migrate pinned refs out of ambiguous_refs (preserve order of
   // remaining ones).
@@ -546,7 +556,8 @@ fn run_phase_c(
   for ambiguous in std::mem::take(&mut section.ambiguous_refs) {
     if let Some(&chosen_topic) = pinned_ids.get(&ambiguous.node_id) {
       let trace_key = ResolutionRefId::DocumentationNode(ambiguous.node_id);
-      let (kind, referenced_name) = lookup_kind_and_name(chosen_topic, audit_data);
+      let (kind, referenced_name) =
+        lookup_kind_and_name(chosen_topic, audit_data);
       resolutions.insert(
         ambiguous.node_id,
         AppliedResolution::Resolved {
@@ -748,10 +759,8 @@ fn pick_phase_b_winner(
   let Some(top) = candidate_scores.first() else {
     return (None, Vec::new());
   };
-  let runner_up_score = candidate_scores
-    .get(1)
-    .map(|c| c.pr_score)
-    .unwrap_or(0.0);
+  let runner_up_score =
+    candidate_scores.get(1).map(|c| c.pr_score).unwrap_or(0.0);
 
   if !passes_threshold(top.pr_score, runner_up_score) {
     return (None, Vec::new());
@@ -952,7 +961,9 @@ fn apply_resolutions(
       }
     }
 
-    DocumentationNode::Heading { children, section, .. } => {
+    DocumentationNode::Heading {
+      children, section, ..
+    } => {
       for child in children {
         apply_resolutions(child, resolutions);
       }

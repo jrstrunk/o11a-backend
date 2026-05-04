@@ -84,11 +84,7 @@ pub async fn run(args: &[String]) -> ExitCode {
     match std::fs::write(&absolute_path, content) {
       Ok(()) => tracing::info!("Wrote: {}", relative_path),
       Err(e) => {
-        tracing::error!(
-          "failed to write '{}': {}",
-          absolute_path.display(),
-          e
-        );
+        tracing::error!("failed to write '{}': {}", absolute_path.display(), e);
       }
     }
   }

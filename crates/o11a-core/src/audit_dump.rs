@@ -150,7 +150,11 @@ pub fn dump_to_file(
     }
   };
   let json = json.map_err(|e| {
-    std::io::Error::other(format!("serializing {} dump: {}", kind.file_name(), e))
+    std::io::Error::other(format!(
+      "serializing {} dump: {}",
+      kind.file_name(),
+      e
+    ))
   })?;
 
   let tmp = path.with_extension("json.tmp");
@@ -214,15 +218,10 @@ fn dump_interface_mapping(
       proxy_topic: proxy_topic.id().to_string(),
       proxy_name: meta.name().unwrap_or("").to_string(),
       proxy_kind: kind_label(meta),
-      proxy_qualified_name: meta
-        .qualified_name(audit_data)
-        .unwrap_or_default(),
+      proxy_qualified_name: meta.qualified_name(audit_data).unwrap_or_default(),
       proxy_scope: scope_summary(meta.scope(), audit_data),
       target_topic: target_topic.id().to_string(),
-      target_name: target_meta
-        .and_then(|m| m.name())
-        .unwrap_or("")
-        .to_string(),
+      target_name: target_meta.and_then(|m| m.name()).unwrap_or("").to_string(),
       target_kind: target_meta.map(kind_label).unwrap_or_default(),
       target_qualified_name: target_meta
         .and_then(|m| m.qualified_name(audit_data))
@@ -233,10 +232,8 @@ fn dump_interface_mapping(
     });
   }
   out.sort_by(|a, b| {
-    (a.proxy_qualified_name.as_str(), a.proxy_topic.as_str()).cmp(&(
-      b.proxy_qualified_name.as_str(),
-      b.proxy_topic.as_str(),
-    ))
+    (a.proxy_qualified_name.as_str(), a.proxy_topic.as_str())
+      .cmp(&(b.proxy_qualified_name.as_str(), b.proxy_topic.as_str()))
   });
   out
 }
@@ -296,8 +293,7 @@ fn dump_name_index(audit_data: &AuditData) -> Vec<NameIndexEntry> {
   let mut out: Vec<NameIndexEntry> = Vec::with_capacity(by_name.len());
   for (name, topics) in by_name {
     let is_common = is_common_word(&name);
-    let resolved =
-      audit_data.name_index.get_by_simple_name(&name).copied();
+    let resolved = audit_data.name_index.get_by_simple_name(&name).copied();
     // Ambiguous: resolver couldn't pick a unique answer despite >1
     // candidates with this simple name. Common-word filtering shows up
     // here too but is flagged separately.
@@ -326,10 +322,8 @@ fn dump_name_index(audit_data: &AuditData) -> Vec<NameIndexEntry> {
       })
       .collect();
     candidates.sort_by(|a, b| {
-      (a.qualified_name.as_str(), a.topic.as_str()).cmp(&(
-        b.qualified_name.as_str(),
-        b.topic.as_str(),
-      ))
+      (a.qualified_name.as_str(), a.topic.as_str())
+        .cmp(&(b.qualified_name.as_str(), b.topic.as_str()))
     });
 
     out.push(NameIndexEntry {
@@ -605,11 +599,7 @@ fn scope_summary(scope: &Scope, audit_data: &AuditData) -> String {
     Scope::Component {
       container,
       component,
-    } => format!(
-      "in {} (file: {})",
-      name_of(component),
-      container.file_path
-    ),
+    } => format!("in {} (file: {})", name_of(component), container.file_path),
     Scope::Member {
       member,
       component,
@@ -1252,8 +1242,7 @@ mod tests {
   fn dump_to_file_writes_resolution_graph_with_expected_filename() {
     let audit = populated_audit();
     let dir = unique_tmp_dir("graph");
-    let path =
-      dump_to_file(DumpKind::ResolutionGraph, &audit, &dir).unwrap();
+    let path = dump_to_file(DumpKind::ResolutionGraph, &audit, &dir).unwrap();
     assert_eq!(path, dir.join("resolution-graph.json"));
     let bytes = std::fs::read(&path).unwrap();
     // File ends with a trailing newline (a convention the existing
@@ -1270,8 +1259,7 @@ mod tests {
   fn dump_to_file_writes_resolution_trace_with_expected_filename() {
     let audit = populated_audit();
     let dir = unique_tmp_dir("trace");
-    let path =
-      dump_to_file(DumpKind::ResolutionTrace, &audit, &dir).unwrap();
+    let path = dump_to_file(DumpKind::ResolutionTrace, &audit, &dir).unwrap();
     assert_eq!(path, dir.join("resolution-trace.json"));
     let bytes = std::fs::read(&path).unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -1285,13 +1273,11 @@ mod tests {
     // The headline determinism contract at the file-write layer.
     let audit = populated_audit();
     let dir = unique_tmp_dir("graph-determinism");
-    let p1 =
-      dump_to_file(DumpKind::ResolutionGraph, &audit, &dir).unwrap();
+    let p1 = dump_to_file(DumpKind::ResolutionGraph, &audit, &dir).unwrap();
     let bytes_a = std::fs::read(&p1).unwrap();
     // Overwrite via a second invocation; atomic rename handles the
     // replacement.
-    let p2 =
-      dump_to_file(DumpKind::ResolutionGraph, &audit, &dir).unwrap();
+    let p2 = dump_to_file(DumpKind::ResolutionGraph, &audit, &dir).unwrap();
     let bytes_b = std::fs::read(&p2).unwrap();
     assert_eq!(bytes_a, bytes_b);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1301,11 +1287,9 @@ mod tests {
   fn dump_to_file_resolution_trace_byte_identical_across_runs() {
     let audit = populated_audit();
     let dir = unique_tmp_dir("trace-determinism");
-    let p1 =
-      dump_to_file(DumpKind::ResolutionTrace, &audit, &dir).unwrap();
+    let p1 = dump_to_file(DumpKind::ResolutionTrace, &audit, &dir).unwrap();
     let bytes_a = std::fs::read(&p1).unwrap();
-    let p2 =
-      dump_to_file(DumpKind::ResolutionTrace, &audit, &dir).unwrap();
+    let p2 = dump_to_file(DumpKind::ResolutionTrace, &audit, &dir).unwrap();
     let bytes_b = std::fs::read(&p2).unwrap();
     assert_eq!(bytes_a, bytes_b);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1409,7 +1393,12 @@ mod tests {
     // Topic Ord: Comment(-10) < Comment(-5). Within each, occurrence asc.
     assert_eq!(
       refs,
-      vec!["comment:C-10:0", "comment:C-10:2", "comment:C-5:0", "comment:C-5:1"]
+      vec![
+        "comment:C-10:0",
+        "comment:C-10:2",
+        "comment:C-5:0",
+        "comment:C-5:1"
+      ]
     );
   }
 
@@ -1422,8 +1411,7 @@ mod tests {
   fn dump_to_file_resolution_graph_for_no_graph_audit_writes_empty_shape() {
     let audit = empty_audit();
     let dir = unique_tmp_dir("graph-empty");
-    let path =
-      dump_to_file(DumpKind::ResolutionGraph, &audit, &dir).unwrap();
+    let path = dump_to_file(DumpKind::ResolutionGraph, &audit, &dir).unwrap();
     let bytes = std::fs::read(&path).unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(parsed["nodes"].as_array().map(|a| a.len()), Some(0));
@@ -1441,10 +1429,9 @@ mod tests {
     let mut audit = empty_audit();
     let src = nt(1000);
     let orphan = nt(2000);
-    audit.topic_metadata.insert(
-      src,
-      named(src, "src", NamedTopicKind::LocalVariable),
-    );
+    audit
+      .topic_metadata
+      .insert(src, named(src, "src", NamedTopicKind::LocalVariable));
     // Deliberately omit metadata for `orphan`.
     let mut graph = ResolutionGraph::new();
     graph.add_edge(src, orphan, EdgeType::References, 0.5);
@@ -1509,7 +1496,12 @@ mod tests {
     );
     audit.topic_metadata.insert(
       stub,
-      named_with_transitive(stub, "transfer", NamedTopicKind::LocalVariable, target),
+      named_with_transitive(
+        stub,
+        "transfer",
+        NamedTopicKind::LocalVariable,
+        target,
+      ),
     );
 
     let records = dump_interface_mapping(&audit);
@@ -1541,7 +1533,12 @@ mod tests {
     let target = nt(2);
     audit.topic_metadata.insert(
       stub,
-      named_with_transitive(stub, "transfer", NamedTopicKind::LocalVariable, target),
+      named_with_transitive(
+        stub,
+        "transfer",
+        NamedTopicKind::LocalVariable,
+        target,
+      ),
     );
     // Deliberately omit `target` from topic_metadata.
     assert!(dump_interface_mapping(&audit).is_empty());
@@ -1567,11 +1564,21 @@ mod tests {
     // Insert proxies in topic-id-descending order to exercise the sort.
     audit.topic_metadata.insert(
       stub_a,
-      named_with_transitive(stub_a, "transfer", NamedTopicKind::LocalVariable, target_a),
+      named_with_transitive(
+        stub_a,
+        "transfer",
+        NamedTopicKind::LocalVariable,
+        target_a,
+      ),
     );
     audit.topic_metadata.insert(
       stub_b,
-      named_with_transitive(stub_b, "transfer", NamedTopicKind::LocalVariable, target_b),
+      named_with_transitive(
+        stub_b,
+        "transfer",
+        NamedTopicKind::LocalVariable,
+        target_b,
+      ),
     );
 
     let records = dump_interface_mapping(&audit);
@@ -1593,7 +1600,12 @@ mod tests {
     );
     audit.topic_metadata.insert(
       stub,
-      named_with_transitive(stub, "transfer", NamedTopicKind::LocalVariable, target),
+      named_with_transitive(
+        stub,
+        "transfer",
+        NamedTopicKind::LocalVariable,
+        target,
+      ),
     );
     let json_a =
       serde_json::to_string_pretty(&dump_interface_mapping(&audit)).unwrap();
@@ -1614,46 +1626,45 @@ mod tests {
     let mut audit = empty_audit();
     // Unique name → resolved.
     let unique = nt(1);
-    audit.topic_metadata.insert(
-      unique,
-      named(unique, "uniq", NamedTopicKind::LocalVariable),
-    );
+    audit
+      .topic_metadata
+      .insert(unique, named(unique, "uniq", NamedTopicKind::LocalVariable));
     // Two non-transitive candidates with the same simple name → ambiguous.
     let amb_a = nt(2);
     let amb_b = nt(3);
-    audit.topic_metadata.insert(
-      amb_a,
-      named(amb_a, "ambig", NamedTopicKind::LocalVariable),
-    );
-    audit.topic_metadata.insert(
-      amb_b,
-      named(amb_b, "ambig", NamedTopicKind::LocalVariable),
-    );
+    audit
+      .topic_metadata
+      .insert(amb_a, named(amb_a, "ambig", NamedTopicKind::LocalVariable));
+    audit
+      .topic_metadata
+      .insert(amb_b, named(amb_b, "ambig", NamedTopicKind::LocalVariable));
     // One non-transitive + one transitive sharing a name → resolves to
     // the non-transitive (per `TopicNameIndex::build`).
     let real = nt(4);
     let proxy = nt(5);
-    audit.topic_metadata.insert(
-      real,
-      named(real, "transfer", NamedTopicKind::LocalVariable),
-    );
+    audit
+      .topic_metadata
+      .insert(real, named(real, "transfer", NamedTopicKind::LocalVariable));
     audit.topic_metadata.insert(
       proxy,
-      named_with_transitive(proxy, "transfer", NamedTopicKind::LocalVariable, real),
+      named_with_transitive(
+        proxy,
+        "transfer",
+        NamedTopicKind::LocalVariable,
+        real,
+      ),
     );
     // A common-word name — `is_common_word` filters it from name_index;
     // the dump must still show it but flag `is_common_word: true`.
     let common = nt(6);
-    audit.topic_metadata.insert(
-      common,
-      named(common, "for", NamedTopicKind::LocalVariable),
-    );
+    audit
+      .topic_metadata
+      .insert(common, named(common, "for", NamedTopicKind::LocalVariable));
     // Empty name — must be excluded from the dump.
     let nameless = nt(7);
-    audit.topic_metadata.insert(
-      nameless,
-      named(nameless, "", NamedTopicKind::LocalVariable),
-    );
+    audit
+      .topic_metadata
+      .insert(nameless, named(nameless, "", NamedTopicKind::LocalVariable));
     audit.name_index = crate::domain::TopicNameIndex::build(&audit);
     audit
   }
@@ -1789,10 +1800,9 @@ mod tests {
     // in dump output.
     let mut audit = empty_audit();
     let common = nt(1);
-    audit.topic_metadata.insert(
-      common,
-      named(common, "for", NamedTopicKind::LocalVariable),
-    );
+    audit
+      .topic_metadata
+      .insert(common, named(common, "for", NamedTopicKind::LocalVariable));
     audit.name_index = crate::domain::TopicNameIndex::build(&audit);
     let entry = dump_name_index(&audit)
       .into_iter()
@@ -1813,10 +1823,7 @@ mod tests {
   fn parse_kinds_accepts_comma_separated_value_in_single_arg() {
     let kinds =
       parse_kinds(&["interface-mapping,name-index".to_string()]).unwrap();
-    assert_eq!(
-      kinds,
-      vec![DumpKind::InterfaceMapping, DumpKind::NameIndex]
-    );
+    assert_eq!(kinds, vec![DumpKind::InterfaceMapping, DumpKind::NameIndex]);
   }
 
   #[test]
@@ -1840,10 +1847,7 @@ mod tests {
       "name-index".to_string(),
     ])
     .unwrap();
-    assert_eq!(
-      kinds,
-      vec![DumpKind::NameIndex, DumpKind::InterfaceMapping]
-    );
+    assert_eq!(kinds, vec![DumpKind::NameIndex, DumpKind::InterfaceMapping]);
   }
 
   #[test]
@@ -1852,11 +1856,8 @@ mod tests {
     // command line must not duplicate it. First-occurrence ordering means
     // `all`'s expansion runs first, and the trailing explicit kind is
     // dropped from the output rather than re-appended.
-    let kinds = parse_kinds(&[
-      "all".to_string(),
-      "name-index".to_string(),
-    ])
-    .unwrap();
+    let kinds =
+      parse_kinds(&["all".to_string(), "name-index".to_string()]).unwrap();
     assert_eq!(kinds, DumpKind::all());
   }
 
@@ -1866,11 +1867,8 @@ mod tests {
     // named explicitly *before* `all`, it stays at index 0 and `all`
     // backfills the rest. Pinning this guarantees a stable mental model
     // for operators who scan `dump` output in CLI order.
-    let kinds = parse_kinds(&[
-      "name-index".to_string(),
-      "all".to_string(),
-    ])
-    .unwrap();
+    let kinds =
+      parse_kinds(&["name-index".to_string(), "all".to_string()]).unwrap();
     assert_eq!(kinds[0], DumpKind::NameIndex);
     assert_eq!(kinds.len(), DumpKind::all().len());
     let unique: HashSet<DumpKind> = kinds.iter().copied().collect();
@@ -1888,10 +1886,7 @@ mod tests {
       "name-index".to_string(),
     ])
     .unwrap();
-    assert_eq!(
-      kinds,
-      vec![DumpKind::InterfaceMapping, DumpKind::NameIndex]
-    );
+    assert_eq!(kinds, vec![DumpKind::InterfaceMapping, DumpKind::NameIndex]);
   }
 
   #[test]
@@ -1948,8 +1943,12 @@ mod tests {
     let mut audit = empty_audit();
     let s = nt(1);
     let d = nt(2);
-    audit.topic_metadata.insert(s, named(s, "s", NamedTopicKind::LocalVariable));
-    audit.topic_metadata.insert(d, named(d, "d", NamedTopicKind::LocalVariable));
+    audit
+      .topic_metadata
+      .insert(s, named(s, "s", NamedTopicKind::LocalVariable));
+    audit
+      .topic_metadata
+      .insert(d, named(d, "d", NamedTopicKind::LocalVariable));
     let mut graph = ResolutionGraph::new();
     // Insert References before Calls; the dump's secondary sort fixes it.
     graph.add_edge(s, d, EdgeType::References, 0.5);
@@ -2019,8 +2018,11 @@ mod tests {
     );
 
     let record = dump_resolution_traces(&audit).into_iter().next().unwrap();
-    let topics: Vec<String> =
-      record.candidate_scores.iter().map(|c| c.topic.clone()).collect();
+    let topics: Vec<String> = record
+      .candidate_scores
+      .iter()
+      .map(|c| c.topic.clone())
+      .collect();
     let expected: Vec<String> = scores.iter().map(|c| c.topic.id()).collect();
     assert_eq!(topics, expected);
   }
@@ -2150,8 +2152,7 @@ mod tests {
     let dir = unique_tmp_dir("graph-overwrite");
     // First write: empty audit → empty graph.
     let empty = empty_audit();
-    let path =
-      dump_to_file(DumpKind::ResolutionGraph, &empty, &dir).unwrap();
+    let path = dump_to_file(DumpKind::ResolutionGraph, &empty, &dir).unwrap();
     let bytes_first = std::fs::read(&path).unwrap();
 
     // Second write to same path: populated audit → non-empty graph.
@@ -2181,8 +2182,7 @@ mod tests {
     assert!(stale_tmp.exists());
 
     let audit = populated_audit();
-    let path =
-      dump_to_file(DumpKind::ResolutionGraph, &audit, &dir).unwrap();
+    let path = dump_to_file(DumpKind::ResolutionGraph, &audit, &dir).unwrap();
     assert_eq!(path, final_path);
     // `rename` consumes the `.tmp`, leaving only the final file.
     assert!(!stale_tmp.exists());
@@ -2206,8 +2206,14 @@ mod tests {
   fn kind_label_renders_every_named_topic_variant_distinctly() {
     use crate::domain::{ContractKind, FunctionKind, VariableMutability};
     let cases: &[(NamedTopicKind, &str)] = &[
-      (NamedTopicKind::Function(FunctionKind::Function), "Function(Function)"),
-      (NamedTopicKind::Function(FunctionKind::Constructor), "Function(Constructor)"),
+      (
+        NamedTopicKind::Function(FunctionKind::Function),
+        "Function(Function)",
+      ),
+      (
+        NamedTopicKind::Function(FunctionKind::Constructor),
+        "Function(Constructor)",
+      ),
       (NamedTopicKind::Modifier, "Modifier"),
       (NamedTopicKind::Event, "Event"),
       (NamedTopicKind::Error, "Error"),
@@ -2219,8 +2225,14 @@ mod tests {
         "StateVariable(Constant)",
       ),
       (NamedTopicKind::LocalVariable, "LocalVariable"),
-      (NamedTopicKind::Contract(ContractKind::Interface), "Contract(Interface)"),
-      (NamedTopicKind::Contract(ContractKind::Library), "Contract(Library)"),
+      (
+        NamedTopicKind::Contract(ContractKind::Interface),
+        "Contract(Interface)",
+      ),
+      (
+        NamedTopicKind::Contract(ContractKind::Library),
+        "Contract(Library)",
+      ),
       (NamedTopicKind::Builtin, "Builtin"),
     ];
     for (kind, expected) in cases {
@@ -2239,7 +2251,10 @@ mod tests {
     let audit = populated_audit();
     for kind in DumpKind::all() {
       let path = dump_to_file(kind, &audit, &dir).unwrap();
-      assert_eq!(path.file_name().and_then(|n| n.to_str()), Some(kind.file_name()));
+      assert_eq!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some(kind.file_name())
+      );
       assert!(path.exists(), "{} not written", kind.file_name());
     }
     // All four files coexist.
@@ -2258,4 +2273,3 @@ mod tests {
     let _ = std::fs::remove_dir_all(&dir);
   }
 }
-

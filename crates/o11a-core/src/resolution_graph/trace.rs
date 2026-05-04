@@ -48,9 +48,7 @@ pub enum ResolutionRefId {
 /// only records `PhaseB` for resolved entries and `Unresolved` for
 /// attempts that fell through the threshold; later phases will use the
 /// remaining variants.
-#[derive(
-  Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ResolutionPhase {
   /// Resolved by Phase B — section-context personalized PageRank.
   PhaseB,
@@ -192,8 +190,7 @@ mod tests {
     };
     let s = serde_json::to_string(&id).unwrap();
     assert!(
-      s.contains(r#""DevDocComment""#)
-        && s.contains(r#""occurrence":3"#),
+      s.contains(r#""DevDocComment""#) && s.contains(r#""occurrence":3"#),
       "got: {s}"
     );
     let round: ResolutionRefId = serde_json::from_str(&s).unwrap();

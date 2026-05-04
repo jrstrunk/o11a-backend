@@ -77,7 +77,9 @@ impl CutoffAlgorithm {
   pub fn parse(s: &str) -> Result<Self, String> {
     match s.trim().to_ascii_lowercase().as_str() {
       "gap" => Ok(CutoffAlgorithm::Gap),
-      "top-k-floor" | "topkfloor" | "top_k_floor" => Ok(CutoffAlgorithm::TopKFloor),
+      "top-k-floor" | "topkfloor" | "top_k_floor" => {
+        Ok(CutoffAlgorithm::TopKFloor)
+      }
       other => Err(format!(
         "invalid --semantic-linking-pass2-algo value '{other}' (expected one of: gap, top-k-floor)"
       )),
@@ -297,9 +299,10 @@ pub fn parse_cli(
   {
     algo = Some(CutoffAlgorithm::parse(&s)?);
   }
-  if let (None, Ok(s)) =
-    (compare_all, std::env::var("O11A_SEMANTIC_LINKING_COMPARE_ALL"))
-  {
+  if let (None, Ok(s)) = (
+    compare_all,
+    std::env::var("O11A_SEMANTIC_LINKING_COMPARE_ALL"),
+  ) {
     compare_all = Some(parse_bool(&s)?);
   }
   if let (None, Ok(s)) = (
@@ -375,10 +378,7 @@ mod tests {
 
   #[test]
   fn parse_algo_values() {
-    assert_eq!(
-      CutoffAlgorithm::parse("gap").unwrap(),
-      CutoffAlgorithm::Gap
-    );
+    assert_eq!(CutoffAlgorithm::parse("gap").unwrap(), CutoffAlgorithm::Gap);
     assert_eq!(
       CutoffAlgorithm::parse("top-k-floor").unwrap(),
       CutoffAlgorithm::TopKFloor
@@ -457,18 +457,14 @@ mod tests {
 
   #[test]
   fn cli_rejects_unknown_mode_value() {
-    let args = vec![
-      "--semantic-linking-mode=invalid-mode".to_string(),
-    ];
+    let args = vec!["--semantic-linking-mode=invalid-mode".to_string()];
     let err = parse_cli(&args).unwrap_err();
     assert!(err.contains("invalid"), "got: {}", err);
   }
 
   #[test]
   fn cli_rejects_unknown_algo_value() {
-    let args = vec![
-      "--semantic-linking-pass2-algo=invalid-algo".to_string(),
-    ];
+    let args = vec!["--semantic-linking-pass2-algo=invalid-algo".to_string()];
     let err = parse_cli(&args).unwrap_err();
     assert!(err.contains("invalid"), "got: {}", err);
   }

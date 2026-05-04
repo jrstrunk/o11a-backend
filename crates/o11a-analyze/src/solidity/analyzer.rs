@@ -2335,13 +2335,12 @@ fn collect_references_and_statements(
       error_call,
       ..
     } => {
-      let error_node = if let ASTNode::FunctionCall { expression, .. } =
-        error_call.as_ref()
-      {
-        extract_referenced_declaration(expression)
-      } else {
-        None
-      };
+      let error_node =
+        if let ASTNode::FunctionCall { expression, .. } = error_call.as_ref() {
+          extract_referenced_declaration(expression)
+        } else {
+          None
+        };
       reverts.push(FirstPassRevert {
         statement_node: *node_id,
         kind: RevertConstraintKind::Revert,
@@ -4841,7 +4840,8 @@ mod tests {
   }
 
   #[test]
-  fn collect_events_emitted_via_member_access_does_not_pollute_function_calls() {
+  fn collect_events_emitted_via_member_access_does_not_pollute_function_calls()
+  {
     // `emit Lib.Transfer(...)` already avoided the pollution pre-fix
     // (the FunctionCall arm only pushes when expression is `Identifier`).
     // Lock the behavior in for the MemberAccess form so a future
@@ -5080,8 +5080,7 @@ mod tests {
   #[test]
   fn collect_revert_string_form_has_no_error_topic() {
     // revert("msg") — built-in revert taking a string, no custom error.
-    let revert_call =
-      make_function_call(30, make_identifier(31, "revert", 0));
+    let revert_call = make_function_call(30, make_identifier(31, "revert", 0));
     let (reverts, _events) = run_visitor(&revert_call);
     assert_eq!(reverts.len(), 1);
     assert_eq!(reverts[0].kind, RevertConstraintKind::Revert);
@@ -5109,7 +5108,9 @@ mod tests {
         file_path: "test.sol".to_string(),
       },
       is_publicly_in_scope: true,
-      declaration_kind: NamedTopicKind::Contract(domain::ContractKind::Contract),
+      declaration_kind: NamedTopicKind::Contract(
+        domain::ContractKind::Contract,
+      ),
       visibility: Visibility::Public,
       name: name.to_string(),
       base_contracts: base_node_ids

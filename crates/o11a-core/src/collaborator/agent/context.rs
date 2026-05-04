@@ -3680,13 +3680,8 @@ mod tests {
   /// the same contract topic. Returns the audit, the section topic, the
   /// contract topic, and the two identifier node IDs so a test can ask
   /// the resolver to drop one of them.
-  fn audit_with_two_resolved_identifiers() -> (
-    AuditData,
-    topic::Topic,
-    topic::Topic,
-    i32,
-    i32,
-  ) {
+  fn audit_with_two_resolved_identifiers()
+  -> (AuditData, topic::Topic, topic::Topic, i32, i32) {
     use crate::documentation::ast::{DocumentationAST, DocumentationNode};
     let mut audit =
       domain::new_audit_data("test".to_string(), HashSet::new(), None);
@@ -3760,7 +3755,10 @@ mod tests {
     let unfiltered = mechanical_semantic_links(&audit);
     let empty_excluded =
       mechanical_semantic_links_excluding(&audit, &HashSet::new());
-    assert_eq!(unfiltered.section_to_contracts, empty_excluded.section_to_contracts);
+    assert_eq!(
+      unfiltered.section_to_contracts,
+      empty_excluded.section_to_contracts
+    );
     assert_eq!(
       unfiltered.section_to_declarations,
       empty_excluded.section_to_declarations
@@ -3779,8 +3777,7 @@ mod tests {
 
     let mut exclude_one = HashSet::new();
     exclude_one.insert(id_a);
-    let r1 =
-      mechanical_semantic_links_excluding(&audit, &exclude_one);
+    let r1 = mechanical_semantic_links_excluding(&audit, &exclude_one);
     assert_eq!(
       r1.section_to_contracts.get(&section_topic),
       Some(&vec![contract_topic]),
@@ -3793,8 +3790,7 @@ mod tests {
     let mut exclude_both = HashSet::new();
     exclude_both.insert(id_a);
     exclude_both.insert(id_b);
-    let r2 =
-      mechanical_semantic_links_excluding(&audit, &exclude_both);
+    let r2 = mechanical_semantic_links_excluding(&audit, &exclude_both);
     assert!(!r2.section_to_contracts.contains_key(&section_topic));
     assert!(!r2.section_to_declarations.contains_key(&section_topic));
   }
@@ -3828,10 +3824,8 @@ mod tests {
       audit_with_two_resolved_identifiers();
     let mut exclude = HashSet::new();
     exclude.insert(id_a);
-    let r1 =
-      mechanical_semantic_links_excluding(&audit, &exclude);
-    let r2 =
-      mechanical_semantic_links_excluding(&audit, &exclude);
+    let r1 = mechanical_semantic_links_excluding(&audit, &exclude);
+    let r2 = mechanical_semantic_links_excluding(&audit, &exclude);
     assert_eq!(
       r1.section_to_contracts.get(&section_topic),
       r2.section_to_contracts.get(&section_topic),
@@ -3885,36 +3879,35 @@ mod tests {
     named_contract(contract_a, "Vault");
     named_contract(contract_b, "Token");
 
-    let mk_ident =
-      |node_id: i32, value: &str, target: topic::Topic| {
-        DocumentationNode::CodeIdentifier {
-          node_id,
-          value: value.to_string(),
-          referenced_topic: Some(target),
-          kind: Some(NamedTopicKind::Contract(ContractKind::Contract)),
-          referenced_name: Some(value.to_string()),
-          referenced_topic_candidates: vec![],
-        }
-      };
+    let mk_ident = |node_id: i32, value: &str, target: topic::Topic| {
+      DocumentationNode::CodeIdentifier {
+        node_id,
+        value: value.to_string(),
+        referenced_topic: Some(target),
+        kind: Some(NamedTopicKind::Contract(ContractKind::Contract)),
+        referenced_name: Some(value.to_string()),
+        referenced_topic_candidates: vec![],
+      }
+    };
     let mk_section =
-      |section_id: i32, ident: DocumentationNode| {
-        DocumentationNode::Section {
-          node_id: section_id,
-          title: format!("Section {}", section_id),
-          children: vec![DocumentationNode::Paragraph {
-            node_id: section_id + 1,
-            position: None,
-            children: vec![ident],
-          }],
-        }
+      |section_id: i32, ident: DocumentationNode| DocumentationNode::Section {
+        node_id: section_id,
+        title: format!("Section {}", section_id),
+        children: vec![DocumentationNode::Paragraph {
+          node_id: section_id + 1,
+          position: None,
+          children: vec![ident],
+        }],
       };
 
     let id_a = 901;
     let id_b = 902;
     let section_a_id = 700;
     let section_b_id = 800;
-    let section_a = mk_section(section_a_id, mk_ident(id_a, "Vault", contract_a));
-    let section_b = mk_section(section_b_id, mk_ident(id_b, "Token", contract_b));
+    let section_a =
+      mk_section(section_a_id, mk_ident(id_a, "Vault", contract_a));
+    let section_b =
+      mk_section(section_b_id, mk_ident(id_b, "Token", contract_b));
 
     let doc_path = domain::ProjectPath {
       file_path: "README.md".to_string(),
@@ -3955,10 +3948,7 @@ mod tests {
     assert!(!r.section_to_contracts.contains_key(&sec_a));
     assert!(!r.section_to_declarations.contains_key(&sec_a));
     // Section B: untouched — its identifier stays.
-    assert_eq!(
-      r.section_to_contracts.get(&sec_b),
-      Some(&vec![contract_b]),
-    );
+    assert_eq!(r.section_to_contracts.get(&sec_b), Some(&vec![contract_b]),);
     assert_eq!(
       r.section_to_declarations.get(&sec_b),
       Some(&vec![contract_b]),
@@ -4022,16 +4012,15 @@ mod tests {
     let section_id = 700;
     let section_topic = topic::new_documentation_topic(section_id);
 
-    let mk_ident = |node_id: i32, target: topic::Topic| {
-      DocumentationNode::CodeIdentifier {
+    let mk_ident =
+      |node_id: i32, target: topic::Topic| DocumentationNode::CodeIdentifier {
         node_id,
         value: format!("ident_{}", node_id),
         referenced_topic: Some(target),
         kind: Some(NamedTopicKind::Contract(ContractKind::Contract)),
         referenced_name: Some(format!("ident_{}", node_id)),
         referenced_topic_candidates: vec![],
-      }
-    };
+      };
     let section = DocumentationNode::Section {
       node_id: section_id,
       title: "Mixed".to_string(),
@@ -4058,8 +4047,11 @@ mod tests {
 
     // Production baseline: both contracts anchor.
     let baseline = mechanical_semantic_links(&audit);
-    let mut baseline_contracts =
-      baseline.section_to_contracts.get(&section_topic).unwrap().clone();
+    let mut baseline_contracts = baseline
+      .section_to_contracts
+      .get(&section_topic)
+      .unwrap()
+      .clone();
     baseline_contracts.sort_by_key(|t| t.id().to_string());
     let mut expected = vec![phase_a_contract, phase_b_contract];
     expected.sort_by_key(|t| t.id().to_string());
@@ -4107,8 +4099,7 @@ mod tests {
       // unknown IDs as well.
       HashSet::from([id_a, 9_999_999]),
     ] {
-      let filtered =
-        mechanical_semantic_links_excluding(&audit, &exclude);
+      let filtered = mechanical_semantic_links_excluding(&audit, &exclude);
       let baseline_contracts: std::collections::HashSet<_> = baseline
         .section_to_contracts
         .get(&section_topic)
@@ -4163,12 +4154,8 @@ mod tests {
   /// Build an audit whose Section contains one ambiguous-but-Phase-E
   /// `CodeIdentifier` whose candidate list spans two contracts. Returns
   /// the audit, the section topic, and both contract topics.
-  fn audit_with_phase_e_candidates_in_two_contracts() -> (
-    AuditData,
-    topic::Topic,
-    topic::Topic,
-    topic::Topic,
-  ) {
+  fn audit_with_phase_e_candidates_in_two_contracts()
+  -> (AuditData, topic::Topic, topic::Topic, topic::Topic) {
     use crate::documentation::ast::{DocumentationAST, DocumentationNode};
 
     let mut audit =
@@ -4332,7 +4319,9 @@ mod tests {
       "excluding the Phase E node removes the contract anchors",
     );
     assert!(
-      !filtered.section_to_declarations.contains_key(&section_topic),
+      !filtered
+        .section_to_declarations
+        .contains_key(&section_topic),
       "Phase E never adds declarations",
     );
   }
@@ -4360,43 +4349,75 @@ mod tests {
         alpha,
         "Alpha",
         NamedTopicKind::Contract(ContractKind::Contract),
-        Scope::Container { container: domain::ProjectPath { file_path: "Alpha.sol".into() } },
+        Scope::Container {
+          container: domain::ProjectPath {
+            file_path: "Alpha.sol".into(),
+          },
+        },
       ),
       (
         beta,
         "Beta",
         NamedTopicKind::Contract(ContractKind::Contract),
-        Scope::Container { container: domain::ProjectPath { file_path: "Beta.sol".into() } },
+        Scope::Container {
+          container: domain::ProjectPath {
+            file_path: "Beta.sol".into(),
+          },
+        },
       ),
       (
         gamma,
         "Gamma",
         NamedTopicKind::Contract(ContractKind::Contract),
-        Scope::Container { container: domain::ProjectPath { file_path: "Gamma.sol".into() } },
+        Scope::Container {
+          container: domain::ProjectPath {
+            file_path: "Gamma.sol".into(),
+          },
+        },
       ),
       (
         alpha_x,
         "x",
         NamedTopicKind::Function(FunctionKind::Function),
-        Scope::Component { container: domain::ProjectPath { file_path: "Alpha.sol".into() }, component: alpha },
+        Scope::Component {
+          container: domain::ProjectPath {
+            file_path: "Alpha.sol".into(),
+          },
+          component: alpha,
+        },
       ),
       (
         beta_x,
         "x",
         NamedTopicKind::Function(FunctionKind::Function),
-        Scope::Component { container: domain::ProjectPath { file_path: "Beta.sol".into() }, component: beta },
+        Scope::Component {
+          container: domain::ProjectPath {
+            file_path: "Beta.sol".into(),
+          },
+          component: beta,
+        },
       ),
       (
         gamma_y,
         "y",
         NamedTopicKind::Function(FunctionKind::Function),
-        Scope::Component { container: domain::ProjectPath { file_path: "Gamma.sol".into() }, component: gamma },
+        Scope::Component {
+          container: domain::ProjectPath {
+            file_path: "Gamma.sol".into(),
+          },
+          component: gamma,
+        },
       ),
       (
         alpha_y,
         "y",
         NamedTopicKind::Function(FunctionKind::Function),
-        Scope::Component { container: domain::ProjectPath { file_path: "Alpha.sol".into() }, component: alpha },
+        Scope::Component {
+          container: domain::ProjectPath {
+            file_path: "Alpha.sol".into(),
+          },
+          component: alpha,
+        },
       ),
     ] {
       audit.topic_metadata.insert(
@@ -4426,16 +4447,17 @@ mod tests {
     // the `contains` check in the consumer).
     let section_id = 700;
     let section_topic = topic::new_documentation_topic(section_id);
-    let mk_phase_e = |node_id: i32, value: &str, candidates: Vec<topic::Topic>| {
-      DocumentationNode::CodeIdentifier {
-        node_id,
-        value: value.to_string(),
-        referenced_topic: None,
-        kind: None,
-        referenced_name: None,
-        referenced_topic_candidates: candidates,
-      }
-    };
+    let mk_phase_e =
+      |node_id: i32, value: &str, candidates: Vec<topic::Topic>| {
+        DocumentationNode::CodeIdentifier {
+          node_id,
+          value: value.to_string(),
+          referenced_topic: None,
+          kind: None,
+          referenced_name: None,
+          referenced_topic_candidates: candidates,
+        }
+      };
     let section = DocumentationNode::Section {
       node_id: section_id,
       title: "Overview".to_string(),
@@ -4448,7 +4470,9 @@ mod tests {
         ],
       }],
     };
-    let doc_path = domain::ProjectPath { file_path: "README.md".into() };
+    let doc_path = domain::ProjectPath {
+      file_path: "README.md".into(),
+    };
     audit.asts.insert(
       doc_path.clone(),
       domain::AST::Documentation(DocumentationAST {
@@ -4498,31 +4522,54 @@ mod tests {
         vault,
         "Vault",
         NamedTopicKind::Contract(ContractKind::Contract),
-        Scope::Container { container: domain::ProjectPath { file_path: "Vault.sol".into() } },
+        Scope::Container {
+          container: domain::ProjectPath {
+            file_path: "Vault.sol".into(),
+          },
+        },
       ),
       (
         token,
         "Token",
         NamedTopicKind::Contract(ContractKind::Contract),
-        Scope::Container { container: domain::ProjectPath { file_path: "Token.sol".into() } },
+        Scope::Container {
+          container: domain::ProjectPath {
+            file_path: "Token.sol".into(),
+          },
+        },
       ),
       (
         vault_a,
         "doA",
         NamedTopicKind::Function(FunctionKind::Function),
-        Scope::Component { container: domain::ProjectPath { file_path: "Vault.sol".into() }, component: vault },
+        Scope::Component {
+          container: domain::ProjectPath {
+            file_path: "Vault.sol".into(),
+          },
+          component: vault,
+        },
       ),
       (
         token_b,
         "doB",
         NamedTopicKind::Function(FunctionKind::Function),
-        Scope::Component { container: domain::ProjectPath { file_path: "Token.sol".into() }, component: token },
+        Scope::Component {
+          container: domain::ProjectPath {
+            file_path: "Token.sol".into(),
+          },
+          component: token,
+        },
       ),
       (
         token_c,
         "doB",
         NamedTopicKind::Function(FunctionKind::Function),
-        Scope::Component { container: domain::ProjectPath { file_path: "Vault.sol".into() }, component: vault },
+        Scope::Component {
+          container: domain::ProjectPath {
+            file_path: "Vault.sol".into(),
+          },
+          component: vault,
+        },
       ),
     ] {
       audit.topic_metadata.insert(
@@ -4571,7 +4618,9 @@ mod tests {
         children: vec![phase_a_ident, phase_e_ident],
       }],
     };
-    let doc_path = domain::ProjectPath { file_path: "README.md".into() };
+    let doc_path = domain::ProjectPath {
+      file_path: "README.md".into(),
+    };
     audit.asts.insert(
       doc_path.clone(),
       domain::AST::Documentation(DocumentationAST {
@@ -4626,25 +4675,43 @@ mod tests {
         vault,
         "Vault",
         NamedTopicKind::Contract(ContractKind::Contract),
-        Scope::Container { container: domain::ProjectPath { file_path: "Vault.sol".into() } },
+        Scope::Container {
+          container: domain::ProjectPath {
+            file_path: "Vault.sol".into(),
+          },
+        },
       ),
       (
         token,
         "Token",
         NamedTopicKind::Contract(ContractKind::Contract),
-        Scope::Container { container: domain::ProjectPath { file_path: "Token.sol".into() } },
+        Scope::Container {
+          container: domain::ProjectPath {
+            file_path: "Token.sol".into(),
+          },
+        },
       ),
       (
         vault_x,
         "x",
         NamedTopicKind::Function(FunctionKind::Function),
-        Scope::Component { container: domain::ProjectPath { file_path: "Vault.sol".into() }, component: vault },
+        Scope::Component {
+          container: domain::ProjectPath {
+            file_path: "Vault.sol".into(),
+          },
+          component: vault,
+        },
       ),
       (
         token_x,
         "x",
         NamedTopicKind::Function(FunctionKind::Function),
-        Scope::Component { container: domain::ProjectPath { file_path: "Token.sol".into() }, component: token },
+        Scope::Component {
+          container: domain::ProjectPath {
+            file_path: "Token.sol".into(),
+          },
+          component: token,
+        },
       ),
     ] {
       audit.topic_metadata.insert(
@@ -4692,7 +4759,9 @@ mod tests {
       title: "Outer".to_string(),
       children: vec![inner_section],
     };
-    let doc_path = domain::ProjectPath { file_path: "README.md".into() };
+    let doc_path = domain::ProjectPath {
+      file_path: "README.md".into(),
+    };
     audit.asts.insert(
       doc_path.clone(),
       domain::AST::Documentation(DocumentationAST {

@@ -106,7 +106,9 @@ fn finalize(audit: &mut AuditData) {
 /// edge_type)` triples using each edge type's default weight. Used
 /// for tests that bypass the SolidityExtractor and want full control
 /// over what edges exist.
-fn graph_from(edges: &[(topic::Topic, topic::Topic, EdgeType)]) -> ResolutionGraph {
+fn graph_from(
+  edges: &[(topic::Topic, topic::Topic, EdgeType)],
+) -> ResolutionGraph {
   let mut g = ResolutionGraph::new();
   for (s, d, et) in edges {
     g.add_edge(*s, *d, *et, et.default_weight());
@@ -136,7 +138,10 @@ fn code_id(
 }
 
 /// Tiny helper to wrap inline children in a Paragraph wrapper.
-fn paragraph(node_id: i32, children: Vec<DocumentationNode>) -> DocumentationNode {
+fn paragraph(
+  node_id: i32,
+  children: Vec<DocumentationNode>,
+) -> DocumentationNode {
   DocumentationNode::Paragraph {
     node_id,
     position: None,
@@ -145,7 +150,11 @@ fn paragraph(node_id: i32, children: Vec<DocumentationNode>) -> DocumentationNod
 }
 
 /// Build a Section with the given title and children.
-fn section(node_id: i32, title: &str, children: Vec<DocumentationNode>) -> DocumentationNode {
+fn section(
+  node_id: i32,
+  title: &str,
+  children: Vec<DocumentationNode>,
+) -> DocumentationNode {
   DocumentationNode::Section {
     node_id,
     title: title.to_string(),
@@ -236,14 +245,14 @@ fn empty_root_produces_no_traces() {
 fn missing_resolution_graph_is_no_op() {
   let mut audit = empty_audit();
   audit.resolution_graph = None;
-  let mut node = root(
-    1,
-    vec![paragraph(2, vec![code_id(3, "anyName", None)])],
-  );
+  let mut node = root(1, vec![paragraph(2, vec![code_id(3, "anyName", None)])]);
   let before = node.clone();
   let traces = resolve_doc_tree(&mut node, &audit);
   assert!(traces.is_empty());
-  assert_eq!(node, before, "tree must not be mutated when graph is absent");
+  assert_eq!(
+    node, before,
+    "tree must not be mutated when graph is absent"
+  );
 }
 
 #[test]
@@ -287,10 +296,7 @@ fn phase_a_resolved_ref_is_left_alone_and_no_trace_emitted() {
 
   let mut node = root(
     1,
-    vec![paragraph(
-      2,
-      vec![code_id(3, "transfer", Some(already))],
-    )],
+    vec![paragraph(2, vec![code_id(3, "transfer", Some(already))])],
   );
   let traces = resolve_doc_tree(&mut node, &audit);
   assert!(traces.is_empty(), "no attempt → no trace");
@@ -489,7 +495,9 @@ fn ancestor_section_seeds_disambiguate_child_section_ref() {
         component: c,
       },
     };
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -621,7 +629,10 @@ fn sibling_section_seeds_do_not_cross_pollinate() {
         11,
         2,
         "Vault Section",
-        vec![paragraph(12, vec![code_id(13, "Vault", Some(vault_contract))])],
+        vec![paragraph(
+          12,
+          vec![code_id(13, "Vault", Some(vault_contract))],
+        )],
       ),
       heading_with_section(
         20,
@@ -693,7 +704,9 @@ fn closer_ancestor_seed_outweighs_distant_one() {
     } else {
       NamedTopicKind::StateVariable(domain::VariableMutability::Mutable)
     };
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -725,7 +738,10 @@ fn closer_ancestor_seed_outweighs_distant_one() {
   let h1 = heading_with_section(100, 101, 1, "H1", vec![h2]);
   let mut tree = root(
     1,
-    vec![paragraph(2, vec![code_id(3, "Bar", Some(bar_contract))]), h1],
+    vec![
+      paragraph(2, vec![code_id(3, "Bar", Some(bar_contract))]),
+      h1,
+    ],
   );
 
   let traces = resolve_doc_tree(&mut tree, &audit);
@@ -741,7 +757,11 @@ fn closer_ancestor_seed_outweighs_distant_one() {
     ],
     "Foo at distance 0 dominates Bar at distance 4",
   );
-  let trace = &traces.iter().find(|(_, t)| t.identifier == "value").unwrap().1;
+  let trace = &traces
+    .iter()
+    .find(|(_, t)| t.identifier == "value")
+    .unwrap()
+    .1;
   assert_eq!(trace.chosen_topic, Some(foo_value));
 }
 
@@ -777,7 +797,9 @@ fn seeds_beyond_depth_six_do_not_contribute() {
     } else {
       NamedTopicKind::StateVariable(domain::VariableMutability::Mutable)
     };
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -792,8 +814,7 @@ fn seeds_beyond_depth_six_do_not_contribute() {
   // 6 — has the ambiguous `value`. The Foo seed at depth 8 should
   // be capped out, leaving the seed vector empty for the deepest
   // section and the ref unresolved.
-  let mut current =
-    paragraph(1000, vec![code_id(1001, "value", None)]);
+  let mut current = paragraph(1000, vec![code_id(1001, "value", None)]);
   // Chain of 8 Heading→Section wrappings.
   for i in (0..8).rev() {
     let hid = 100 + i * 10;
@@ -819,7 +840,11 @@ fn seeds_beyond_depth_six_do_not_contribute() {
   // The ambiguous `value` ref's chain to the root (where Foo lives)
   // is 8 deep — past the cap. With no in-cap seeds, no candidate
   // can clear the threshold.
-  let trace = &traces.iter().find(|(_, t)| t.identifier == "value").unwrap().1;
+  let trace = &traces
+    .iter()
+    .find(|(_, t)| t.identifier == "value")
+    .unwrap()
+    .1;
   assert_eq!(
     trace.chosen_topic, None,
     "depth-6 cap must zero out beyond-cap ancestor seeds",
@@ -864,7 +889,9 @@ fn multiple_ambiguous_refs_in_one_section_share_pr_run() {
     } else {
       NamedTopicKind::Function(FunctionKind::Function)
     };
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -988,7 +1015,10 @@ fn child_section_seeds_do_not_propagate_to_parent_section() {
         101,
         1,
         "Detail",
-        vec![paragraph(102, vec![code_id(103, "Vault", Some(vault_contract))])],
+        vec![paragraph(
+          102,
+          vec![code_id(103, "Vault", Some(vault_contract))],
+        )],
       ),
     ],
   );
@@ -1050,10 +1080,7 @@ fn ratio_below_threshold_leaves_reference_unresolved_with_full_trace() {
     1,
     vec![paragraph(
       2,
-      vec![
-        code_id(3, "Hub", Some(center)),
-        code_id(4, "ambig", None),
-      ],
+      vec![code_id(3, "Hub", Some(center)), code_id(4, "ambig", None)],
     )],
   );
 
@@ -1116,7 +1143,10 @@ fn unreachable_runner_up_lets_top_win_with_ratio_one() {
     1,
     vec![paragraph(
       2,
-      vec![code_id(3, "Anchor", Some(anchor)), code_id(4, "thing", None)],
+      vec![
+        code_id(3, "Anchor", Some(anchor)),
+        code_id(4, "thing", None),
+      ],
     )],
   );
 
@@ -1339,10 +1369,10 @@ fn function_param_boost_inactive_when_function_not_seeded() {
 #[test]
 fn equal_pr_breaks_tie_on_qualified_name_ascending() {
   let parent = nt(1);
-  let a_kind_owner = nt(10);  // contract "AAA"
-  let b_kind_owner = nt(20);  // contract "BBB"
-  let a_method = nt(11);  // AAA.target
-  let b_method = nt(21);  // BBB.target
+  let a_kind_owner = nt(10); // contract "AAA"
+  let b_kind_owner = nt(20); // contract "BBB"
+  let a_method = nt(11); // AAA.target
+  let b_method = nt(21); // BBB.target
 
   let mut audit = staged_audit();
   audit.topic_metadata.insert(
@@ -1413,7 +1443,10 @@ fn equal_pr_breaks_tie_on_qualified_name_ascending() {
     1,
     vec![paragraph(
       2,
-      vec![code_id(3, "Parent", Some(parent)), code_id(4, "target", None)],
+      vec![
+        code_id(3, "Parent", Some(parent)),
+        code_id(4, "target", None),
+      ],
     )],
   );
   let traces = resolve_doc_tree(&mut tree, &audit);
@@ -1468,7 +1501,9 @@ fn pass_is_byte_deterministic_across_repeat_runs() {
     } else {
       NamedTopicKind::Function(FunctionKind::Function)
     };
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -1539,7 +1574,10 @@ fn one_trace_per_ambiguous_reference_attempted() {
     .iter()
     .map(|(k, _)| match k {
       ResolutionRefId::DocumentationNode(id) => *id,
-      other => panic!("doc-tree pass must only emit DocumentationNode keys, got {:?}", other),
+      other => panic!(
+        "doc-tree pass must only emit DocumentationNode keys, got {:?}",
+        other
+      ),
     })
     .collect();
   assert_eq!(node_ids, vec![3, 4, 5]);
@@ -1617,7 +1655,9 @@ fn flat_doc_with_no_headings_uses_root_as_section_scope() {
     } else {
       NamedTopicKind::Function(FunctionKind::Function)
     };
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -1673,7 +1713,9 @@ fn nested_non_section_containers_are_traversed() {
     } else {
       NamedTopicKind::Function(FunctionKind::Function)
     };
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -1717,7 +1759,9 @@ fn nested_non_section_containers_are_traversed() {
   let mut resolved = Vec::new();
   collect_resolutions(&tree, &mut resolved);
   assert!(
-    resolved.iter().any(|(id, t)| *id == 51 && *t == Some(vault_transfer)),
+    resolved
+      .iter()
+      .any(|(id, t)| *id == 51 && *t == Some(vault_transfer)),
     "deeply nested ambiguous ref must be resolved; got {:?}",
     resolved
   );
@@ -1738,7 +1782,7 @@ fn top_contributing_edges_sorted_descending_and_capped_at_three() {
   let p_low = nt(3);
   let p_lower = nt(4);
   let p_lowest = nt(5);
-  let other = nt(200);  // a runner-up so the threshold is non-trivial
+  let other = nt(200); // a runner-up so the threshold is non-trivial
 
   let mut audit = staged_audit();
   // Two candidates for ambiguous "x": `target` (with many
@@ -2012,9 +2056,7 @@ fn phase_b_winner_carries_kind_and_referenced_name_snapshots() {
     node: &DocumentationNode,
     id: i32,
   ) -> Option<&DocumentationNode> {
-    if let DocumentationNode::CodeIdentifier {
-      node_id, ..
-    } = node
+    if let DocumentationNode::CodeIdentifier { node_id, .. } = node
       && *node_id == id
     {
       return Some(node);
@@ -2341,8 +2383,10 @@ fn repeated_ambiguous_identifier_in_one_section_resolves_consistently() {
   // One trace per ambiguous reference. All three have identical
   // candidate scoring (same section → same PR result).
   assert_eq!(traces.len(), 3);
-  let scores: Vec<&[CandidateScore]> =
-    traces.iter().map(|(_, t)| t.candidate_scores.as_slice()).collect();
+  let scores: Vec<&[CandidateScore]> = traces
+    .iter()
+    .map(|(_, t)| t.candidate_scores.as_slice())
+    .collect();
   // Same first-place topic across all three traces.
   for s in &scores {
     assert_eq!(s[0].topic, vault_transfer);
@@ -2387,7 +2431,9 @@ fn code_identifier_in_heading_text_belongs_to_enclosing_section() {
     } else {
       NamedTopicKind::Function(FunctionKind::Function)
     };
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -2513,7 +2559,9 @@ fn co_loc_fixture() -> (
     } else {
       NamedTopicKind::LocalVariable
     };
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -2549,10 +2597,7 @@ fn phase_c_pins_pair_when_intersection_is_singleton() {
     1,
     vec![paragraph(
       2,
-      vec![
-        code_id(3, "amount", None),
-        code_id(4, "tmp", None),
-      ],
+      vec![code_id(3, "amount", None), code_id(4, "tmp", None)],
     )],
   );
   let traces = resolve_doc_tree(&mut tree, &audit);
@@ -2572,7 +2617,9 @@ fn phase_c_pins_pair_when_intersection_is_singleton() {
     assert!(trace.chosen_topic.is_some());
     // Phase C reuses the iteration's PR ranking so candidate_scores
     // are still surfaced (zero-mass since seeds are empty).
-    assert!(!trace.candidate_scores.is_empty() || trace.candidate_scores.is_empty());
+    assert!(
+      !trace.candidate_scores.is_empty() || trace.candidate_scores.is_empty()
+    );
   }
   // Pin the Phase C semantic by topic: confirm the chosen scope.
   let amount_trace = traces
@@ -2598,10 +2645,7 @@ fn phase_c_abstains_when_intersection_has_multiple_scopes() {
     1,
     vec![paragraph(
       2,
-      vec![
-        code_id(3, "amount", None),
-        code_id(4, "tmp", None),
-      ],
+      vec![code_id(3, "amount", None), code_id(4, "tmp", None)],
     )],
   );
   let traces = resolve_doc_tree(&mut tree, &audit);
@@ -2628,10 +2672,7 @@ fn phase_c_no_op_with_single_ambiguous_ref() {
   let (audit, _foo, _bar, _foo_amount, _foo_tmp, _bar_amount, _bar_tmp) =
     co_loc_fixture();
 
-  let mut tree = root(
-    1,
-    vec![paragraph(2, vec![code_id(3, "amount", None)])],
-  );
+  let mut tree = root(1, vec![paragraph(2, vec![code_id(3, "amount", None)])]);
   let traces = resolve_doc_tree(&mut tree, &audit);
 
   let mut resolved = Vec::new();
@@ -2781,10 +2822,7 @@ fn phase_d_exits_early_when_no_new_resolutions() {
   // returns zero PR (no seeds), Phase C abstains (single ref). The
   // outer loop should NOT keep iterating — it exits after iter 1.
   // Phase E then records the candidates as the anchor-by-name fallback.
-  let mut tree = root(
-    1,
-    vec![paragraph(2, vec![code_id(3, "amount", None)])],
-  );
+  let mut tree = root(1, vec![paragraph(2, vec![code_id(3, "amount", None)])]);
   let traces = resolve_doc_tree(&mut tree, &audit);
   assert_eq!(traces.len(), 1);
   // The trace's iteration field holds the round in which the (only)
@@ -2809,10 +2847,7 @@ fn phase_d_iteration_field_never_exceeds_cap() {
     1,
     vec![paragraph(
       2,
-      vec![
-        code_id(3, "amount", None),
-        code_id(4, "tmp", None),
-      ],
+      vec![code_id(3, "amount", None), code_id(4, "tmp", None)],
     )],
   );
   let traces = resolve_doc_tree(&mut tree, &audit);
@@ -2827,10 +2862,7 @@ fn phase_d_iteration_field_never_exceeds_cap() {
   // Sanity: the resolution actually picks the foo declarations.
   let mut resolved = Vec::new();
   collect_resolutions(&tree, &mut resolved);
-  assert_eq!(
-    resolved,
-    vec![(3, Some(foo_amount)), (4, Some(foo_tmp))],
-  );
+  assert_eq!(resolved, vec![(3, Some(foo_amount)), (4, Some(foo_tmp))],);
   let _ = foo;
 }
 
@@ -2848,10 +2880,7 @@ fn phase_c_and_d_are_byte_deterministic_across_repeat_runs() {
       1,
       vec![paragraph(
         2,
-        vec![
-          code_id(3, "amount", None),
-          code_id(4, "tmp", None),
-        ],
+        vec![code_id(3, "amount", None), code_id(4, "tmp", None)],
       )],
     )
   };
@@ -2907,8 +2936,16 @@ fn phase_c_does_not_revisit_phase_b_resolutions() {
   }
   let mut resolved = Vec::new();
   collect_resolutions(&tree, &mut resolved);
-  assert!(resolved.iter().any(|(id, t)| *id == 3 && *t == Some(foo_amount)));
-  assert!(resolved.iter().any(|(id, t)| *id == 4 && *t == Some(foo_tmp)));
+  assert!(
+    resolved
+      .iter()
+      .any(|(id, t)| *id == 3 && *t == Some(foo_amount))
+  );
+  assert!(
+    resolved
+      .iter()
+      .any(|(id, t)| *id == 4 && *t == Some(foo_tmp))
+  );
 }
 
 /// Phase C — three-ref interaction with one conflict. Two non-conflicted
@@ -2961,7 +2998,9 @@ fn phase_c_conflicting_pin_drops_only_the_conflicting_ref() {
     } else {
       NamedTopicKind::LocalVariable
     };
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -2998,9 +3037,9 @@ fn phase_c_conflicting_pin_drops_only_the_conflicting_ref() {
   let trace_for = |id: i32| {
     traces
       .iter()
-      .find(|(k, _)| {
-        matches!(k, ResolutionRefId::DocumentationNode(n) if *n == id)
-      })
+      .find(
+        |(k, _)| matches!(k, ResolutionRefId::DocumentationNode(n) if *n == id),
+      )
       .unwrap()
       .1
       .clone()
@@ -3135,7 +3174,9 @@ fn phase_b_and_c_coexist_in_same_iteration() {
       },
     ),
   ] {
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   // Edges: Anchor → Alpha.wire (Calls). NO edges into the β region —
@@ -3182,9 +3223,9 @@ fn phase_b_and_c_coexist_in_same_iteration() {
   let trace_for = |id: i32| {
     traces
       .iter()
-      .find(|(k, _)| {
-        matches!(k, ResolutionRefId::DocumentationNode(n) if *n == id)
-      })
+      .find(
+        |(k, _)| matches!(k, ResolutionRefId::DocumentationNode(n) if *n == id),
+      )
       .unwrap()
       .1
       .clone()
@@ -3275,13 +3316,7 @@ fn phase_d_cross_section_ancestor_cascade_resolves_descendant() {
     1,
     "Outer",
     vec![
-      paragraph(
-        3,
-        vec![
-          code_id(4, "amount", None),
-          code_id(5, "tmp", None),
-        ],
-      ),
+      paragraph(3, vec![code_id(4, "amount", None), code_id(5, "tmp", None)]),
       inner,
     ],
   );
@@ -3291,9 +3326,9 @@ fn phase_d_cross_section_ancestor_cascade_resolves_descendant() {
   let trace_for = |id: i32| {
     traces
       .iter()
-      .find(|(k, _)| {
-        matches!(k, ResolutionRefId::DocumentationNode(n) if *n == id)
-      })
+      .find(
+        |(k, _)| matches!(k, ResolutionRefId::DocumentationNode(n) if *n == id),
+      )
       .unwrap()
       .1
       .clone()
@@ -3339,10 +3374,7 @@ fn phase_c_trace_carries_full_pr_ranked_candidate_scores() {
     1,
     vec![paragraph(
       2,
-      vec![
-        code_id(3, "amount", None),
-        code_id(4, "tmp", None),
-      ],
+      vec![code_id(3, "amount", None), code_id(4, "tmp", None)],
     )],
   );
   let traces = resolve_doc_tree(&mut tree, &audit);
@@ -3366,8 +3398,11 @@ fn phase_c_trace_carries_full_pr_ranked_candidate_scores() {
     assert_eq!(score.pr_score, 0.0, "expected zero PR with no graph signal");
   }
   // Verify all expected candidates appear (regardless of order).
-  let candidate_topics: std::collections::BTreeSet<topic::Topic> =
-    amount_trace.candidate_scores.iter().map(|c| c.topic).collect();
+  let candidate_topics: std::collections::BTreeSet<topic::Topic> = amount_trace
+    .candidate_scores
+    .iter()
+    .map(|c| c.topic)
+    .collect();
   assert!(candidate_topics.contains(&foo_amount));
   assert!(candidate_topics.contains(&nt(21))); // bar_amount
 
@@ -3397,10 +3432,7 @@ fn phase_d_unresolved_ref_records_iteration_of_last_attempt() {
   }
   finalize(&mut audit);
 
-  let mut tree = root(
-    1,
-    vec![paragraph(2, vec![code_id(3, "x", None)])],
-  );
+  let mut tree = root(1, vec![paragraph(2, vec![code_id(3, "x", None)])]);
   let traces = resolve_doc_tree(&mut tree, &audit);
   assert_eq!(traces.len(), 1);
   let trace = &traces[0].1;
@@ -3442,10 +3474,7 @@ fn phase_e_populates_referenced_topic_candidates_when_unresolved() {
   // No singleton intersection (both `amount` candidates remain), no
   // graph signal favoring one over the other → Phase B fails, Phase C
   // abstains (single ref), Phase E takes over.
-  let mut tree = root(
-    1,
-    vec![paragraph(2, vec![code_id(3, "amount", None)])],
-  );
+  let mut tree = root(1, vec![paragraph(2, vec![code_id(3, "amount", None)])]);
   let traces = resolve_doc_tree(&mut tree, &audit);
 
   // referenced_topic stays None; referenced_topic_candidates carries
@@ -3453,7 +3482,10 @@ fn phase_e_populates_referenced_topic_candidates_when_unresolved() {
   let DocumentationNode::Root { children, .. } = &tree else {
     unreachable!()
   };
-  let DocumentationNode::Paragraph { children: pchildren, .. } = &children[0]
+  let DocumentationNode::Paragraph {
+    children: pchildren,
+    ..
+  } = &children[0]
   else {
     unreachable!()
   };
@@ -3509,7 +3541,10 @@ fn phase_e_skips_refs_with_no_name_candidates() {
   let DocumentationNode::Root { children, .. } = &tree else {
     unreachable!()
   };
-  let DocumentationNode::Paragraph { children: pchildren, .. } = &children[0]
+  let DocumentationNode::Paragraph {
+    children: pchildren,
+    ..
+  } = &children[0]
   else {
     unreachable!()
   };
@@ -3545,13 +3580,17 @@ fn phase_e_does_not_touch_phase_b_winners() {
       vault_contract,
       "Vault",
       NamedTopicKind::Contract(ContractKind::Contract),
-      Scope::Container { container: pp("test.sol") },
+      Scope::Container {
+        container: pp("test.sol"),
+      },
     ),
     (
       token_contract,
       "Token",
       NamedTopicKind::Contract(ContractKind::Contract),
-      Scope::Container { container: pp("test.sol") },
+      Scope::Container {
+        container: pp("test.sol"),
+      },
     ),
     (
       vault_transfer,
@@ -3574,7 +3613,9 @@ fn phase_e_does_not_touch_phase_b_winners() {
     (other_a, "ambig", NamedTopicKind::Builtin, Scope::Global),
     (other_b, "ambig", NamedTopicKind::Builtin, Scope::Global),
   ] {
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -3607,7 +3648,10 @@ fn phase_e_does_not_touch_phase_b_winners() {
   let DocumentationNode::Root { children, .. } = &tree else {
     unreachable!()
   };
-  let DocumentationNode::Paragraph { children: pchildren, .. } = &children[0]
+  let DocumentationNode::Paragraph {
+    children: pchildren,
+    ..
+  } = &children[0]
   else {
     unreachable!()
   };
@@ -3661,10 +3705,7 @@ fn phase_e_is_byte_deterministic_across_repeat_runs() {
       1,
       vec![paragraph(
         2,
-        vec![
-          code_id(3, "amount", None),
-          code_id(4, "tmp", None),
-        ],
+        vec![code_id(3, "amount", None), code_id(4, "tmp", None)],
       )],
     )
   };
@@ -3708,13 +3749,17 @@ fn phase_e_anchors_section_to_each_candidates_containing_contract() {
       vault,
       "Vault",
       NamedTopicKind::Contract(ContractKind::Contract),
-      Scope::Container { container: pp("test.sol") },
+      Scope::Container {
+        container: pp("test.sol"),
+      },
     ),
     (
       token,
       "Token",
       NamedTopicKind::Contract(ContractKind::Contract),
-      Scope::Container { container: pp("test.sol") },
+      Scope::Container {
+        container: pp("test.sol"),
+      },
     ),
     (
       vault_transfer,
@@ -3735,7 +3780,9 @@ fn phase_e_anchors_section_to_each_candidates_containing_contract() {
       },
     ),
   ] {
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   // No edges → Phase B sees zero PR for both candidates → no winner →
@@ -3760,11 +3807,13 @@ fn phase_e_anchors_section_to_each_candidates_containing_contract() {
   let path = pp("test.md");
   audit.asts.insert(
     path.clone(),
-    domain::AST::Documentation(o11a_core::documentation::ast::DocumentationAST {
-      nodes: vec![tree_owned],
-      project_path: path.clone(),
-      source_content: String::new(),
-    }),
+    domain::AST::Documentation(
+      o11a_core::documentation::ast::DocumentationAST {
+        nodes: vec![tree_owned],
+        project_path: path.clone(),
+        source_content: String::new(),
+      },
+    ),
   );
 
   let result = mechanical_semantic_links(&audit);
@@ -3807,7 +3856,12 @@ fn phase_e_global_scope_candidates_contribute_no_contract_anchors() {
   for id in &[100, 200] {
     audit.topic_metadata.insert(
       nt(*id),
-      named_topic(nt(*id), "globalThing", NamedTopicKind::Builtin, Scope::Global),
+      named_topic(
+        nt(*id),
+        "globalThing",
+        NamedTopicKind::Builtin,
+        Scope::Global,
+      ),
     );
   }
   finalize(&mut audit);
@@ -3823,11 +3877,13 @@ fn phase_e_global_scope_candidates_contribute_no_contract_anchors() {
   let path = pp("test.md");
   audit.asts.insert(
     path.clone(),
-    domain::AST::Documentation(o11a_core::documentation::ast::DocumentationAST {
-      nodes: vec![tree_section],
-      project_path: path.clone(),
-      source_content: String::new(),
-    }),
+    domain::AST::Documentation(
+      o11a_core::documentation::ast::DocumentationAST {
+        nodes: vec![tree_section],
+        project_path: path.clone(),
+        source_content: String::new(),
+      },
+    ),
   );
 
   let result = mechanical_semantic_links(&audit);
@@ -3860,16 +3916,16 @@ fn phase_e_preserves_candidate_iteration_order() {
   }
   finalize(&mut audit);
 
-  let mut tree = root(
-    1,
-    vec![paragraph(2, vec![code_id(3, "thing", None)])],
-  );
+  let mut tree = root(1, vec![paragraph(2, vec![code_id(3, "thing", None)])]);
   let _ = resolve_doc_tree(&mut tree, &audit);
 
   let DocumentationNode::Root { children, .. } = &tree else {
     unreachable!()
   };
-  let DocumentationNode::Paragraph { children: pchildren, .. } = &children[0]
+  let DocumentationNode::Paragraph {
+    children: pchildren,
+    ..
+  } = &children[0]
   else {
     unreachable!()
   };
@@ -3903,10 +3959,7 @@ fn phase_e_is_idempotent_across_repeat_passes() {
     1,
     vec![paragraph(
       2,
-      vec![
-        code_id(3, "amount", None),
-        code_id(4, "tmp", None),
-      ],
+      vec![code_id(3, "amount", None), code_id(4, "tmp", None)],
     )],
   );
 
@@ -3953,7 +4006,9 @@ fn phase_e_contract_candidates_anchor_to_themselves() {
         t,
         "Vault",
         NamedTopicKind::Contract(ContractKind::Contract),
-        Scope::Container { container: pp(file) },
+        Scope::Container {
+          container: pp(file),
+        },
       ),
     );
   }
@@ -3972,7 +4027,10 @@ fn phase_e_contract_candidates_anchor_to_themselves() {
   let DocumentationNode::Section { children, .. } = &tree else {
     unreachable!()
   };
-  let DocumentationNode::Paragraph { children: pchildren, .. } = &children[0]
+  let DocumentationNode::Paragraph {
+    children: pchildren,
+    ..
+  } = &children[0]
   else {
     unreachable!()
   };
@@ -3992,11 +4050,13 @@ fn phase_e_contract_candidates_anchor_to_themselves() {
   let path = pp("test.md");
   audit.asts.insert(
     path.clone(),
-    domain::AST::Documentation(o11a_core::documentation::ast::DocumentationAST {
-      nodes: vec![tree],
-      project_path: path.clone(),
-      source_content: String::new(),
-    }),
+    domain::AST::Documentation(
+      o11a_core::documentation::ast::DocumentationAST {
+        nodes: vec![tree],
+        project_path: path.clone(),
+        source_content: String::new(),
+      },
+    ),
   );
   let result = mechanical_semantic_links(&audit);
   let section_topic = dt(section_id);

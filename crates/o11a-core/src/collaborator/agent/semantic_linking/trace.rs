@@ -215,11 +215,8 @@ pub fn run_mechanical_trace(
       .unwrap_or_default();
     let mut members_by_contract: Vec<ContractMembersRecord> = Vec::new();
     for ct in &anchored_contracts {
-      let members = context::mechanical_section_to_members(
-        &section_decls,
-        ct,
-        audit_data,
-      );
+      let members =
+        context::mechanical_section_to_members(&section_decls, ct, audit_data);
       let contract_name = audit_data
         .topic_metadata
         .get(ct)
@@ -369,4 +366,3 @@ fn section_path_for(
     })
     .unwrap_or_default()
 }
-

@@ -563,8 +563,8 @@ mod tests {
     let data_context = Arc::new(Mutex::new(domain::new_data_context()));
     run_analysis(&project.root, "audit-1", &data_context).unwrap();
 
-    let err = run_analysis(&project.root, "audit-1", &data_context)
-      .unwrap_err();
+    let err =
+      run_analysis(&project.root, "audit-1", &data_context).unwrap_err();
     match err {
       AnalysisError::AuditExists(id) => assert_eq!(id, "audit-1"),
       other => panic!("expected AuditExists, got {:?}", other),
@@ -611,9 +611,7 @@ mod tests {
       documentation: Some("inline block doc".to_string()),
       statements: Vec::new(),
     };
-    audit
-      .nodes
-      .insert(block_topic, Node::Solidity(block_node));
+    audit.nodes.insert(block_topic, Node::Solidity(block_node));
     audit.topic_metadata.insert(
       block_topic,
       TopicMetadata::UnnamedTopic {

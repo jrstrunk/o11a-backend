@@ -223,9 +223,9 @@ fn record_pin(
 mod tests {
   use super::*;
   use crate::domain::{
-    AuditData, ContainingBlockLayer, ContractKind, FunctionKind, NamedTopicKind,
-    NamedTopicVisibility, ProjectPath, Scope, TopicMetadata, UnnamedTopicKind,
-    new_audit_data,
+    AuditData, ContainingBlockLayer, ContractKind, FunctionKind,
+    NamedTopicKind, NamedTopicVisibility, ProjectPath, Scope, TopicMetadata,
+    UnnamedTopicKind, new_audit_data,
   };
   use std::collections::HashSet;
 
@@ -243,7 +243,12 @@ mod tests {
     }
   }
 
-  fn named(t: topic::Topic, name: &str, kind: NamedTopicKind, scope: Scope) -> TopicMetadata {
+  fn named(
+    t: topic::Topic,
+    name: &str,
+    kind: NamedTopicKind,
+    scope: Scope,
+  ) -> TopicMetadata {
     TopicMetadata::NamedTopic {
       topic: t,
       scope,
@@ -260,7 +265,11 @@ mod tests {
     }
   }
 
-  fn unnamed(t: topic::Topic, kind: UnnamedTopicKind, scope: Scope) -> TopicMetadata {
+  fn unnamed(
+    t: topic::Topic,
+    kind: UnnamedTopicKind,
+    scope: Scope,
+  ) -> TopicMetadata {
     TopicMetadata::UnnamedTopic {
       topic: t,
       scope,
@@ -348,7 +357,8 @@ mod tests {
   }
 
   #[test]
-  fn enclosing_scope_for_local_in_nested_block_walks_through_blocks_to_function() {
+  fn enclosing_scope_for_local_in_nested_block_walks_through_blocks_to_function()
+   {
     // function foo() { { local_x } } — local_x sits inside an inner
     // SemanticBlock inside an outer SemanticBlock inside foo. The
     // enclosing function-level scope is `foo` regardless of how many
@@ -481,10 +491,8 @@ mod tests {
   fn enclosing_scope_for_global_topic_is_none() {
     let mut a = audit();
     let g = nt(1);
-    a.topic_metadata.insert(
-      g,
-      named(g, "g", NamedTopicKind::Builtin, Scope::Global),
-    );
+    a.topic_metadata
+      .insert(g, named(g, "g", NamedTopicKind::Builtin, Scope::Global));
     assert_eq!(enclosing_member_scope(&a, g), None);
   }
 
@@ -1049,8 +1057,10 @@ mod tests {
       },
     ];
     let res_shuffled = co_locate(&a, &shuffled_refs);
-    let pins_shuffled: BTreeMap<usize, topic::Topic> =
-      res_shuffled.iter().map(|r| (r.ref_id, r.chosen_topic)).collect();
+    let pins_shuffled: BTreeMap<usize, topic::Topic> = res_shuffled
+      .iter()
+      .map(|r| (r.ref_id, r.chosen_topic))
+      .collect();
     assert_eq!(
       pins, pins_shuffled,
       "co_locate's final state must be input-order-independent",

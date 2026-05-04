@@ -12,9 +12,9 @@
 //! tool used via `--semantic-linking-mode=bm25` and
 //! `--semantic-linking-compare-all`.
 
-mod tokenize;
 mod corpus;
 mod score;
+mod tokenize;
 
 pub use corpus::{
   ContractDoc, MemberDoc, SummaryCorpusVariant, build_contract_member_corpus,
@@ -263,14 +263,7 @@ mod tests {
   #[test]
   fn cutoff_gap_finds_clear_elbow() {
     // Top 3 are clear winners, then big drop.
-    let scored = vec![
-      cs(10.0),
-      cs(8.0),
-      cs(7.0),
-      cs(2.0),
-      cs(1.5),
-      cs(1.2),
-    ];
+    let scored = vec![cs(10.0), cs(8.0), cs(7.0), cs(2.0), cs(1.5), cs(1.2)];
     let kept = cutoff_gap(&scored);
     assert_eq!(kept, vec![0, 1, 2]);
   }
@@ -315,8 +308,7 @@ mod tests {
 
   #[test]
   fn cutoff_permissive_keeps_everything_above_floor() {
-    let scored =
-      vec![cs(50.0), cs(20.0), cs(5.0), cs(1.5), cs(1.0), cs(0.99)];
+    let scored = vec![cs(50.0), cs(20.0), cs(5.0), cs(1.5), cs(1.0), cs(0.99)];
     let kept = cutoff_permissive(&scored);
     // floor=1.0 (inclusive); 0.99 dropped.
     assert_eq!(kept, vec![0, 1, 2, 3, 4]);

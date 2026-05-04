@@ -15,7 +15,9 @@ pub mod solidity_extractor;
 pub mod trace;
 
 pub use builder::{Extractor, build};
-pub use coloc::{CoLocInput, CoLocResolution, co_locate, enclosing_member_scope};
+pub use coloc::{
+  CoLocInput, CoLocResolution, co_locate, enclosing_member_scope,
+};
 pub use edge::{Direction, EdgeType};
 pub use graph::{OutEdge, ResolutionGraph};
 pub use pagerank::personalized_pagerank;
@@ -65,10 +67,16 @@ mod tests {
     let parent = topic::new_node_topic(&100);
     let child = topic::new_node_topic(&200);
     let other = topic::new_node_topic(&300);
-    audit.topic_metadata.insert(parent, named_topic(parent, "Parent"));
-    audit.topic_metadata.insert(child, named_topic(child, "Child"));
+    audit
+      .topic_metadata
+      .insert(parent, named_topic(parent, "Parent"));
+    audit
+      .topic_metadata
+      .insert(child, named_topic(child, "Child"));
     // Two topics with the same name to exercise candidate dedup/lookup.
-    audit.topic_metadata.insert(other, named_topic(other, "Child"));
+    audit
+      .topic_metadata
+      .insert(other, named_topic(other, "Child"));
     audit.inheritance.insert(child, vec![parent]);
     audit.name_index = TopicNameIndex::build(&audit);
     audit
@@ -135,11 +143,7 @@ mod tests {
       true
     }
 
-    fn extract(
-      &self,
-      _audit_data: &AuditData,
-      graph: &mut ResolutionGraph,
-    ) {
+    fn extract(&self, _audit_data: &AuditData, graph: &mut ResolutionGraph) {
       let s = topic::new_node_topic(&1);
       // Insert in (dest desc, edge_type desc) order to exercise the
       // sort.
@@ -158,11 +162,7 @@ mod tests {
       false
     }
 
-    fn extract(
-      &self,
-      _audit_data: &AuditData,
-      _graph: &mut ResolutionGraph,
-    ) {
+    fn extract(&self, _audit_data: &AuditData, _graph: &mut ResolutionGraph) {
       panic!("InertExtractor.extract must not be called");
     }
   }
@@ -193,8 +193,11 @@ mod tests {
       vec![Box::new(ScrambledMockExtractor) as Box<dyn Extractor>],
     );
     let s = topic::new_node_topic(&1);
-    let pairs: Vec<(topic::Topic, EdgeType)> =
-      g.out_edges(s).iter().map(|e| (e.dest, e.edge_type)).collect();
+    let pairs: Vec<(topic::Topic, EdgeType)> = g
+      .out_edges(s)
+      .iter()
+      .map(|e| (e.dest, e.edge_type))
+      .collect();
     // Sorted ascending by (dest, edge_type) — proves finalize ran.
     assert_eq!(
       pairs,

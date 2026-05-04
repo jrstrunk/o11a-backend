@@ -58,7 +58,9 @@ impl ResolutionGraph {
   pub fn finalize(&mut self) {
     for edges in self.adjacency.values_mut() {
       edges.sort_by(|a, b| {
-        a.dest.cmp(&b.dest).then_with(|| a.edge_type.cmp(&b.edge_type))
+        a.dest
+          .cmp(&b.dest)
+          .then_with(|| a.edge_type.cmp(&b.edge_type))
       });
     }
   }

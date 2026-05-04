@@ -82,7 +82,9 @@ fn named_topic(
 
 /// Build a `ResolutionGraph` directly from edge triples. Used by tests
 /// that bypass the SolidityExtractor.
-fn graph_from(edges: &[(topic::Topic, topic::Topic, EdgeType)]) -> ResolutionGraph {
+fn graph_from(
+  edges: &[(topic::Topic, topic::Topic, EdgeType)],
+) -> ResolutionGraph {
   let mut g = ResolutionGraph::new();
   for (s, d, et) in edges {
     g.add_edge(*s, *d, *et, et.default_weight());
@@ -116,9 +118,7 @@ fn insert_dev_doc(
     .map(|m| m.scope().clone())
     .unwrap_or(Scope::Global);
 
-  audit
-    .nodes
-    .insert(comment_topic, Node::Comment(nodes));
+  audit.nodes.insert(comment_topic, Node::Comment(nodes));
   audit.topic_metadata.insert(
     comment_topic,
     TopicMetadata::CommentTopic {
@@ -190,10 +190,7 @@ fn comment_resolutions(
   let Some(Node::Comment(nodes)) = audit.nodes.get(&comment_topic) else {
     return Vec::new();
   };
-  fn walk(
-    node: &CommentNode,
-    out: &mut Vec<(String, Option<topic::Topic>)>,
-  ) {
+  fn walk(node: &CommentNode, out: &mut Vec<(String, Option<topic::Topic>)>) {
     match node {
       CommentNode::CodeIdentifier {
         value,
@@ -307,13 +304,7 @@ fn non_dev_doc_authors_are_skipped() {
     (-11, Author::System),
     (-12, Author::AgentMicro),
   ] {
-    insert_dev_doc(
-      &mut audit,
-      cid,
-      func,
-      author,
-      vec![code_id("ambig", None)],
-    );
+    insert_dev_doc(&mut audit, cid, func, author, vec![code_id("ambig", None)]);
   }
   resolve_dev_doc_comments(&mut audit);
   // Exactly one trace, keyed under the DevTechnical comment.
@@ -1121,7 +1112,9 @@ fn pass_is_byte_deterministic_across_repeat_runs() {
       } else {
         NamedTopicKind::Function(FunctionKind::Function)
       };
-      audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+      audit
+        .topic_metadata
+        .insert(t, named_topic(t, name, kind, scope));
     }
     audit.name_index = TopicNameIndex::build(&audit);
     audit.resolution_graph = Some(graph_from(&[
@@ -1156,9 +1149,14 @@ fn pass_is_byte_deterministic_across_repeat_runs() {
   let bytes_b = serde_json::to_vec(&traces_b).unwrap();
   assert_eq!(bytes_a, bytes_b, "traces must serialize identically");
 
-  let nodes_a = serde_json::to_vec(audit_a.nodes.get(&ct(-10)).unwrap()).unwrap();
-  let nodes_b = serde_json::to_vec(audit_b.nodes.get(&ct(-10)).unwrap()).unwrap();
-  assert_eq!(nodes_a, nodes_b, "post-pass comment trees must match byte-for-byte");
+  let nodes_a =
+    serde_json::to_vec(audit_a.nodes.get(&ct(-10)).unwrap()).unwrap();
+  let nodes_b =
+    serde_json::to_vec(audit_b.nodes.get(&ct(-10)).unwrap()).unwrap();
+  assert_eq!(
+    nodes_a, nodes_b,
+    "post-pass comment trees must match byte-for-byte"
+  );
 }
 
 #[test]
@@ -1185,11 +1183,7 @@ fn one_trace_per_ambiguous_reference_attempted() {
     -10,
     func,
     Author::DevTechnical,
-    vec![
-      code_id("x", None),
-      code_id("x", None),
-      code_id("x", None),
-    ],
+    vec![code_id("x", None), code_id("x", None), code_id("x", None)],
   );
   resolve_dev_doc_comments(&mut audit);
   assert_eq!(audit.resolution_traces.len(), 3);
@@ -1236,18 +1230,18 @@ fn ambiguous_inside_inline_code_uses_depth_first_occurrence_index() {
   );
   resolve_dev_doc_comments(&mut audit);
   // Two ambiguous refs → two traces at occurrences 0 and 1.
-  assert!(
-    audit.resolution_traces.contains_key(&ResolutionRefId::DevDocComment {
+  assert!(audit.resolution_traces.contains_key(
+    &ResolutionRefId::DevDocComment {
       comment_topic: comment,
       occurrence: 0
-    })
-  );
-  assert!(
-    audit.resolution_traces.contains_key(&ResolutionRefId::DevDocComment {
+    }
+  ));
+  assert!(audit.resolution_traces.contains_key(
+    &ResolutionRefId::DevDocComment {
       comment_topic: comment,
       occurrence: 1
-    })
-  );
+    }
+  ));
 }
 
 // ---------------------------------------------------------------------
@@ -1409,9 +1403,9 @@ fn pass_is_idempotent_under_repeat_application() {
   let mentions_after_first = audit.mentions_index.clone();
   let mentioned_after_first = match audit.topic_metadata.get(&comment).unwrap()
   {
-    TopicMetadata::CommentTopic { mentioned_topics, .. } => {
-      mentioned_topics.clone()
-    }
+    TopicMetadata::CommentTopic {
+      mentioned_topics, ..
+    } => mentioned_topics.clone(),
     _ => panic!(),
   };
 
@@ -1422,13 +1416,13 @@ fn pass_is_idempotent_under_repeat_application() {
   // pass's no-op `new_mentions` set means the contains() guard is
   // never hit, but more importantly the list never grew.
   assert_eq!(audit.mentions_index, mentions_after_first);
-  let mentioned_after_second =
-    match audit.topic_metadata.get(&comment).unwrap() {
-      TopicMetadata::CommentTopic { mentioned_topics, .. } => {
-        mentioned_topics.clone()
-      }
-      _ => panic!(),
-    };
+  let mentioned_after_second = match audit.topic_metadata.get(&comment).unwrap()
+  {
+    TopicMetadata::CommentTopic {
+      mentioned_topics, ..
+    } => mentioned_topics.clone(),
+    _ => panic!(),
+  };
   assert_eq!(mentioned_after_second, mentioned_after_first);
 }
 
@@ -2080,10 +2074,7 @@ fn phase_a_seed_to_non_named_topic_does_not_panic() {
     -10,
     func,
     Author::DevTechnical,
-    vec![
-      code_id("synthetic", Some(feature)),
-      code_id("thing", None),
-    ],
+    vec![code_id("synthetic", Some(feature)), code_id("thing", None)],
   );
   // Should not panic.
   resolve_dev_doc_comments(&mut audit);
@@ -2185,10 +2176,7 @@ fn scope_chain_and_phase_a_seed_weights_sum_for_overlapping_topic() {
     -10,
     vault_func,
     Author::DevTechnical,
-    vec![
-      code_id("Vault", Some(vault)),
-      code_id("helper", None),
-    ],
+    vec![code_id("Vault", Some(vault)), code_id("helper", None)],
   );
   resolve_dev_doc_comments(&mut audit);
 
@@ -2291,14 +2279,12 @@ fn nested_inline_code_does_not_break_walk() {
   assert_eq!(res, vec![("transfer".to_string(), Some(vault_transfer))]);
   // Trace key must use occurrence index 0 — the deeply-nested
   // CodeIdentifier is the first (and only) one walked depth-first.
-  assert!(
-    audit
-      .resolution_traces
-      .contains_key(&ResolutionRefId::DevDocComment {
-        comment_topic: comment,
-        occurrence: 0,
-      })
-  );
+  assert!(audit.resolution_traces.contains_key(
+    &ResolutionRefId::DevDocComment {
+      comment_topic: comment,
+      occurrence: 0,
+    }
+  ));
 }
 
 /// Build-plan unit ask: a function NatSpec that mentions a sibling
@@ -2549,7 +2535,9 @@ fn multiple_comments_resolve_independently_against_their_own_chains() {
         component: c,
       },
     };
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -2676,7 +2664,11 @@ fn scope_chain_truncates_at_max_seed_depth() {
   //   [b7, b6, b5, b4, b3, b2, b1]
   // — vault_func and vault both fall off the seed vector.
   let chain = domain::scope_ancestor_chain(&audit, blocks[7]);
-  assert_eq!(chain.len(), 10, "uncapped chain must include every ancestor");
+  assert_eq!(
+    chain.len(),
+    10,
+    "uncapped chain must include every ancestor"
+  );
   // The pass's helper truncates it; we test the cap is enforced by
   // exercising a comment attached to b7 and asserting that an
   // ambiguous identifier resolvable only via vault_func / vault stays
@@ -2697,12 +2689,7 @@ fn scope_chain_truncates_at_max_seed_depth() {
   );
   audit.topic_metadata.insert(
     other,
-    named_topic(
-      other,
-      "amb",
-      NamedTopicKind::Builtin,
-      Scope::Global,
-    ),
+    named_topic(other, "amb", NamedTopicKind::Builtin, Scope::Global),
   );
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -2902,7 +2889,9 @@ fn dev_doc_co_loc_fixture() -> (
     } else {
       NamedTopicKind::LocalVariable
     };
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -2919,7 +2908,9 @@ fn dev_doc_co_loc_fixture() -> (
     (bar, bar_tmp, EdgeType::ContainsLocal),
     (bar_tmp, bar, EdgeType::ContainsLocal),
   ]));
-  (audit, contract, foo, bar, foo_amount, foo_tmp, bar_amount, bar_tmp)
+  (
+    audit, contract, foo, bar, foo_amount, foo_tmp, bar_amount, bar_tmp,
+  )
 }
 
 /// Phase C — singleton intersection. NatSpec attached to a sibling
@@ -2929,8 +2920,16 @@ fn dev_doc_co_loc_fixture() -> (
 /// scope chain seeded) does not flow into either local.
 #[test]
 fn phase_c_pins_pair_in_dev_doc_when_intersection_is_singleton() {
-  let (mut audit, contract, _foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
-    dev_doc_co_loc_fixture();
+  let (
+    mut audit,
+    contract,
+    _foo,
+    _bar,
+    foo_amount,
+    foo_tmp,
+    _bar_amount,
+    _bar_tmp,
+  ) = dev_doc_co_loc_fixture();
   // Drop bar.tmp so Phase C can find a singleton intersection.
   audit.topic_metadata.remove(&nt(22));
   audit.name_index = TopicNameIndex::build(&audit);
@@ -3023,10 +3022,7 @@ fn phase_c_dev_doc_abstains_on_multi_element_intersection() {
   let res = comment_resolutions(&audit, comment);
   assert_eq!(
     res,
-    vec![
-      ("amount".to_string(), None),
-      ("tmp".to_string(), None),
-    ],
+    vec![("amount".to_string(), None), ("tmp".to_string(), None),],
     "two-element intersection must abstain",
   );
 
@@ -3053,8 +3049,16 @@ fn phase_c_dev_doc_abstains_on_multi_element_intersection() {
 /// PhaseC (iter 1) → PhaseB (iter 2).
 #[test]
 fn phase_d_dev_doc_cascades_resolutions_across_iterations() {
-  let (mut audit, contract, foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
-    dev_doc_co_loc_fixture();
+  let (
+    mut audit,
+    contract,
+    foo,
+    _bar,
+    foo_amount,
+    foo_tmp,
+    _bar_amount,
+    _bar_tmp,
+  ) = dev_doc_co_loc_fixture();
   audit.topic_metadata.remove(&nt(22)); // drop bar.tmp
 
   // Sibling function `helper` is the comment target. To force Phase C
@@ -3326,8 +3330,10 @@ fn phase_c_and_d_dev_doc_byte_deterministic_across_repeat_runs() {
   // Compare the post-pass comment tree byte-for-byte — the actual
   // mutation Phase B / C / D produced.
   let comment = ct(-10);
-  let nodes_a = serde_json::to_vec(audit_a.nodes.get(&comment).unwrap()).unwrap();
-  let nodes_b = serde_json::to_vec(audit_b.nodes.get(&comment).unwrap()).unwrap();
+  let nodes_a =
+    serde_json::to_vec(audit_a.nodes.get(&comment).unwrap()).unwrap();
+  let nodes_b =
+    serde_json::to_vec(audit_b.nodes.get(&comment).unwrap()).unwrap();
   assert_eq!(nodes_a, nodes_b);
 }
 
@@ -3337,8 +3343,16 @@ fn phase_c_and_d_dev_doc_byte_deterministic_across_repeat_runs() {
 /// up in both maps.
 #[test]
 fn phase_c_dev_doc_resolutions_appear_in_mentions_index() {
-  let (mut audit, contract, _foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
-    dev_doc_co_loc_fixture();
+  let (
+    mut audit,
+    contract,
+    _foo,
+    _bar,
+    foo_amount,
+    foo_tmp,
+    _bar_amount,
+    _bar_tmp,
+  ) = dev_doc_co_loc_fixture();
   audit.topic_metadata.remove(&nt(22));
   audit.name_index = TopicNameIndex::build(&audit);
 
@@ -3369,19 +3383,24 @@ fn phase_c_dev_doc_resolutions_appear_in_mentions_index() {
   resolve_dev_doc_comments(&mut audit);
 
   // Both topics now key into mentions_index pointing at this comment.
-  assert!(audit
-    .mentions_index
-    .get(&foo_amount)
-    .map(|v| v.contains(&comment))
-    .unwrap_or(false));
-  assert!(audit
-    .mentions_index
-    .get(&foo_tmp)
-    .map(|v| v.contains(&comment))
-    .unwrap_or(false));
+  assert!(
+    audit
+      .mentions_index
+      .get(&foo_amount)
+      .map(|v| v.contains(&comment))
+      .unwrap_or(false)
+  );
+  assert!(
+    audit
+      .mentions_index
+      .get(&foo_tmp)
+      .map(|v| v.contains(&comment))
+      .unwrap_or(false)
+  );
 
-  let TopicMetadata::CommentTopic { mentioned_topics, .. } =
-    audit.topic_metadata.get(&comment).unwrap()
+  let TopicMetadata::CommentTopic {
+    mentioned_topics, ..
+  } = audit.topic_metadata.get(&comment).unwrap()
   else {
     panic!("expected CommentTopic")
   };
@@ -3441,7 +3460,9 @@ fn phase_c_dev_doc_conflicting_pin_drops_only_the_conflicting_ref() {
     } else {
       NamedTopicKind::LocalVariable
     };
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -3503,8 +3524,16 @@ fn phase_c_dev_doc_conflicting_pin_drops_only_the_conflicting_ref() {
 /// not relabel.
 #[test]
 fn phase_c_dev_doc_does_not_revisit_phase_b_resolutions() {
-  let (mut audit, _contract, foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
-    dev_doc_co_loc_fixture();
+  let (
+    mut audit,
+    _contract,
+    foo,
+    _bar,
+    foo_amount,
+    foo_tmp,
+    _bar_amount,
+    _bar_tmp,
+  ) = dev_doc_co_loc_fixture();
   audit.topic_metadata.remove(&nt(22)); // drop bar.tmp
 
   // Replace the symmetric fixture graph with one that ONLY connects
@@ -3657,7 +3686,8 @@ fn phase_c_dev_doc_abstains_when_singleton_scope_holds_multiple_candidates() {
       },
     ),
   );
-  for (t, name) in [(amount1, "amount"), (amount2, "amount"), (foo_tmp, "tmp")] {
+  for (t, name) in [(amount1, "amount"), (amount2, "amount"), (foo_tmp, "tmp")]
+  {
     audit.topic_metadata.insert(
       t,
       named_topic(
@@ -3712,8 +3742,16 @@ fn phase_c_dev_doc_abstains_when_singleton_scope_holds_multiple_candidates() {
 /// maps.
 #[test]
 fn phase_d_dev_doc_per_comment_isolation_during_iteration() {
-  let (mut audit, contract, _foo, _bar, foo_amount, foo_tmp, _bar_amount, _bar_tmp) =
-    dev_doc_co_loc_fixture();
+  let (
+    mut audit,
+    contract,
+    _foo,
+    _bar,
+    foo_amount,
+    foo_tmp,
+    _bar_amount,
+    _bar_tmp,
+  ) = dev_doc_co_loc_fixture();
   audit.topic_metadata.remove(&nt(22));
   audit.name_index = TopicNameIndex::build(&audit);
 
@@ -3833,31 +3871,43 @@ fn phase_e_dev_doc_populates_referenced_topic_candidates() {
       vault,
       "Vault",
       NamedTopicKind::Contract(ContractKind::Contract),
-      Scope::Container { container: pp("test.sol") },
+      Scope::Container {
+        container: pp("test.sol"),
+      },
     ),
     (
       token,
       "Token",
       NamedTopicKind::Contract(ContractKind::Contract),
-      Scope::Container { container: pp("test.sol") },
+      Scope::Container {
+        container: pp("test.sol"),
+      },
     ),
     (
       helper_contract,
       "Helper",
       NamedTopicKind::Contract(ContractKind::Contract),
-      Scope::Container { container: pp("test.sol") },
+      Scope::Container {
+        container: pp("test.sol"),
+      },
     ),
     (
       vault_transfer,
       "transfer",
       NamedTopicKind::Function(FunctionKind::Function),
-      Scope::Component { container: pp("test.sol"), component: vault },
+      Scope::Component {
+        container: pp("test.sol"),
+        component: vault,
+      },
     ),
     (
       token_transfer,
       "transfer",
       NamedTopicKind::Function(FunctionKind::Function),
-      Scope::Component { container: pp("test.sol"), component: token },
+      Scope::Component {
+        container: pp("test.sol"),
+        component: token,
+      },
     ),
     (
       helper_func,
@@ -3869,7 +3919,9 @@ fn phase_e_dev_doc_populates_referenced_topic_candidates() {
       },
     ),
   ] {
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   // No edges into either transfer from helper_contract or helper_func.
@@ -3904,10 +3956,7 @@ fn phase_e_dev_doc_populates_referenced_topic_candidates() {
   else {
     unreachable!()
   };
-  assert!(
-    referenced_topic.is_none(),
-    "Phase E never picks a winner",
-  );
+  assert!(referenced_topic.is_none(), "Phase E never picks a winner",);
   assert_eq!(
     *referenced_topic_candidates,
     vec![vault_transfer, token_transfer],
@@ -3998,36 +4047,51 @@ fn phase_e_dev_doc_does_not_touch_phase_b_winners() {
       vault,
       "Vault",
       NamedTopicKind::Contract(ContractKind::Contract),
-      Scope::Container { container: pp("test.sol") },
+      Scope::Container {
+        container: pp("test.sol"),
+      },
     ),
     (
       token,
       "Token",
       NamedTopicKind::Contract(ContractKind::Contract),
-      Scope::Container { container: pp("test.sol") },
+      Scope::Container {
+        container: pp("test.sol"),
+      },
     ),
     (
       vault_transfer,
       "transfer",
       NamedTopicKind::Function(FunctionKind::Function),
-      Scope::Component { container: pp("test.sol"), component: vault },
+      Scope::Component {
+        container: pp("test.sol"),
+        component: vault,
+      },
     ),
     (
       vault_func,
       "doStuff",
       NamedTopicKind::Function(FunctionKind::Function),
-      Scope::Component { container: pp("test.sol"), component: vault },
+      Scope::Component {
+        container: pp("test.sol"),
+        component: vault,
+      },
     ),
     (
       token_transfer,
       "transfer",
       NamedTopicKind::Function(FunctionKind::Function),
-      Scope::Component { container: pp("test.sol"), component: token },
+      Scope::Component {
+        container: pp("test.sol"),
+        component: token,
+      },
     ),
     (other_a, "ambig", NamedTopicKind::Builtin, Scope::Global),
     (other_b, "ambig", NamedTopicKind::Builtin, Scope::Global),
   ] {
-    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    audit
+      .topic_metadata
+      .insert(t, named_topic(t, name, kind, scope));
   }
   audit.name_index = TopicNameIndex::build(&audit);
   audit.resolution_graph = Some(graph_from(&[
@@ -4064,7 +4128,10 @@ fn phase_e_dev_doc_does_not_touch_phase_b_winners() {
     unreachable!()
   };
   assert_eq!(*tref0, Some(vault_transfer));
-  assert!(tcand0.is_empty(), "Phase B winner's candidates field stays empty");
+  assert!(
+    tcand0.is_empty(),
+    "Phase B winner's candidates field stays empty"
+  );
 
   // Second ref — Phase E.
   let CommentNode::CodeIdentifier {
@@ -4118,8 +4185,9 @@ fn phase_e_dev_doc_does_not_pollute_mentions_index() {
   );
 
   // mentioned_topics on the comment metadata is also unchanged.
-  let TopicMetadata::CommentTopic { mentioned_topics, .. } =
-    audit.topic_metadata.get(&comment).unwrap()
+  let TopicMetadata::CommentTopic {
+    mentioned_topics, ..
+  } = audit.topic_metadata.get(&comment).unwrap()
   else {
     unreachable!()
   };
@@ -4192,13 +4260,17 @@ fn phase_e_dev_doc_is_byte_deterministic_across_repeat_runs() {
         vault,
         "Vault",
         NamedTopicKind::Contract(ContractKind::Contract),
-        Scope::Container { container: pp("test.sol") },
+        Scope::Container {
+          container: pp("test.sol"),
+        },
       ),
       (
         token,
         "Token",
         NamedTopicKind::Contract(ContractKind::Contract),
-        Scope::Container { container: pp("test.sol") },
+        Scope::Container {
+          container: pp("test.sol"),
+        },
       ),
       (
         vault_transfer,
@@ -4228,7 +4300,9 @@ fn phase_e_dev_doc_is_byte_deterministic_across_repeat_runs() {
         },
       ),
     ] {
-      audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+      audit
+        .topic_metadata
+        .insert(t, named_topic(t, name, kind, scope));
     }
     audit.name_index = TopicNameIndex::build(&audit);
     // No edges so PR is uniformly zero — `transfer` falls to Phase E.
@@ -4302,14 +4376,20 @@ fn phase_e_dev_doc_is_idempotent_across_repeat_passes() {
 
   resolve_dev_doc_comments(&mut audit);
   let nodes_first = audit.nodes.get(&comment).cloned().unwrap();
-  let traces_first: Vec<_> =
-    audit.resolution_traces.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+  let traces_first: Vec<_> = audit
+    .resolution_traces
+    .iter()
+    .map(|(k, v)| (k.clone(), v.clone()))
+    .collect();
   let mentions_first = audit.mentions_index.clone();
 
   resolve_dev_doc_comments(&mut audit);
   let nodes_second = audit.nodes.get(&comment).cloned().unwrap();
-  let traces_second: Vec<_> =
-    audit.resolution_traces.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+  let traces_second: Vec<_> = audit
+    .resolution_traces
+    .iter()
+    .map(|(k, v)| (k.clone(), v.clone()))
+    .collect();
   let mentions_second = audit.mentions_index.clone();
 
   assert_eq!(

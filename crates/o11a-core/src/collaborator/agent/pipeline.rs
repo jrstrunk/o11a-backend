@@ -509,7 +509,10 @@ pub async fn build_semantic_links(
       .iter()
       .map(|s| {
         let is_tech = is_tech_idx.lookup(s, audit_data);
-        (*s, semantic_linking::workflow_for_section(cfg.mode, is_tech))
+        (
+          *s,
+          semantic_linking::workflow_for_section(cfg.mode, is_tech),
+        )
       })
       .collect();
 
@@ -680,13 +683,11 @@ pub async fn build_semantic_links(
       if workflow != SectionWorkflow::Bm25 {
         continue;
       }
-      let section_text = match context::render_section_text(
-        section_topic,
-        audit_data,
-      ) {
-        Some(s) if !s.is_empty() => s,
-        _ => continue,
-      };
+      let section_text =
+        match context::render_section_text(section_topic, audit_data) {
+          Some(s) if !s.is_empty() => s,
+          _ => continue,
+        };
       let discovered = semantic_linking::bm25::discover_top_k_contracts(
         &section_text,
         audit_data,
@@ -722,8 +723,7 @@ pub async fn build_semantic_links(
   // by the LLM Pass 2 spawns below and by the BM25 expansion inline branch.
   struct SectionPass2Ctx {
     section_text: String,
-    mech_members_by_contract:
-      HashMap<topic::Topic, Vec<topic::Topic>>,
+    mech_members_by_contract: HashMap<topic::Topic, Vec<topic::Topic>>,
     workflow: SectionWorkflow,
   }
   let mut pass2_ctx_by_section: HashMap<topic::Topic, SectionPass2Ctx> =
@@ -873,12 +873,11 @@ pub async fn build_semantic_links(
       .data_context
       .lock()
       .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
-    let audit_data =
-      ctx_lock
-        .get_audit(audit_id)
-        .ok_or_else(|| PipelineError::AuditNotFound {
-          audit_id: audit_id.to_string(),
-        })?;
+    let audit_data = ctx_lock.get_audit(audit_id).ok_or_else(|| {
+      PipelineError::AuditNotFound {
+        audit_id: audit_id.to_string(),
+      }
+    })?;
 
     for (contract_topic, _src) in contracts_for_section {
       let new_members = bm25::expand_members(
@@ -891,8 +890,7 @@ pub async fn build_semantic_links(
         continue;
       }
       bm25_expansions += new_members.len();
-      let doc_members =
-        section_doc_members.entry(*section_topic).or_default();
+      let doc_members = section_doc_members.entry(*section_topic).or_default();
       let entry = doc_members.entry(*section_topic).or_default();
       for (m, _score) in new_members {
         if !entry.iter().any(|(t, _)| *t == m) {
@@ -1250,10 +1248,7 @@ pub async fn build_semantic_links(
     );
   }
 
-  tracing::info!(
-    "Semantic linking complete in {:?}",
-    total_start.elapsed()
-  );
+  tracing::info!("Semantic linking complete in {:?}", total_start.elapsed());
 
   // ---- Comparison harness: --semantic-linking-compare-all ----
   if cfg.compare_all {

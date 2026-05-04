@@ -10,7 +10,9 @@
 
 use crate::collaborator::agent::context;
 use crate::collaborator::parser::CommentNode;
-use crate::domain::{self, AuditData, NamedTopicKind, Scope, TopicMetadata, topic};
+use crate::domain::{
+  self, AuditData, NamedTopicKind, Scope, TopicMetadata, topic,
+};
 
 /// Which textual content goes into a contract's BM25 Pass 1 summary
 /// document. Both variants include the contract name + NatSpec + each
@@ -49,7 +51,10 @@ pub fn build_contract_member_corpus(
   let mut docs: Vec<MemberDoc> = Vec::new();
 
   for (member_topic, metadata) in &audit_data.topic_metadata {
-    let TopicMetadata::NamedTopic { kind, name, scope, .. } = metadata else {
+    let TopicMetadata::NamedTopic {
+      kind, name, scope, ..
+    } = metadata
+    else {
       continue;
     };
 

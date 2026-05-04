@@ -825,10 +825,8 @@ mod scope_chain_tests {
   fn contract_topic_with_container_scope_yields_just_itself() {
     let mut a = audit();
     let c = nt(1);
-    a.topic_metadata.insert(
-      c,
-      named_with_scope(c, Scope::Container { container: pp() }),
-    );
+    a.topic_metadata
+      .insert(c, named_with_scope(c, Scope::Container { container: pp() }));
     assert_eq!(scope_ancestor_chain(&a, c), vec![c]);
   }
 
@@ -872,10 +870,7 @@ mod scope_chain_tests {
         },
       ),
     );
-    assert_eq!(
-      scope_ancestor_chain(&a, param),
-      vec![param, func, contract],
-    );
+    assert_eq!(scope_ancestor_chain(&a, param), vec![param, func, contract],);
   }
 
   #[test]
@@ -911,7 +906,8 @@ mod scope_chain_tests {
   fn global_scope_topic_yields_just_itself() {
     let mut a = audit();
     let g = nt(1);
-    a.topic_metadata.insert(g, named_with_scope(g, Scope::Global));
+    a.topic_metadata
+      .insert(g, named_with_scope(g, Scope::Global));
     assert_eq!(scope_ancestor_chain(&a, g), vec![g]);
   }
 }
@@ -3141,15 +3137,15 @@ mod tests {
 
   #[test]
   fn candidates_by_simple_name_returns_all_pre_dedup() {
-    let mut audit = new_audit_data(
-      "test".to_string(),
-      HashSet::new(),
-      None,
-    );
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
     let t1 = topic::new_node_topic(&100);
     let t2 = topic::new_node_topic(&200);
-    audit.topic_metadata.insert(t1, test_named_topic(t1, "shared"));
-    audit.topic_metadata.insert(t2, test_named_topic(t2, "shared"));
+    audit
+      .topic_metadata
+      .insert(t1, test_named_topic(t1, "shared"));
+    audit
+      .topic_metadata
+      .insert(t2, test_named_topic(t2, "shared"));
 
     let index = TopicNameIndex::build(&audit);
 
@@ -3163,11 +3159,7 @@ mod tests {
 
   #[test]
   fn candidates_by_simple_name_excludes_common_words() {
-    let mut audit = new_audit_data(
-      "test".to_string(),
-      HashSet::new(),
-      None,
-    );
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
     let t1 = topic::new_node_topic(&1);
     audit.topic_metadata.insert(t1, test_named_topic(t1, "for"));
 
@@ -3180,13 +3172,11 @@ mod tests {
 
   #[test]
   fn candidates_by_simple_name_single_unique_candidate() {
-    let mut audit = new_audit_data(
-      "test".to_string(),
-      HashSet::new(),
-      None,
-    );
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
     let t1 = topic::new_node_topic(&7);
-    audit.topic_metadata.insert(t1, test_named_topic(t1, "Solo"));
+    audit
+      .topic_metadata
+      .insert(t1, test_named_topic(t1, "Solo"));
 
     let index = TopicNameIndex::build(&audit);
 
@@ -3198,17 +3188,17 @@ mod tests {
 
   #[test]
   fn candidates_by_simple_name_sorted_with_negative_node_ids() {
-    let mut audit = new_audit_data(
-      "test".to_string(),
-      HashSet::new(),
-      None,
-    );
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
     // Node topics are signed; negative IDs (built-ins) must sort below
     // positive IDs.
     let t_neg = topic::new_node_topic(&-50);
     let t_pos = topic::new_node_topic(&50);
-    audit.topic_metadata.insert(t_neg, test_named_topic(t_neg, "Mixed"));
-    audit.topic_metadata.insert(t_pos, test_named_topic(t_pos, "Mixed"));
+    audit
+      .topic_metadata
+      .insert(t_neg, test_named_topic(t_neg, "Mixed"));
+    audit
+      .topic_metadata
+      .insert(t_pos, test_named_topic(t_pos, "Mixed"));
 
     let index = TopicNameIndex::build(&audit);
 
@@ -3217,17 +3207,19 @@ mod tests {
 
   #[test]
   fn candidates_by_simple_name_returns_disjoint_names_independently() {
-    let mut audit = new_audit_data(
-      "test".to_string(),
-      HashSet::new(),
-      None,
-    );
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
     let t1 = topic::new_node_topic(&1);
     let t2 = topic::new_node_topic(&2);
     let t3 = topic::new_node_topic(&3);
-    audit.topic_metadata.insert(t1, test_named_topic(t1, "Alpha"));
-    audit.topic_metadata.insert(t2, test_named_topic(t2, "Beta"));
-    audit.topic_metadata.insert(t3, test_named_topic(t3, "Beta"));
+    audit
+      .topic_metadata
+      .insert(t1, test_named_topic(t1, "Alpha"));
+    audit
+      .topic_metadata
+      .insert(t2, test_named_topic(t2, "Beta"));
+    audit
+      .topic_metadata
+      .insert(t3, test_named_topic(t3, "Beta"));
 
     let index = TopicNameIndex::build(&audit);
 
@@ -3266,16 +3258,22 @@ mod tests {
     // deserialize, with `events_emitted = []`. Tested for both
     // variants since they gained the field together — a serde-default
     // regression on either is symmetric tech debt.
-    let legacy_function = r#"{"FunctionProperties":{"reverts":[],"calls":[],"mutations":[]}}"#;
-    match serde_json::from_str::<FunctionModProperties>(legacy_function).unwrap() {
+    let legacy_function =
+      r#"{"FunctionProperties":{"reverts":[],"calls":[],"mutations":[]}}"#;
+    match serde_json::from_str::<FunctionModProperties>(legacy_function)
+      .unwrap()
+    {
       FunctionModProperties::FunctionProperties { events_emitted, .. } => {
         assert!(events_emitted.is_empty());
       }
       _ => panic!("expected FunctionProperties"),
     }
 
-    let legacy_modifier = r#"{"ModifierProperties":{"reverts":[],"calls":[],"mutations":[]}}"#;
-    match serde_json::from_str::<FunctionModProperties>(legacy_modifier).unwrap() {
+    let legacy_modifier =
+      r#"{"ModifierProperties":{"reverts":[],"calls":[],"mutations":[]}}"#;
+    match serde_json::from_str::<FunctionModProperties>(legacy_modifier)
+      .unwrap()
+    {
       FunctionModProperties::ModifierProperties { events_emitted, .. } => {
         assert!(events_emitted.is_empty());
       }
@@ -3285,11 +3283,7 @@ mod tests {
 
   #[test]
   fn audit_data_phase0_fields_default_empty() {
-    let audit = new_audit_data(
-      "test".to_string(),
-      HashSet::new(),
-      None,
-    );
+    let audit = new_audit_data("test".to_string(), HashSet::new(), None);
     assert!(audit.inheritance.is_empty());
     assert!(audit.resolution_graph.is_none());
   }
