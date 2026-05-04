@@ -188,14 +188,32 @@ fn extract_containment_edges(
         }
       }
       Scope::ContainingBlock {
-        containing_blocks, ..
+        member,
+        containing_blocks,
+        ..
       } => {
+        // Link the local back to its enclosing function/modifier so the
+        // PR seed at the function level reaches its body locals. Without
+        // this edge, function-body locals are graph orphans — every
+        // candidate for an unresolved name like `tokenReceived` scores
+        // pr=0.0 and the resolver never picks one. The previous wiring
+        // pointed at `containing_blocks.last().block`, but that block is
+        // an UnnamedTopic and `add_undirected` drops the edge.
+        if topic != member {
+          add_undirected(
+            audit_data,
+            graph,
+            emitted,
+            *topic,
+            *member,
+            EdgeType::ContainsLocal,
+          );
+        }
+
+        // Keep the wiring to the innermost block in case the analyzer
+        // ever introduces named blocks; `add_undirected` will drop the
+        // edge today because SemanticBlock is unnamed.
         if let Some(innermost) = containing_blocks.last() {
-          // The innermost block is typically an UnnamedTopic
-          // (SemanticBlock / annotated block); `add_undirected` will
-          // drop the edge in that case. The wiring is kept explicit so
-          // that named blocks (when the analyzer ever introduces them)
-          // are picked up automatically.
           add_undirected(
             audit_data,
             graph,
@@ -1014,6 +1032,61 @@ mod tests {
         .out_edges(t(2))
         .iter()
         .all(|e| e.edge_type != EdgeType::ContainsLocal)
+    );
+  }
+
+  #[test]
+  fn containing_block_local_emits_contains_local_to_enclosing_member() {
+    // Function-body locals (Scope::ContainingBlock) must link back to
+    // their enclosing function so PR mass at the function reaches them.
+    let mut audit = empty_audit();
+    let contract = insert_contract(&mut audit, 1, "Foo");
+    let function = insert_function(&mut audit, 2, "f", contract);
+    let block = insert_unnamed(
+      &mut audit,
+      3,
+      Scope::Member {
+        container: project_path("test.sol"),
+        component: contract,
+        member: function,
+        signature_container: None,
+      },
+      crate::domain::UnnamedTopicKind::SemanticBlock,
+    );
+    let _local = insert_named(
+      &mut audit,
+      4,
+      NamedTopicKind::LocalVariable,
+      Scope::ContainingBlock {
+        container: project_path("test.sol"),
+        component: contract,
+        member: function,
+        containing_blocks: vec![crate::domain::ContainingBlockLayer {
+          block,
+          annotation: None,
+        }],
+      },
+      "y",
+      None,
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    assert!(
+      graph
+        .out_edges(t(4))
+        .iter()
+        .any(|e| e.dest == function && e.edge_type == EdgeType::ContainsLocal),
+      "local must point at enclosing member"
+    );
+    assert!(
+      graph
+        .out_edges(function)
+        .iter()
+        .any(|e| e.dest == t(4) && e.edge_type == EdgeType::ContainsLocal),
+      "enclosing member must point back at the local (undirected)"
     );
   }
 
