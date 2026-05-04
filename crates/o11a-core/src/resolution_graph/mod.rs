@@ -10,6 +10,7 @@ pub mod coloc;
 pub mod edge;
 pub mod graph;
 pub mod pagerank;
+pub mod rust_extractor;
 pub mod solidity_extractor;
 pub mod trace;
 
@@ -18,6 +19,7 @@ pub use coloc::{CoLocInput, CoLocResolution, co_locate, enclosing_member_scope};
 pub use edge::{Direction, EdgeType};
 pub use graph::{OutEdge, ResolutionGraph};
 pub use pagerank::personalized_pagerank;
+pub use rust_extractor::RustExtractor;
 pub use solidity_extractor::SolidityExtractor;
 pub use trace::{
   CandidateScore, EdgeContribution, ResolutionPhase, ResolutionRefId,

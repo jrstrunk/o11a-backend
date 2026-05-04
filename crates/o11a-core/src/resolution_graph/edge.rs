@@ -46,6 +46,15 @@ pub enum EdgeType {
   ModifierApplied,
   ErrorThrown,
   EventEmitted,
+
+  // Rust-specific extensions (planned, per spec). Inert until the Rust
+  // edge extractor produces them — calibration against a real Rust-bearing
+  // audit will refine the default weights below. Variant order is the
+  // canonical edge-type discriminant for deterministic sorting and must
+  // not be reshuffled.
+  Derives,
+  ReExports,
+  MutatesField,
 }
 
 impl EdgeType {
@@ -66,6 +75,9 @@ impl EdgeType {
       EdgeType::ModifierApplied => 0.5,
       EdgeType::ErrorThrown => 0.4,
       EdgeType::EventEmitted => 0.4,
+      EdgeType::Derives => 0.6,
+      EdgeType::ReExports => 0.4,
+      EdgeType::MutatesField => 0.7,
     }
   }
 
@@ -79,14 +91,17 @@ impl EdgeType {
       | EdgeType::ContainsField
       | EdgeType::Implements
       | EdgeType::UsingFor
-      | EdgeType::ModifierApplied => Direction::Undirected,
+      | EdgeType::ModifierApplied
+      | EdgeType::Derives => Direction::Undirected,
 
       EdgeType::Calls
       | EdgeType::References
       | EdgeType::ProxyOf
       | EdgeType::WritesState
       | EdgeType::ErrorThrown
-      | EdgeType::EventEmitted => Direction::Directed,
+      | EdgeType::EventEmitted
+      | EdgeType::ReExports
+      | EdgeType::MutatesField => Direction::Directed,
     }
   }
 }
@@ -111,6 +126,9 @@ mod tests {
     EdgeType::ModifierApplied,
     EdgeType::ErrorThrown,
     EdgeType::EventEmitted,
+    EdgeType::Derives,
+    EdgeType::ReExports,
+    EdgeType::MutatesField,
   ];
 
   #[test]
@@ -134,6 +152,14 @@ mod tests {
   }
 
   #[test]
+  fn default_weight_matches_spec_rust_extensions() {
+    // Per the spec's "Rust-specific extensions (planned)" table.
+    assert_eq!(EdgeType::Derives.default_weight(), 0.6);
+    assert_eq!(EdgeType::ReExports.default_weight(), 0.4);
+    assert_eq!(EdgeType::MutatesField.default_weight(), 0.7);
+  }
+
+  #[test]
   fn all_edge_types_have_positive_weight() {
     for et in ALL_EDGE_TYPES {
       assert!(
@@ -153,6 +179,7 @@ mod tests {
       EdgeType::Implements,
       EdgeType::UsingFor,
       EdgeType::ModifierApplied,
+      EdgeType::Derives,
     ];
     let directed = [
       EdgeType::Calls,
@@ -161,6 +188,8 @@ mod tests {
       EdgeType::WritesState,
       EdgeType::ErrorThrown,
       EdgeType::EventEmitted,
+      EdgeType::ReExports,
+      EdgeType::MutatesField,
     ];
     for et in undirected {
       assert_eq!(
@@ -192,6 +221,11 @@ mod tests {
     assert!(EdgeType::Implements < EdgeType::ProxyOf);
     assert!(EdgeType::ProxyOf < EdgeType::WritesState);
     assert!(EdgeType::ErrorThrown < EdgeType::EventEmitted);
+    // Rust extensions sort after every Solidity extension — the order
+    // pins the discriminant for adjacency-list sorting.
+    assert!(EdgeType::EventEmitted < EdgeType::Derives);
+    assert!(EdgeType::Derives < EdgeType::ReExports);
+    assert!(EdgeType::ReExports < EdgeType::MutatesField);
   }
 
   #[test]

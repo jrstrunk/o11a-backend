@@ -698,6 +698,10 @@ pub fn render_source_text(
         &audit_data.nodes,
       ))
     }
+    // Rust source rendering is not implemented yet; skeleton AST
+    // exists in `o11a_core::rust` so the resolution graph and other
+    // polyglot pieces can be wired without breaking exhaustiveness.
+    Some(Node::Rust(_)) => None,
     None => None,
   }
 }

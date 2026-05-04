@@ -9,5 +9,6 @@ pub mod feature_lookup;
 pub mod ids;
 pub mod report;
 pub mod resolution_graph;
+pub mod rust;
 pub mod solidity;
 pub mod state;

@@ -646,6 +646,10 @@ pub enum Node {
   Solidity(crate::solidity::ast::ASTNode),
   Documentation(crate::documentation::ast::DocumentationNode),
   Comment(Vec<crate::collaborator::parser::CommentNode>),
+  /// A Rust AST node. Inert until the Rust analyzer lands — included
+  /// so polyglot dispatch sites (resolution graph, web renderers) can
+  /// be wired without later breaking match exhaustiveness.
+  Rust(crate::rust::ast::ASTNode),
 }
 
 impl Node {
@@ -655,6 +659,7 @@ impl Node {
       Node::Solidity(ast_node) => ast_node.src_location().start,
       Node::Documentation(doc_node) => doc_node.position(),
       Node::Comment(_) => None,
+      Node::Rust(ast_node) => ast_node.src_location().start,
     }
   }
 }
@@ -663,6 +668,10 @@ impl Node {
 pub enum AST {
   Solidity(crate::solidity::ast::SolidityAST),
   Documentation(crate::documentation::ast::DocumentationAST),
+  /// A Rust source file. Inert until the Rust analyzer lands; the
+  /// `RustExtractor` registered in `resolution_graph::builder` reads
+  /// from this variant.
+  Rust(crate::rust::ast::RustAST),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

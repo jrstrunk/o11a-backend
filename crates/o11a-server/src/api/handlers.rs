@@ -448,7 +448,9 @@ pub async fn get_delimiter(
     domain::Node::Solidity(solidity_node) => {
       o11a_core::solidity::delimiter::delimiter_info_for_node(solidity_node)
     }
-    domain::Node::Documentation(_) | domain::Node::Comment(_) => None,
+    domain::Node::Documentation(_)
+    | domain::Node::Comment(_)
+    | domain::Node::Rust(_) => None,
   };
 
   Ok(Json(info))

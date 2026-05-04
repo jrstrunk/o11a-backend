@@ -5,6 +5,7 @@
 //! analyzer. Populates the shared `DataContext` in place.
 
 use crate::documentation;
+use crate::rust;
 use crate::solidity;
 use o11a_core::domain;
 use o11a_core::domain::DataContext;
@@ -25,6 +26,8 @@ pub enum AnalysisError {
   AuditMissing(String),
   #[error("failed to analyze Solidity project: {0}")]
   Solidity(String),
+  #[error("failed to analyze Rust project: {0}")]
+  Rust(String),
   #[error("failed to analyze documentation files: {0}")]
   Documentation(String),
 }
@@ -71,6 +74,21 @@ pub fn run_analysis(
       .map_err(AnalysisError::Solidity)?;
   }
 
+  tracing::info!("Analyzing Rust project at: {}", project_root.display());
+
+  // Analyze Rust project and augment AuditData. Skeleton — until the
+  // Rust analyzer ships this is a no-op, but the call site sits where
+  // it must: after the Solidity analyzer finishes and before the
+  // resolution graph builds, so a future Rust analyzer's edges feed
+  // into the same per-audit graph.
+  {
+    let mut ctx = data_context
+      .lock()
+      .map_err(|e| AnalysisError::LockPoisoned(e.to_string()))?;
+    rust::analyzer::analyze(project_root, audit_id, &mut ctx)
+      .map_err(AnalysisError::Rust)?;
+  }
+
   tracing::info!("Building resolution graph...");
 
   // The graph is per-audit, not per-language — every language analyzer
@@ -90,6 +108,12 @@ pub fn run_analysis(
   // graph to score against.
   inject_developer_documentation(data_context, audit_id)?;
 
+  // Rust dev-doc injection (skeleton). Same staging rules as the
+  // Solidity counterpart: the resolution graph is already built, so
+  // any synthetic comments produced here can be resolved in the
+  // dev-doc resolution pass below.
+  inject_rust_developer_documentation(data_context, audit_id)?;
+
   tracing::info!("Resolving ambiguous code references in dev docs...");
 
   // Phase B for synthetic dev-doc CommentTopics: rewrite ambiguous
@@ -99,6 +123,12 @@ pub fn run_analysis(
   // `documentation::analyzer::analyze` below — both consumers share
   // the same threshold and determinism contract.
   resolve_dev_doc_comments(data_context, audit_id)?;
+
+  // Rust-specific dev-doc resolution (skeleton). The Solidity-named
+  // pass above is language-agnostic in implementation and already
+  // covers Rust CommentTopics if any exist; the Rust wrapper sits here
+  // for symmetry and for future Rust-only behavior.
+  resolve_rust_dev_doc_comments(data_context, audit_id)?;
 
   tracing::info!("Analyzing documentation files...");
 
@@ -184,6 +214,43 @@ pub fn resolve_dev_doc_comments(
     .get_audit_mut(audit_id)
     .ok_or_else(|| AnalysisError::AuditMissing(audit_id.to_string()))?;
   solidity::dev_doc_resolution_pass::resolve_dev_doc_comments(audit_data);
+  Ok(())
+}
+
+/// Skeleton mirror of `inject_developer_documentation` for the Rust
+/// analyzer. No-op until the Rust analyzer lands; wraps the
+/// `Arc<Mutex<DataContext>>` discipline matching every other pipeline
+/// stage so callers can rely on the same error surface.
+pub fn inject_rust_developer_documentation(
+  data_context: &Arc<Mutex<DataContext>>,
+  audit_id: &str,
+) -> Result<(), AnalysisError> {
+  let mut ctx = data_context
+    .lock()
+    .map_err(|e| AnalysisError::LockPoisoned(e.to_string()))?;
+  let audit_data = ctx
+    .get_audit_mut(audit_id)
+    .ok_or_else(|| AnalysisError::AuditMissing(audit_id.to_string()))?;
+  rust::analyzer::inject_developer_documentation(audit_data);
+  Ok(())
+}
+
+/// Skeleton mirror of `resolve_dev_doc_comments` for the Rust analyzer.
+/// No-op until the Rust analyzer produces dev-doc CommentTopics; the
+/// language-agnostic Solidity-named pass already covers any Rust
+/// CommentTopics that exist. Sits here for pipeline-shape symmetry and
+/// to reserve the slot for Rust-only future behavior.
+pub fn resolve_rust_dev_doc_comments(
+  data_context: &Arc<Mutex<DataContext>>,
+  audit_id: &str,
+) -> Result<(), AnalysisError> {
+  let mut ctx = data_context
+    .lock()
+    .map_err(|e| AnalysisError::LockPoisoned(e.to_string()))?;
+  let audit_data = ctx
+    .get_audit_mut(audit_id)
+    .ok_or_else(|| AnalysisError::AuditMissing(audit_id.to_string()))?;
+  rust::dev_doc_resolution_pass::resolve_dev_doc_comments(audit_data);
   Ok(())
 }
 

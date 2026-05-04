@@ -1,6 +1,7 @@
 use crate::domain::AuditData;
 
 use super::graph::ResolutionGraph;
+use super::rust_extractor::RustExtractor;
 use super::solidity_extractor::SolidityExtractor;
 
 /// Per-language edge extractor. Each language analyzer registers an
@@ -29,5 +30,8 @@ pub fn build(audit_data: &AuditData) -> ResolutionGraph {
 }
 
 fn extractors() -> Vec<Box<dyn Extractor>> {
-  vec![Box::new(SolidityExtractor)]
+  // Register one entry per language. Order matters only insofar as
+  // extractors share a determinism contract — each emits its own edge
+  // set against its own topic subset, so they cannot conflict.
+  vec![Box::new(SolidityExtractor), Box::new(RustExtractor)]
 }
