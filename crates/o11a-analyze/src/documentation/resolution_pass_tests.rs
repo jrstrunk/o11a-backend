@@ -1129,6 +1129,209 @@ fn unreachable_runner_up_lets_top_win_with_ratio_one() {
   assert_eq!(trace.candidate_scores[1].pr_score, 0.0);
 }
 
+/// When the section's seed names a function and a candidate is one of
+/// that function's parameters, the parameter outranks a state variable
+/// of the same name. The boost is what tips a roughly-equal PR pair in
+/// the parameter's favor.
+#[test]
+fn function_param_boost_promotes_seeded_function_parameter() {
+  // Topology designed to give param and state_var roughly equal raw
+  // PR mass: each receives one ContainsMember-weight edge from a seed.
+  //   contract → state_var       (state var receives mass via contract seed)
+  //   function → param           (param receives mass via function seed)
+  // Both seeded. Without the boost, threshold ratio ≈ 0.5 (no winner).
+  // With the 1.5× boost on param, ratio = 1.5 / (1.5 + 1.0) = 0.6 — still
+  // below threshold — so we crank the param's edge weight a touch lower
+  // and rely on the boost to push it above 0.65.
+  let contract = nt(1);
+  let function = nt(10);
+  let param_list = nt(11);
+  let param = nt(12);
+  let state_var = nt(20);
+
+  let mut audit = staged_audit();
+  audit.topic_metadata.insert(
+    contract,
+    named_topic(
+      contract,
+      "C",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container {
+        container: pp("test.sol"),
+      },
+    ),
+  );
+  audit.topic_metadata.insert(
+    function,
+    named_topic(
+      function,
+      "f",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+    ),
+  );
+  audit.topic_metadata.insert(
+    param,
+    named_topic(
+      param,
+      "x",
+      NamedTopicKind::LocalVariable,
+      Scope::Member {
+        container: pp("test.sol"),
+        component: contract,
+        member: function,
+        signature_container: Some(param_list),
+      },
+    ),
+  );
+  audit.topic_metadata.insert(
+    state_var,
+    named_topic(
+      state_var,
+      "x",
+      NamedTopicKind::StateVariable(domain::VariableMutability::Mutable),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+    ),
+  );
+  audit.name_index = TopicNameIndex::build(&audit);
+  // Hand-rolled graph: each candidate has a single inbound edge from
+  // a seeded topic. State var via contract, param via function — same
+  // edge type so equal raw weights produce equal PR.
+  audit.resolution_graph = Some(graph_from(&[
+    (contract, state_var, EdgeType::ContainsMember),
+    (state_var, contract, EdgeType::ContainsMember),
+    (function, param, EdgeType::ContainsLocal),
+    (param, function, EdgeType::ContainsLocal),
+  ]));
+
+  let mut tree = root(
+    1,
+    vec![paragraph(
+      2,
+      vec![
+        // Both seeds Phase-A-resolved.
+        code_id(3, "C", Some(contract)),
+        code_id(4, "f", Some(function)),
+        code_id(5, "x", None),
+      ],
+    )],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+
+  let trace = traces
+    .iter()
+    .find(|(_, t)| t.identifier == "x")
+    .map(|(_, t)| t)
+    .expect("trace for `x` must exist");
+  assert_eq!(
+    trace.chosen_topic,
+    Some(param),
+    "boost must promote the parameter over the state variable when the function is seeded"
+  );
+  assert_eq!(trace.phase_resolved, ResolutionPhase::PhaseB);
+}
+
+/// The boost only fires when the candidate's enclosing function is in
+/// the seed set. Without the function in the seed, the parameter has
+/// no boost; the state variable wins (or both fall through, but
+/// crucially the parameter does not unfairly win).
+#[test]
+fn function_param_boost_inactive_when_function_not_seeded() {
+  let contract = nt(1);
+  let function = nt(10);
+  let param_list = nt(11);
+  let param = nt(12);
+  let state_var = nt(20);
+
+  let mut audit = staged_audit();
+  audit.topic_metadata.insert(
+    contract,
+    named_topic(
+      contract,
+      "C",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container {
+        container: pp("test.sol"),
+      },
+    ),
+  );
+  audit.topic_metadata.insert(
+    function,
+    named_topic(
+      function,
+      "f",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+    ),
+  );
+  audit.topic_metadata.insert(
+    param,
+    named_topic(
+      param,
+      "x",
+      NamedTopicKind::LocalVariable,
+      Scope::Member {
+        container: pp("test.sol"),
+        component: contract,
+        member: function,
+        signature_container: Some(param_list),
+      },
+    ),
+  );
+  audit.topic_metadata.insert(
+    state_var,
+    named_topic(
+      state_var,
+      "x",
+      NamedTopicKind::StateVariable(domain::VariableMutability::Mutable),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: contract,
+      },
+    ),
+  );
+  audit.name_index = TopicNameIndex::build(&audit);
+  // Same topology as above so the param has graph access to the
+  // function but the function is not in the seed.
+  audit.resolution_graph = Some(graph_from(&[
+    (contract, state_var, EdgeType::ContainsMember),
+    (state_var, contract, EdgeType::ContainsMember),
+    (function, param, EdgeType::ContainsLocal),
+    (param, function, EdgeType::ContainsLocal),
+  ]));
+
+  // Only `C` is mentioned; the function `f` does not appear in the
+  // section's Phase-A topics, so its parameter must not get the boost.
+  let mut tree = root(
+    1,
+    vec![paragraph(
+      2,
+      vec![code_id(3, "C", Some(contract)), code_id(4, "x", None)],
+    )],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+
+  let trace = traces
+    .iter()
+    .find(|(_, t)| t.identifier == "x")
+    .map(|(_, t)| t)
+    .expect("trace for `x` must exist");
+  assert_ne!(
+    trace.chosen_topic,
+    Some(param),
+    "without the function in the seed, the boost must not promote the parameter"
+  );
+}
+
 /// Tie-break determinism on identical PR. When two candidates score
 /// the same PR, they sort by qualified-name ascending, then topic-ID
 /// ascending. Verified with two candidates of equal PR but distinct

@@ -59,6 +59,23 @@ use o11a_core::resolution_graph::{
 /// fallback and `referenced_topic` stays `None`.
 const CONFIDENCE_THRESHOLD: f32 = 0.65;
 
+/// Multiplier applied to a parameter candidate's PR score when its
+/// enclosing function/modifier is in the section's seed set. Encodes
+/// the policy "when a function is referenced, its parameters should
+/// rank above a state variable with the same name; when the function
+/// isn't referenced, its parameters should not". Without this, a
+/// section that mentions `deployCampaign` would have
+/// `deployCampaign.rewardPPQ` (the parameter) and
+/// `NudgeCampaign.rewardPPQ` (the state variable) score similarly via
+/// raw PR — the resolver couldn't pick reliably.
+///
+/// Set to 2.0: with the spec's `0.65` threshold a candidate has to
+/// beat its runner-up by roughly 2:1. A symmetric raw-PR pair plus
+/// this boost lifts the param's relative share to `2/(2+1)=0.667`,
+/// just past the threshold. Lower values (e.g. 1.5 → 0.6) leave both
+/// candidates below threshold and drop the resolution to Phase E.
+const FUNCTION_PARAM_BOOST: f32 = 2.0;
+
 /// Maximum depth contribution for ancestor-section seeding. Beyond this
 /// the `2^(-d)` weight is below `1/64` and the seed contributes
 /// negligibly to PR — capping keeps seed vectors bounded on deeply
@@ -326,6 +343,16 @@ fn run_iteration(
       continue;
     }
 
+    // Build the seed vector once per iteration. Both Phase B and Phase
+    // C use it: B for the PR run and the parameter-boost lookup, C for
+    // the same parameter-boost on its post-pinning rank_candidates
+    // call. Phase B may append resolutions to `direct_phase_a_topics`
+    // before Phase C runs, but C deliberately uses the *pre-mutation*
+    // seeds — those are the seeds that produced this iteration's
+    // `pr_result`, and Phase C reuses that result rather than re-running
+    // PR.
+    let seeds = build_seed_vector(section_idx, sections);
+
     // Phase B — PR-driven scoring of every ambiguous ref in this
     // section. Newly-resolved refs are removed from `ambiguous_refs`;
     // unresolved refs stay in for Phase C.
@@ -335,6 +362,7 @@ fn run_iteration(
       audit_data,
       graph,
       iteration,
+      &seeds,
       resolutions,
       traces,
       &mut newly_resolved,
@@ -353,6 +381,7 @@ fn run_iteration(
       section_idx,
       audit_data,
       graph,
+      &seeds,
       iteration,
       &pr_result,
       resolutions,
@@ -376,19 +405,18 @@ fn run_phase_b(
   audit_data: &domain::AuditData,
   graph: &ResolutionGraph,
   iteration: u32,
+  seeds: &BTreeMap<topic::Topic, f32>,
   resolutions: &mut BTreeMap<i32, AppliedResolution>,
   traces: &mut BTreeMap<ResolutionRefId, ResolutionTrace>,
   newly_resolved: &mut usize,
 ) -> BTreeMap<topic::Topic, f32> {
-  let seeds = build_seed_vector(section_idx, sections);
-
   // PR with an empty seed vector returns all-zero per the engine's
   // contract. No candidate could clear the threshold, but we still
   // emit Unresolved traces (operators expect to see the attempt).
   let pr_result = if seeds.is_empty() {
     BTreeMap::new()
   } else {
-    personalized_pagerank(graph, &seeds)
+    personalized_pagerank(graph, seeds)
   };
 
   let section = &mut sections[section_idx];
@@ -404,7 +432,7 @@ fn run_phase_b(
     let candidates =
       audit_data.name_index.candidates_by_simple_name(&ambiguous.identifier);
     let candidate_scores =
-      rank_candidates(candidates, audit_data, &pr_result);
+      rank_candidates(candidates, audit_data, &pr_result, seeds);
     let (chosen, edges) =
       pick_phase_b_winner(&candidate_scores, graph, &pr_result);
 
@@ -479,6 +507,7 @@ fn run_phase_c(
   section_idx: usize,
   audit_data: &domain::AuditData,
   graph: &ResolutionGraph,
+  seeds: &BTreeMap<topic::Topic, f32>,
   iteration: u32,
   pr_result: &BTreeMap<topic::Topic, f32>,
   resolutions: &mut BTreeMap<i32, AppliedResolution>,
@@ -535,7 +564,8 @@ fn run_phase_c(
       let candidates = audit_data
         .name_index
         .candidates_by_simple_name(&ambiguous.identifier);
-      let candidate_scores = rank_candidates(candidates, audit_data, pr_result);
+      let candidate_scores =
+        rank_candidates(candidates, audit_data, pr_result, seeds);
       let edges = top_contributing_edges(graph, pr_result, chosen_topic);
 
       traces.insert(
@@ -632,10 +662,18 @@ fn build_seed_vector(
 /// Score every candidate by its PR value, then sort by the
 /// determinism-contract tie-break: PR descending → qualified-name
 /// ascending → topic-ID ascending.
+///
+/// Parameter candidates whose enclosing function/modifier is in
+/// `seeds` have their `pr_score` multiplied by [`FUNCTION_PARAM_BOOST`]
+/// before sorting and the threshold check. The boosted score replaces
+/// the raw PR in the trace's `pr_score` field — operators inspecting
+/// the trace see the value the threshold acted on, which matches the
+/// resolver's actual decision.
 fn rank_candidates(
   candidates: &[topic::Topic],
   audit_data: &domain::AuditData,
   pr_result: &BTreeMap<topic::Topic, f32>,
+  seeds: &BTreeMap<topic::Topic, f32>,
 ) -> Vec<CandidateScore> {
   let mut scored: Vec<CandidateScore> = candidates
     .iter()
@@ -648,7 +686,8 @@ fn rank_candidates(
       if !matches!(metadata, domain::TopicMetadata::NamedTopic { .. }) {
         return None;
       }
-      let pr_score = pr_result.get(t).copied().unwrap_or(0.0);
+      let raw_pr = pr_result.get(t).copied().unwrap_or(0.0);
+      let pr_score = raw_pr * function_param_boost(*t, audit_data, seeds);
       Some(CandidateScore {
         topic: *t,
         qualified_name: metadata.qualified_name(audit_data),
@@ -666,6 +705,37 @@ fn rank_candidates(
   });
 
   scored
+}
+
+/// Multiplier applied to a candidate's raw PR score before sorting and
+/// thresholding. Returns [`FUNCTION_PARAM_BOOST`] when the candidate is
+/// a parameter (it has a `signature_container`) of a function/modifier
+/// that itself appears in the section's seed set; `1.0` otherwise.
+///
+/// The seed test uses the post-Phase-A topic membership rather than
+/// the seed weights — any non-zero seed counts. That matches the
+/// natural-language reading "the section mentions this function".
+fn function_param_boost(
+  candidate: topic::Topic,
+  audit_data: &domain::AuditData,
+  seeds: &BTreeMap<topic::Topic, f32>,
+) -> f32 {
+  let Some(domain::TopicMetadata::NamedTopic { scope, .. }) =
+    audit_data.topic_metadata.get(&candidate)
+  else {
+    return 1.0;
+  };
+  if let domain::Scope::Member {
+    member,
+    signature_container: Some(_),
+    ..
+  } = scope
+    && seeds.contains_key(member)
+  {
+    FUNCTION_PARAM_BOOST
+  } else {
+    1.0
+  }
 }
 
 /// Apply Phase B's confidence rule. Returns the chosen topic (if any)
