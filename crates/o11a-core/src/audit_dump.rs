@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::domain::{
-  AuditData, NamedTopicKind, Scope, TopicMetadata, topic,
+  AuditData, NamedTopicKind, Scope, TopicMetadata, is_common_word, topic,
 };
 use crate::resolution_graph::{
   EdgeType, ResolutionPhase, ResolutionRefId, ResolutionTrace,
@@ -566,37 +566,6 @@ fn phase_label(phase: ResolutionPhase) -> &'static str {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
-
-/// English-connective stoplist used by `TopicNameIndex` to keep common
-/// words from polluting the simple-name index. Duplicated here from
-/// `domain::is_common_word` so this dump can flag entries the resolver
-/// filtered for that reason. Kept in sync manually — list is small and
-/// stable.
-fn is_common_word(name: &str) -> bool {
-  matches!(
-    name,
-    "a" | "an"
-      | "as"
-      | "at"
-      | "be"
-      | "by"
-      | "do"
-      | "for"
-      | "from"
-      | "if"
-      | "in"
-      | "is"
-      | "it"
-      | "no"
-      | "of"
-      | "on"
-      | "or"
-      | "so"
-      | "to"
-      | "up"
-      | "we"
-  )
-}
 
 fn kind_label(meta: &TopicMetadata) -> String {
   match meta {
@@ -1491,6 +1460,802 @@ mod tests {
     let src_node = dump.nodes.iter().find(|n| n.topic == "N1000").unwrap();
     assert_eq!(src_node.kind, "LocalVariable");
     assert_eq!(src_node.qualified_name, "src");
+  }
+
+  // -------------------------------------------------------------------------
+  // Helpers for the backfill suites below
+  // -------------------------------------------------------------------------
+
+  /// Variant of `named` that points at another topic via `transitive_topic`.
+  /// Required for `InterfaceMapping` and the "transitive" branch of
+  /// `NameIndex`.
+  fn named_with_transitive(
+    t: topic::Topic,
+    name: &str,
+    kind: NamedTopicKind,
+    target: topic::Topic,
+  ) -> TopicMetadata {
+    let mut meta = named(t, name, kind);
+    if let TopicMetadata::NamedTopic {
+      transitive_topic, ..
+    } = &mut meta
+    {
+      *transitive_topic = Some(target);
+    }
+    meta
+  }
+
+  // -------------------------------------------------------------------------
+  // interface-mapping: structural invariants
+  //
+  // Backfilled here alongside the new dump kinds so the entire dump module
+  // sits behind one consistent test scaffold.
+  // -------------------------------------------------------------------------
+
+  #[test]
+  fn interface_mapping_dump_empty_audit_is_empty() {
+    let audit = empty_audit();
+    assert!(dump_interface_mapping(&audit).is_empty());
+  }
+
+  #[test]
+  fn interface_mapping_dump_emits_one_record_per_named_to_named_proxy() {
+    let mut audit = empty_audit();
+    let stub = nt(1);
+    let target = nt(2);
+    audit.topic_metadata.insert(
+      target,
+      named(target, "transfer", NamedTopicKind::LocalVariable),
+    );
+    audit.topic_metadata.insert(
+      stub,
+      named_with_transitive(stub, "transfer", NamedTopicKind::LocalVariable, target),
+    );
+
+    let records = dump_interface_mapping(&audit);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].proxy_topic, "N1");
+    assert_eq!(records[0].target_topic, "N2");
+    assert_eq!(records[0].proxy_name, "transfer");
+    assert_eq!(records[0].target_name, "transfer");
+  }
+
+  #[test]
+  fn interface_mapping_dump_skips_topics_without_transitive_target() {
+    let mut audit = empty_audit();
+    let plain = nt(1);
+    audit.topic_metadata.insert(
+      plain,
+      named(plain, "transfer", NamedTopicKind::LocalVariable),
+    );
+    assert!(dump_interface_mapping(&audit).is_empty());
+  }
+
+  #[test]
+  fn interface_mapping_dump_skips_when_target_metadata_missing() {
+    // Defensive — `transitive_topic` could in principle point at a topic
+    // the analyzer never registered. Silently skip rather than render a
+    // half-populated record.
+    let mut audit = empty_audit();
+    let stub = nt(1);
+    let target = nt(2);
+    audit.topic_metadata.insert(
+      stub,
+      named_with_transitive(stub, "transfer", NamedTopicKind::LocalVariable, target),
+    );
+    // Deliberately omit `target` from topic_metadata.
+    assert!(dump_interface_mapping(&audit).is_empty());
+  }
+
+  #[test]
+  fn interface_mapping_dump_sorts_by_proxy_qualified_name_then_topic() {
+    // Two stubs, same simple name "transfer", inserted in scrambled order.
+    // Sorted output should be stable across runs.
+    let mut audit = empty_audit();
+    let stub_a = nt(50);
+    let stub_b = nt(10);
+    let target_a = nt(60);
+    let target_b = nt(20);
+    audit.topic_metadata.insert(
+      target_a,
+      named(target_a, "implA", NamedTopicKind::LocalVariable),
+    );
+    audit.topic_metadata.insert(
+      target_b,
+      named(target_b, "implB", NamedTopicKind::LocalVariable),
+    );
+    // Insert proxies in topic-id-descending order to exercise the sort.
+    audit.topic_metadata.insert(
+      stub_a,
+      named_with_transitive(stub_a, "transfer", NamedTopicKind::LocalVariable, target_a),
+    );
+    audit.topic_metadata.insert(
+      stub_b,
+      named_with_transitive(stub_b, "transfer", NamedTopicKind::LocalVariable, target_b),
+    );
+
+    let records = dump_interface_mapping(&audit);
+    // Both proxies have the same qualified name ("transfer"), so the
+    // tie-break is on proxy topic ID ascending: N10 before N50.
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].proxy_topic, "N10");
+    assert_eq!(records[1].proxy_topic, "N50");
+  }
+
+  #[test]
+  fn interface_mapping_dump_is_deterministic() {
+    let mut audit = empty_audit();
+    let stub = nt(1);
+    let target = nt(2);
+    audit.topic_metadata.insert(
+      target,
+      named(target, "transfer", NamedTopicKind::LocalVariable),
+    );
+    audit.topic_metadata.insert(
+      stub,
+      named_with_transitive(stub, "transfer", NamedTopicKind::LocalVariable, target),
+    );
+    let json_a =
+      serde_json::to_string_pretty(&dump_interface_mapping(&audit)).unwrap();
+    let json_b =
+      serde_json::to_string_pretty(&dump_interface_mapping(&audit)).unwrap();
+    assert_eq!(json_a, json_b);
+  }
+
+  // -------------------------------------------------------------------------
+  // name-index: structural invariants
+  // -------------------------------------------------------------------------
+
+  /// Build an audit with every distinct shape the name-index dump cares
+  /// about: a unique name, an ambiguous pair, a transitive-resolves-to-one
+  /// case, a common-word entry, and an empty-name entry that must not
+  /// surface at all.
+  fn name_index_fixture() -> AuditData {
+    let mut audit = empty_audit();
+    // Unique name → resolved.
+    let unique = nt(1);
+    audit.topic_metadata.insert(
+      unique,
+      named(unique, "uniq", NamedTopicKind::LocalVariable),
+    );
+    // Two non-transitive candidates with the same simple name → ambiguous.
+    let amb_a = nt(2);
+    let amb_b = nt(3);
+    audit.topic_metadata.insert(
+      amb_a,
+      named(amb_a, "ambig", NamedTopicKind::LocalVariable),
+    );
+    audit.topic_metadata.insert(
+      amb_b,
+      named(amb_b, "ambig", NamedTopicKind::LocalVariable),
+    );
+    // One non-transitive + one transitive sharing a name → resolves to
+    // the non-transitive (per `TopicNameIndex::build`).
+    let real = nt(4);
+    let proxy = nt(5);
+    audit.topic_metadata.insert(
+      real,
+      named(real, "transfer", NamedTopicKind::LocalVariable),
+    );
+    audit.topic_metadata.insert(
+      proxy,
+      named_with_transitive(proxy, "transfer", NamedTopicKind::LocalVariable, real),
+    );
+    // A common-word name — `is_common_word` filters it from name_index;
+    // the dump must still show it but flag `is_common_word: true`.
+    let common = nt(6);
+    audit.topic_metadata.insert(
+      common,
+      named(common, "for", NamedTopicKind::LocalVariable),
+    );
+    // Empty name — must be excluded from the dump.
+    let nameless = nt(7);
+    audit.topic_metadata.insert(
+      nameless,
+      named(nameless, "", NamedTopicKind::LocalVariable),
+    );
+    audit.name_index = crate::domain::TopicNameIndex::build(&audit);
+    audit
+  }
+
+  #[test]
+  fn name_index_dump_empty_audit_is_empty() {
+    // `new_audit_data` registers a couple of built-in topics
+    // (`keccak256`, etc.). Each has a non-empty name, so the dump is
+    // not literally empty — but every entry should be a single-candidate
+    // resolved record. This pins the cold-start surface against future
+    // built-in additions.
+    let audit = empty_audit();
+    let entries = dump_name_index(&audit);
+    for entry in &entries {
+      assert!(
+        !entry.ambiguous,
+        "built-in entry {:?} unexpectedly flagged ambiguous",
+        entry.name
+      );
+      assert_eq!(entry.candidates.len(), 1, "built-in {:?}", entry.name);
+    }
+  }
+
+  #[test]
+  fn name_index_dump_resolved_unique_name_has_resolved_topic() {
+    let audit = name_index_fixture();
+    let entries = dump_name_index(&audit);
+    let entry = entries.iter().find(|e| e.name == "uniq").unwrap();
+    assert!(!entry.ambiguous);
+    assert!(!entry.is_common_word);
+    assert_eq!(entry.resolved_topic.as_deref(), Some("N1"));
+    assert_eq!(entry.candidates.len(), 1);
+  }
+
+  #[test]
+  fn name_index_dump_two_non_transitive_candidates_are_ambiguous() {
+    let audit = name_index_fixture();
+    let entries = dump_name_index(&audit);
+    let entry = entries.iter().find(|e| e.name == "ambig").unwrap();
+    assert!(entry.ambiguous);
+    assert!(entry.resolved_topic.is_none());
+    assert_eq!(entry.candidates.len(), 2);
+  }
+
+  #[test]
+  fn name_index_dump_non_transitive_plus_transitive_is_resolved() {
+    let audit = name_index_fixture();
+    let entries = dump_name_index(&audit);
+    let entry = entries.iter().find(|e| e.name == "transfer").unwrap();
+    // Resolves to the non-transitive (real) topic — `TopicNameIndex::build`
+    // strips proxies when there's exactly one real declaration.
+    assert!(!entry.ambiguous);
+    assert_eq!(entry.resolved_topic.as_deref(), Some("N4"));
+    // Both candidates surface so an operator can see the proxy.
+    assert_eq!(entry.candidates.len(), 2);
+    let proxy_cand = entry.candidates.iter().find(|c| c.is_transitive).unwrap();
+    assert_eq!(proxy_cand.transitive_target.as_deref(), Some("N4"));
+  }
+
+  #[test]
+  fn name_index_dump_common_word_flag_is_set() {
+    let audit = name_index_fixture();
+    let entries = dump_name_index(&audit);
+    let entry = entries.iter().find(|e| e.name == "for").unwrap();
+    assert!(entry.is_common_word);
+    // Common-word filtering means resolved is None even though there's
+    // a single candidate — but `ambiguous` must NOT be set, since the
+    // common-word case is not a resolver-ambiguity case.
+    assert!(!entry.ambiguous);
+    assert!(entry.resolved_topic.is_none());
+  }
+
+  #[test]
+  fn name_index_dump_excludes_topics_with_empty_name() {
+    let audit = name_index_fixture();
+    let entries = dump_name_index(&audit);
+    // The fixture inserted a NamedTopic with name = "". Confirm the dump
+    // skipped it — empty names are never code identifiers.
+    assert!(!entries.iter().any(|e| e.name.is_empty()));
+  }
+
+  #[test]
+  fn name_index_dump_orders_ambiguous_first_then_alphabetical() {
+    let audit = name_index_fixture();
+    let entries = dump_name_index(&audit);
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    let first_unambig = names.iter().position(|n| {
+      let e = entries.iter().find(|e| &e.name == n).unwrap();
+      !e.ambiguous
+    });
+    let last_ambig = names.iter().rposition(|n| {
+      let e = entries.iter().find(|e| &e.name == n).unwrap();
+      e.ambiguous
+    });
+    if let (Some(unambig), Some(ambig)) = (first_unambig, last_ambig) {
+      assert!(
+        ambig < unambig,
+        "ambiguous entries must come before unambiguous ones; \
+         got names: {:?}",
+        names,
+      );
+    }
+  }
+
+  #[test]
+  fn name_index_dump_candidates_sorted_by_qualified_name_then_topic() {
+    // Two ambiguous candidates with the same name share an empty
+    // qualified-name prefix (they're at `Scope::Global`), so the tie-
+    // break falls to topic ID ascending: N2 < N3.
+    let audit = name_index_fixture();
+    let entries = dump_name_index(&audit);
+    let entry = entries.iter().find(|e| e.name == "ambig").unwrap();
+    let topics: Vec<&str> =
+      entry.candidates.iter().map(|c| c.topic.as_str()).collect();
+    assert_eq!(topics, vec!["N2", "N3"]);
+  }
+
+  #[test]
+  fn name_index_dump_is_deterministic() {
+    let audit = name_index_fixture();
+    let json_a =
+      serde_json::to_string_pretty(&dump_name_index(&audit)).unwrap();
+    let json_b =
+      serde_json::to_string_pretty(&dump_name_index(&audit)).unwrap();
+    assert_eq!(json_a, json_b);
+  }
+
+  #[test]
+  fn name_index_dump_uses_canonical_is_common_word() {
+    // The dump's `is_common_word` flag is now sourced from
+    // `domain::is_common_word` — pin a representative entry so a future
+    // domain-side stoplist change shows up here, not as a silent shift
+    // in dump output.
+    let mut audit = empty_audit();
+    let common = nt(1);
+    audit.topic_metadata.insert(
+      common,
+      named(common, "for", NamedTopicKind::LocalVariable),
+    );
+    audit.name_index = crate::domain::TopicNameIndex::build(&audit);
+    let entry = dump_name_index(&audit)
+      .into_iter()
+      .find(|e| e.name == "for")
+      .unwrap();
+    assert!(entry.is_common_word);
+  }
+
+  // -------------------------------------------------------------------------
+  // parse_kinds: complex CLI surface
+  //
+  // The CLI accepts comma-separated, mixed-case, kebab/snake input plus
+  // the `all` shorthand. Pin the dedup, error message, and ordering
+  // contract — operators script against this.
+  // -------------------------------------------------------------------------
+
+  #[test]
+  fn parse_kinds_accepts_comma_separated_value_in_single_arg() {
+    let kinds =
+      parse_kinds(&["interface-mapping,name-index".to_string()]).unwrap();
+    assert_eq!(
+      kinds,
+      vec![DumpKind::InterfaceMapping, DumpKind::NameIndex]
+    );
+  }
+
+  #[test]
+  fn parse_kinds_accepts_mixed_kebab_and_snake_separators() {
+    let kinds = parse_kinds(&[
+      "resolution_graph".to_string(),
+      "resolution-trace".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(
+      kinds,
+      vec![DumpKind::ResolutionGraph, DumpKind::ResolutionTrace]
+    );
+  }
+
+  #[test]
+  fn parse_kinds_dedupes_repeated_inputs_preserving_order() {
+    let kinds = parse_kinds(&[
+      "name-index".to_string(),
+      "interface-mapping".to_string(),
+      "name-index".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(
+      kinds,
+      vec![DumpKind::NameIndex, DumpKind::InterfaceMapping]
+    );
+  }
+
+  #[test]
+  fn parse_kinds_all_plus_explicit_kinds_dedupes() {
+    // `all` already includes every kind; an extra explicit kind on the
+    // command line must not duplicate it. First-occurrence ordering means
+    // `all`'s expansion runs first, and the trailing explicit kind is
+    // dropped from the output rather than re-appended.
+    let kinds = parse_kinds(&[
+      "all".to_string(),
+      "name-index".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(kinds, DumpKind::all());
+  }
+
+  #[test]
+  fn parse_kinds_explicit_kind_before_all_pins_first_position_then_expands() {
+    // The complement to the `all`-then-explicit case: when a kind is
+    // named explicitly *before* `all`, it stays at index 0 and `all`
+    // backfills the rest. Pinning this guarantees a stable mental model
+    // for operators who scan `dump` output in CLI order.
+    let kinds = parse_kinds(&[
+      "name-index".to_string(),
+      "all".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(kinds[0], DumpKind::NameIndex);
+    assert_eq!(kinds.len(), DumpKind::all().len());
+    let unique: HashSet<DumpKind> = kinds.iter().copied().collect();
+    assert_eq!(unique.len(), kinds.len());
+  }
+
+  #[test]
+  fn parse_kinds_skips_empty_and_whitespace_only_pieces() {
+    // Trailing or leading commas yield empty pieces; whitespace-only
+    // pieces should be ignored too. This makes scripts that build the
+    // CLI string by joining a Vec<String> robust to empty members.
+    let kinds = parse_kinds(&[
+      ",interface-mapping,, ,".to_string(),
+      "  ".to_string(),
+      "name-index".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(
+      kinds,
+      vec![DumpKind::InterfaceMapping, DumpKind::NameIndex]
+    );
+  }
+
+  #[test]
+  fn parse_kinds_unknown_kind_error_lists_every_known_kind() {
+    let err = parse_kinds(&["bogus".to_string()]).unwrap_err();
+    // The error must guide the operator: name the offender and list
+    // every accepted kind so a typo is one read away from a fix.
+    assert!(err.contains("bogus"), "got: {err}");
+    for kind in [
+      "interface-mapping",
+      "name-index",
+      "resolution-graph",
+      "resolution-trace",
+      "all",
+    ] {
+      assert!(err.contains(kind), "error must mention {}: {err}", kind);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // resolution-graph: extra complex-interaction coverage
+  // -------------------------------------------------------------------------
+
+  #[test]
+  fn graph_dump_handles_self_loops_as_single_record() {
+    // A topic with an out-edge to itself appears in `nodes` exactly once
+    // (BTreeSet dedup) and in `edges` exactly once. Self-loops are rare
+    // but legal under the spec — e.g. recursive functions.
+    let mut audit = empty_audit();
+    let recursive = nt(1);
+    audit.topic_metadata.insert(
+      recursive,
+      named(recursive, "recur", NamedTopicKind::LocalVariable),
+    );
+    let mut graph = ResolutionGraph::new();
+    graph.add_edge(recursive, recursive, EdgeType::Calls, 0.7);
+    graph.finalize();
+    audit.resolution_graph = Some(graph);
+
+    let dump = dump_resolution_graph(&audit);
+    assert_eq!(dump.nodes.len(), 1);
+    assert_eq!(dump.nodes[0].topic, "N1");
+    assert_eq!(dump.edges.len(), 1);
+    assert_eq!(dump.edges[0].source, "N1");
+    assert_eq!(dump.edges[0].dest, "N1");
+  }
+
+  #[test]
+  fn graph_dump_emits_distinct_records_for_parallel_edges_of_different_types() {
+    // Same (source, dest) but two edge types — common in the producer
+    // (e.g. a function both Calls and References another). Each must
+    // get its own record and the sort must order by edge_type
+    // discriminant.
+    let mut audit = empty_audit();
+    let s = nt(1);
+    let d = nt(2);
+    audit.topic_metadata.insert(s, named(s, "s", NamedTopicKind::LocalVariable));
+    audit.topic_metadata.insert(d, named(d, "d", NamedTopicKind::LocalVariable));
+    let mut graph = ResolutionGraph::new();
+    // Insert References before Calls; the dump's secondary sort fixes it.
+    graph.add_edge(s, d, EdgeType::References, 0.5);
+    graph.add_edge(s, d, EdgeType::Calls, 0.7);
+    graph.finalize();
+    audit.resolution_graph = Some(graph);
+
+    let dump = dump_resolution_graph(&audit);
+    assert_eq!(dump.edges.len(), 2);
+    assert_eq!(dump.edges[0].edge_type, EdgeType::Calls);
+    assert_eq!(dump.edges[1].edge_type, EdgeType::References);
+  }
+
+  #[test]
+  fn graph_dump_orders_topics_across_variant_kinds() {
+    // The graph can in principle hold topics of any `Topic` variant,
+    // not only `Node`. Variant declaration order is `Node < Documentation
+    // < Comment`; the dump must respect that.
+    let mut audit = empty_audit();
+    let n = nt(1);
+    let d = topic::new_documentation_topic(1);
+    let c = topic::new_comment_topic(1);
+    let mut graph = ResolutionGraph::new();
+    graph.add_edge(c, n, EdgeType::References, 0.5);
+    graph.add_edge(d, n, EdgeType::References, 0.5);
+    graph.add_edge(n, d, EdgeType::References, 0.5);
+    graph.finalize();
+    audit.resolution_graph = Some(graph);
+
+    let dump = dump_resolution_graph(&audit);
+    let topics: Vec<&str> =
+      dump.nodes.iter().map(|n| n.topic.as_str()).collect();
+    // Variant order: Node < Documentation < Comment.
+    assert_eq!(topics, vec!["N1", "D1", "C1"]);
+  }
+
+  // -------------------------------------------------------------------------
+  // resolution-trace: extra complex-interaction coverage
+  // -------------------------------------------------------------------------
+
+  #[test]
+  fn trace_dump_preserves_producer_candidate_order_for_many_candidates() {
+    // The producer (resolution_pass.rs) sorts candidates by
+    // (pr_score desc, qualified_name asc, topic asc). The dump trusts
+    // that ordering. Pin it with five candidates in a non-trivial order
+    // so a regression that re-sorts on a different key surfaces here.
+    let mut audit = empty_audit();
+    let scores: Vec<CandidateScore> = (0..5)
+      .map(|i| CandidateScore {
+        topic: nt(i + 100),
+        qualified_name: Some(format!("Mod.cand_{i}")),
+        pr_score: 1.0 - (i as f32) * 0.1,
+      })
+      .collect();
+    audit.resolution_traces.insert(
+      ResolutionRefId::DocumentationNode(1),
+      ResolutionTrace {
+        reference_id: ResolutionRefId::DocumentationNode(1),
+        identifier: "x".to_string(),
+        section_topic: dt(1),
+        phase_resolved: ResolutionPhase::PhaseB,
+        iteration: 1,
+        chosen_topic: Some(scores[0].topic),
+        candidate_scores: scores.clone(),
+        top_contributing_edges: Vec::new(),
+      },
+    );
+
+    let record = dump_resolution_traces(&audit).into_iter().next().unwrap();
+    let topics: Vec<String> =
+      record.candidate_scores.iter().map(|c| c.topic.clone()).collect();
+    let expected: Vec<String> = scores.iter().map(|c| c.topic.id()).collect();
+    assert_eq!(topics, expected);
+  }
+
+  #[test]
+  fn trace_dump_preserves_top_contributing_edge_order_with_ties() {
+    // Producer documents a (predecessor asc, edge_type asc) tie-break
+    // when `weighted_contribution` is equal. The dump must not re-sort
+    // by some other key (e.g. by edge_type) and lose the tie-break.
+    let mut audit = empty_audit();
+    let chosen = nt(1);
+    let pred_a = nt(2);
+    let pred_b = nt(3);
+    audit.resolution_traces.insert(
+      ResolutionRefId::DocumentationNode(1),
+      ResolutionTrace {
+        reference_id: ResolutionRefId::DocumentationNode(1),
+        identifier: "x".to_string(),
+        section_topic: dt(1),
+        phase_resolved: ResolutionPhase::PhaseB,
+        iteration: 1,
+        chosen_topic: Some(chosen),
+        candidate_scores: vec![CandidateScore {
+          topic: chosen,
+          qualified_name: Some("Mod.x".to_string()),
+          pr_score: 1.0,
+        }],
+        // Three contributions: same weight on first two (tie-break by
+        // predecessor asc), strictly smaller on the third.
+        top_contributing_edges: vec![
+          EdgeContribution {
+            predecessor: pred_a,
+            edge_type: EdgeType::Calls,
+            weighted_contribution: 0.30,
+          },
+          EdgeContribution {
+            predecessor: pred_b,
+            edge_type: EdgeType::Calls,
+            weighted_contribution: 0.30,
+          },
+          EdgeContribution {
+            predecessor: pred_b,
+            edge_type: EdgeType::References,
+            weighted_contribution: 0.10,
+          },
+        ],
+      },
+    );
+    let record = dump_resolution_traces(&audit).into_iter().next().unwrap();
+    let preds: Vec<&str> = record
+      .top_contributing_edges
+      .iter()
+      .map(|e| e.predecessor.as_str())
+      .collect();
+    assert_eq!(preds, vec!["N2", "N3", "N3"]);
+  }
+
+  #[test]
+  fn trace_dump_renders_empty_candidate_scores_as_empty_array() {
+    // A trace with no candidates is pathological but legal. The dump
+    // should render an empty JSON array, not omit the field — operator
+    // tooling iterating `record.candidate_scores` must always find a
+    // value.
+    let mut audit = empty_audit();
+    audit.resolution_traces.insert(
+      ResolutionRefId::DocumentationNode(1),
+      ResolutionTrace {
+        reference_id: ResolutionRefId::DocumentationNode(1),
+        identifier: "x".to_string(),
+        section_topic: dt(1),
+        phase_resolved: ResolutionPhase::Unresolved,
+        iteration: 1,
+        chosen_topic: None,
+        candidate_scores: Vec::new(),
+        top_contributing_edges: Vec::new(),
+      },
+    );
+    let json = serde_json::to_string(&dump_resolution_traces(&audit)).unwrap();
+    assert!(
+      json.contains(r#""candidate_scores":[]"#),
+      "empty candidate list must serialize as `[]`, got: {json}"
+    );
+  }
+
+  #[test]
+  fn trace_dump_groups_multiple_traces_under_same_section_in_order() {
+    // Two ambiguous references in one section: the dump must list both
+    // and tag them with the same `section_or_comment_id`. Pin the
+    // grouping so a future change that flattens or merges traces shows
+    // up here.
+    let mut audit = empty_audit();
+    let section = dt(42);
+    for (id, name) in [(1, "alpha"), (2, "beta"), (3, "gamma")] {
+      audit.resolution_traces.insert(
+        ResolutionRefId::DocumentationNode(id),
+        ResolutionTrace {
+          reference_id: ResolutionRefId::DocumentationNode(id),
+          identifier: name.to_string(),
+          section_topic: section,
+          phase_resolved: ResolutionPhase::PhaseB,
+          iteration: 1,
+          chosen_topic: None,
+          candidate_scores: Vec::new(),
+          top_contributing_edges: Vec::new(),
+        },
+      );
+    }
+    let dump = dump_resolution_traces(&audit);
+    assert_eq!(dump.len(), 3);
+    for r in &dump {
+      assert_eq!(r.section_or_comment_id, "D42");
+    }
+    let identifiers: Vec<&str> =
+      dump.iter().map(|r| r.identifier.as_str()).collect();
+    assert_eq!(identifiers, vec!["alpha", "beta", "gamma"]);
+  }
+
+  // -------------------------------------------------------------------------
+  // dump_to_file: complex-interaction coverage
+  // -------------------------------------------------------------------------
+
+  #[test]
+  fn dump_to_file_overwrites_existing_file_with_atomic_rename() {
+    // Two dumps to the same path with different contents — the second
+    // must replace the first byte-for-byte. Validates the temp-file +
+    // rename pattern survives a populated destination.
+    let dir = unique_tmp_dir("graph-overwrite");
+    // First write: empty audit → empty graph.
+    let empty = empty_audit();
+    let path =
+      dump_to_file(DumpKind::ResolutionGraph, &empty, &dir).unwrap();
+    let bytes_first = std::fs::read(&path).unwrap();
+
+    // Second write to same path: populated audit → non-empty graph.
+    let populated = populated_audit();
+    let path_again =
+      dump_to_file(DumpKind::ResolutionGraph, &populated, &dir).unwrap();
+    assert_eq!(path, path_again);
+    let bytes_second = std::fs::read(&path).unwrap();
+
+    assert_ne!(bytes_first, bytes_second);
+    let parsed: serde_json::Value =
+      serde_json::from_slice(&bytes_second).unwrap();
+    assert!(!parsed["edges"].as_array().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn dump_to_file_recovers_when_stale_tmp_file_present() {
+    // Simulate a previous run that crashed mid-write, leaving the
+    // `.tmp` file around. The next dump must clobber it cleanly via
+    // `File::create` truncation, then atomically rename. No leftover
+    // `.tmp` should remain on disk.
+    let dir = unique_tmp_dir("graph-stale-tmp");
+    let final_path = dir.join("resolution-graph.json");
+    let stale_tmp = final_path.with_extension("json.tmp");
+    std::fs::write(&stale_tmp, b"junk from previous crashed run\n").unwrap();
+    assert!(stale_tmp.exists());
+
+    let audit = populated_audit();
+    let path =
+      dump_to_file(DumpKind::ResolutionGraph, &audit, &dir).unwrap();
+    assert_eq!(path, final_path);
+    // `rename` consumes the `.tmp`, leaving only the final file.
+    assert!(!stale_tmp.exists());
+
+    let parsed: serde_json::Value =
+      serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(parsed["nodes"].as_array().is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  // -------------------------------------------------------------------------
+  // kind_label: wire format
+  //
+  // The label string surfaces in three places: graph dump nodes,
+  // name-index candidates, and interface-mapping records. Operators
+  // grep these values, so the wire shape (variant name, parenthesized
+  // payload) is part of the public contract.
+  // -------------------------------------------------------------------------
+
+  #[test]
+  fn kind_label_renders_every_named_topic_variant_distinctly() {
+    use crate::domain::{ContractKind, FunctionKind, VariableMutability};
+    let cases: &[(NamedTopicKind, &str)] = &[
+      (NamedTopicKind::Function(FunctionKind::Function), "Function(Function)"),
+      (NamedTopicKind::Function(FunctionKind::Constructor), "Function(Constructor)"),
+      (NamedTopicKind::Modifier, "Modifier"),
+      (NamedTopicKind::Event, "Event"),
+      (NamedTopicKind::Error, "Error"),
+      (NamedTopicKind::Struct, "Struct"),
+      (NamedTopicKind::Enum, "Enum"),
+      (NamedTopicKind::EnumMember, "EnumMember"),
+      (
+        NamedTopicKind::StateVariable(VariableMutability::Constant),
+        "StateVariable(Constant)",
+      ),
+      (NamedTopicKind::LocalVariable, "LocalVariable"),
+      (NamedTopicKind::Contract(ContractKind::Interface), "Contract(Interface)"),
+      (NamedTopicKind::Contract(ContractKind::Library), "Contract(Library)"),
+      (NamedTopicKind::Builtin, "Builtin"),
+    ];
+    for (kind, expected) in cases {
+      let t = nt(0);
+      let meta = named(t, "x", kind.clone());
+      assert_eq!(kind_label(&meta), *expected, "for kind {:?}", kind);
+    }
+  }
+
+  #[test]
+  fn dump_to_file_writes_distinct_kinds_to_distinct_filenames() {
+    // Sanity for the multi-kind CLI flow: dispatching every kind in
+    // one invocation produces one file per kind, all in the same
+    // directory, with no overlap.
+    let dir = unique_tmp_dir("multi-kind");
+    let audit = populated_audit();
+    for kind in DumpKind::all() {
+      let path = dump_to_file(kind, &audit, &dir).unwrap();
+      assert_eq!(path.file_name().and_then(|n| n.to_str()), Some(kind.file_name()));
+      assert!(path.exists(), "{} not written", kind.file_name());
+    }
+    // All four files coexist.
+    let entries: Vec<String> = std::fs::read_dir(&dir)
+      .unwrap()
+      .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+      .collect();
+    for kind in DumpKind::all() {
+      assert!(
+        entries.iter().any(|n| n == kind.file_name()),
+        "{} missing from {:?}",
+        kind.file_name(),
+        entries
+      );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
   }
 }
 

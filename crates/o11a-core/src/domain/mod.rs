@@ -492,7 +492,11 @@ pub struct AuditData {
 /// These appear frequently in documentation prose inside backticks but are
 /// almost never intended to reference a Solidity declaration.
 /// Qualified names like "ERC20.transfer.from" are unaffected.
-fn is_common_word(name: &str) -> bool {
+///
+/// Exposed crate-internally so the diagnostic dump in `audit_dump` can flag
+/// names that the resolver filtered for this reason — must stay one source
+/// of truth.
+pub(crate) fn is_common_word(name: &str) -> bool {
   matches!(
     name,
     "a"
