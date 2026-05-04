@@ -2807,6 +2807,31 @@ pub fn mechanical_semantic_links_excluding(
   }
 }
 
+/// Find the contract topic that contains `ref_topic`. If the reference
+/// is itself a contract, return it directly; otherwise walk one step
+/// up its scope. Returns `None` for global / file-scoped declarations
+/// (no containing contract). Shared between the resolved-reference
+/// branch and the Phase E (anchor-by-name) fallback branch in
+/// `collect_mechanical_links_recursive`.
+fn containing_contract_topic(
+  audit_data: &AuditData,
+  ref_topic: topic::Topic,
+) -> Option<topic::Topic> {
+  let metadata = audit_data.topic_metadata.get(&ref_topic)?;
+  match metadata {
+    TopicMetadata::NamedTopic {
+      kind: domain::NamedTopicKind::Contract(_),
+      ..
+    } => Some(ref_topic),
+    _ => match metadata.scope() {
+      domain::Scope::Component { component, .. } => Some(*component),
+      domain::Scope::Member { component, .. } => Some(*component),
+      domain::Scope::ContainingBlock { component, .. } => Some(*component),
+      _ => None,
+    },
+  }
+}
+
 /// Recursively walk documentation nodes, tracking the top-level section.
 /// When a CodeIdentifier with a resolved reference is found, walk up
 /// the reference's scope to find the containing contract and record
@@ -2891,23 +2916,36 @@ fn collect_mechanical_links_recursive(
         }
 
         // Walk up the declaration's scope to find the containing contract.
-        // If the reference IS a contract, use it directly.
-        if let Some(metadata) = audit_data.topic_metadata.get(ref_topic) {
-          let contract_topic = match metadata {
-            TopicMetadata::NamedTopic {
-              kind: domain::NamedTopicKind::Contract(_),
-              ..
-            } => Some(*ref_topic),
-            _ => match metadata.scope() {
-              domain::Scope::Component { component, .. } => Some(*component),
-              domain::Scope::Member { component, .. } => Some(*component),
-              domain::Scope::ContainingBlock { component, .. } => {
-                Some(*component)
-              }
-              _ => None,
-            },
-          };
-          if let Some(ct) = contract_topic {
+        if let Some(ct) = containing_contract_topic(audit_data, *ref_topic) {
+          let contracts =
+            section_to_contracts.entry(*section_topic).or_default();
+          if !contracts.contains(&ct) {
+            contracts.push(ct);
+          }
+        }
+      }
+    }
+
+    // Phase E (anchor-by-name) fallback: the resolver could not pin a
+    // single declaration but recorded the full candidate list on the
+    // node. Union each candidate's containing contract into the
+    // section's anchor set. Per spec, no member is added to
+    // `section_to_declarations` — only contracts to
+    // `section_to_contracts`.
+    DocumentationNode::CodeIdentifier {
+      referenced_topic: None,
+      referenced_topic_candidates,
+      node_id,
+      ..
+    } if !exclude_doc_node_ids.contains(node_id)
+      && !referenced_topic_candidates.is_empty() =>
+    {
+      if let Some(section_topic) = current_section {
+        // Only touch the entry once we know we have a contract to add
+        // — otherwise sections whose only Phase E candidates live at
+        // global scope would gain a phantom empty Vec.
+        for candidate in referenced_topic_candidates {
+          if let Some(ct) = containing_contract_topic(audit_data, *candidate) {
             let contracts =
               section_to_contracts.entry(*section_topic).or_default();
             if !contracts.contains(&ct) {
@@ -4106,5 +4144,635 @@ mod tests {
         baseline_decls
       );
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // Phase E (anchor-by-name) downstream consumer contract
+  //
+  // The doc-tree resolution pass (in `o11a-analyze`) writes the full
+  // candidate list onto `referenced_topic_candidates` for refs Phase D
+  // could not pin. The downstream consumer here (`mechanical_semantic_links`)
+  // unions each candidate's containing contract into
+  // `section_to_contracts` without contributing to
+  // `section_to_declarations`. Tests below pin that contract directly,
+  // bypassing the resolver — they construct the post-resolution AST
+  // shape by hand so the consumer's contribution is testable in
+  // isolation.
+  // ---------------------------------------------------------------------
+
+  /// Build an audit whose Section contains one ambiguous-but-Phase-E
+  /// `CodeIdentifier` whose candidate list spans two contracts. Returns
+  /// the audit, the section topic, and both contract topics.
+  fn audit_with_phase_e_candidates_in_two_contracts() -> (
+    AuditData,
+    topic::Topic,
+    topic::Topic,
+    topic::Topic,
+  ) {
+    use crate::documentation::ast::{DocumentationAST, DocumentationNode};
+
+    let mut audit =
+      domain::new_audit_data("test".to_string(), HashSet::new(), None);
+
+    let vault = topic::new_node_topic(&100);
+    let token = topic::new_node_topic(&200);
+    let vault_transfer = topic::new_node_topic(&101);
+    let token_transfer = topic::new_node_topic(&201);
+
+    for (t, name, kind, scope) in [
+      (
+        vault,
+        "Vault",
+        NamedTopicKind::Contract(ContractKind::Contract),
+        Scope::Container {
+          container: domain::ProjectPath {
+            file_path: "Vault.sol".to_string(),
+          },
+        },
+      ),
+      (
+        token,
+        "Token",
+        NamedTopicKind::Contract(ContractKind::Contract),
+        Scope::Container {
+          container: domain::ProjectPath {
+            file_path: "Token.sol".to_string(),
+          },
+        },
+      ),
+      (
+        vault_transfer,
+        "transfer",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component {
+          container: domain::ProjectPath {
+            file_path: "Vault.sol".to_string(),
+          },
+          component: vault,
+        },
+      ),
+      (
+        token_transfer,
+        "transfer",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component {
+          container: domain::ProjectPath {
+            file_path: "Token.sol".to_string(),
+          },
+          component: token,
+        },
+      ),
+    ] {
+      audit.topic_metadata.insert(
+        t,
+        TopicMetadata::NamedTopic {
+          topic: t,
+          scope,
+          kind,
+          name: name.to_string(),
+          visibility: NamedTopicVisibility::Public,
+          is_mutable: false,
+          mutations: vec![],
+          ancestors: vec![],
+          descendants: vec![],
+          relatives: vec![],
+          transitive_topic: None,
+          doc_references: vec![],
+        },
+      );
+    }
+
+    let section_id = 700;
+    let section_topic = topic::new_documentation_topic(section_id);
+    let phase_e_ident = DocumentationNode::CodeIdentifier {
+      node_id: 901,
+      value: "transfer".to_string(),
+      // Phase E shape: referenced_topic stays None, candidates lists
+      // both possible contracts' transfer functions.
+      referenced_topic: None,
+      kind: None,
+      referenced_name: None,
+      referenced_topic_candidates: vec![vault_transfer, token_transfer],
+    };
+    let section = DocumentationNode::Section {
+      node_id: section_id,
+      title: "Overview".to_string(),
+      children: vec![DocumentationNode::Paragraph {
+        node_id: section_id + 1,
+        position: None,
+        children: vec![phase_e_ident],
+      }],
+    };
+    let doc_path = domain::ProjectPath {
+      file_path: "README.md".to_string(),
+    };
+    audit.asts.insert(
+      doc_path.clone(),
+      domain::AST::Documentation(DocumentationAST {
+        nodes: vec![section],
+        project_path: doc_path,
+        source_content: String::new(),
+      }),
+    );
+
+    (audit, section_topic, vault, token)
+  }
+
+  /// Phase E candidates spanning two contracts: the consumer unions
+  /// both contract topics into `section_to_contracts` and contributes
+  /// nothing to `section_to_declarations`.
+  #[test]
+  fn phase_e_candidates_anchor_section_to_each_candidates_contract() {
+    let (audit, section_topic, vault, token) =
+      audit_with_phase_e_candidates_in_two_contracts();
+    let result = mechanical_semantic_links(&audit);
+
+    let mut anchored = result
+      .section_to_contracts
+      .get(&section_topic)
+      .cloned()
+      .expect("Phase E must populate section_to_contracts");
+    anchored.sort_by_key(|t| t.id().to_string());
+    let mut expected = vec![vault, token];
+    expected.sort_by_key(|t| t.id().to_string());
+    assert_eq!(
+      anchored, expected,
+      "Phase E unions both candidate contracts as anchors",
+    );
+
+    assert!(
+      !result.section_to_declarations.contains_key(&section_topic),
+      "Phase E must not contribute to section_to_declarations: {:?}",
+      result.section_to_declarations.get(&section_topic),
+    );
+  }
+
+  /// Excluding the Phase E node by `node_id` removes its candidates'
+  /// contracts from the section's anchor set. Verifies the exclude
+  /// gate honors Phase E references — the comparison harness depends
+  /// on this behavior to compute recall deltas.
+  #[test]
+  fn excluding_a_phase_e_ref_drops_its_candidate_contracts() {
+    let (audit, section_topic, _, _) =
+      audit_with_phase_e_candidates_in_two_contracts();
+
+    // No exclude: both contracts anchor.
+    let baseline = mechanical_semantic_links(&audit);
+    assert!(
+      baseline.section_to_contracts.contains_key(&section_topic),
+      "baseline must anchor"
+    );
+
+    // Exclude the only Phase E node: section drops out entirely.
+    let mut exclude = HashSet::new();
+    exclude.insert(901);
+    let filtered = mechanical_semantic_links_excluding(&audit, &exclude);
+    assert!(
+      !filtered.section_to_contracts.contains_key(&section_topic),
+      "excluding the Phase E node removes the contract anchors",
+    );
+    assert!(
+      !filtered.section_to_declarations.contains_key(&section_topic),
+      "Phase E never adds declarations",
+    );
+  }
+
+  /// Multiple Phase E refs in the same section, each whose candidates
+  /// pin distinct contracts, must union their contracts into the
+  /// section's anchor set without duplication. Pin the union semantics
+  /// across sibling Phase E refs.
+  #[test]
+  fn multiple_phase_e_refs_union_candidate_contracts_into_section_anchors() {
+    use crate::documentation::ast::{DocumentationAST, DocumentationNode};
+    let mut audit =
+      domain::new_audit_data("test".to_string(), HashSet::new(), None);
+
+    let alpha = topic::new_node_topic(&100);
+    let beta = topic::new_node_topic(&200);
+    let gamma = topic::new_node_topic(&300);
+    let alpha_x = topic::new_node_topic(&101);
+    let beta_x = topic::new_node_topic(&201);
+    let gamma_y = topic::new_node_topic(&301);
+    let alpha_y = topic::new_node_topic(&102);
+
+    for (t, name, kind, scope) in [
+      (
+        alpha,
+        "Alpha",
+        NamedTopicKind::Contract(ContractKind::Contract),
+        Scope::Container { container: domain::ProjectPath { file_path: "Alpha.sol".into() } },
+      ),
+      (
+        beta,
+        "Beta",
+        NamedTopicKind::Contract(ContractKind::Contract),
+        Scope::Container { container: domain::ProjectPath { file_path: "Beta.sol".into() } },
+      ),
+      (
+        gamma,
+        "Gamma",
+        NamedTopicKind::Contract(ContractKind::Contract),
+        Scope::Container { container: domain::ProjectPath { file_path: "Gamma.sol".into() } },
+      ),
+      (
+        alpha_x,
+        "x",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component { container: domain::ProjectPath { file_path: "Alpha.sol".into() }, component: alpha },
+      ),
+      (
+        beta_x,
+        "x",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component { container: domain::ProjectPath { file_path: "Beta.sol".into() }, component: beta },
+      ),
+      (
+        gamma_y,
+        "y",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component { container: domain::ProjectPath { file_path: "Gamma.sol".into() }, component: gamma },
+      ),
+      (
+        alpha_y,
+        "y",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component { container: domain::ProjectPath { file_path: "Alpha.sol".into() }, component: alpha },
+      ),
+    ] {
+      audit.topic_metadata.insert(
+        t,
+        TopicMetadata::NamedTopic {
+          topic: t,
+          scope,
+          kind,
+          name: name.to_string(),
+          visibility: NamedTopicVisibility::Public,
+          is_mutable: false,
+          mutations: vec![],
+          ancestors: vec![],
+          descendants: vec![],
+          relatives: vec![],
+          transitive_topic: None,
+          doc_references: vec![],
+        },
+      );
+    }
+
+    // Two Phase E refs in the same section:
+    //   - "x" candidates → {alpha_x, beta_x} → contracts {alpha, beta}
+    //   - "y" candidates → {alpha_y, gamma_y} → contracts {alpha, gamma}
+    // Union → {alpha, beta, gamma}. `alpha` appears twice in the
+    // candidate union but only once in the anchor set (de-duplicated by
+    // the `contains` check in the consumer).
+    let section_id = 700;
+    let section_topic = topic::new_documentation_topic(section_id);
+    let mk_phase_e = |node_id: i32, value: &str, candidates: Vec<topic::Topic>| {
+      DocumentationNode::CodeIdentifier {
+        node_id,
+        value: value.to_string(),
+        referenced_topic: None,
+        kind: None,
+        referenced_name: None,
+        referenced_topic_candidates: candidates,
+      }
+    };
+    let section = DocumentationNode::Section {
+      node_id: section_id,
+      title: "Overview".to_string(),
+      children: vec![DocumentationNode::Paragraph {
+        node_id: section_id + 1,
+        position: None,
+        children: vec![
+          mk_phase_e(901, "x", vec![alpha_x, beta_x]),
+          mk_phase_e(902, "y", vec![alpha_y, gamma_y]),
+        ],
+      }],
+    };
+    let doc_path = domain::ProjectPath { file_path: "README.md".into() };
+    audit.asts.insert(
+      doc_path.clone(),
+      domain::AST::Documentation(DocumentationAST {
+        nodes: vec![section],
+        project_path: doc_path,
+        source_content: String::new(),
+      }),
+    );
+
+    let result = mechanical_semantic_links(&audit);
+    let mut anchored = result
+      .section_to_contracts
+      .get(&section_topic)
+      .cloned()
+      .expect("union of Phase E refs must populate anchors");
+    anchored.sort_by_key(|t| t.id().to_string());
+    let mut expected = vec![alpha, beta, gamma];
+    expected.sort_by_key(|t| t.id().to_string());
+    assert_eq!(
+      anchored, expected,
+      "union of two Phase E refs' candidate contracts (de-duplicated)",
+    );
+    assert!(
+      !result.section_to_declarations.contains_key(&section_topic),
+      "still no declarations from Phase E",
+    );
+  }
+
+  /// Phase E + Phase A coexist in the same section: Phase A contributes
+  /// declaration + contract, Phase E contributes its candidates'
+  /// contracts. Both effects compose; Phase E doesn't shadow or evict
+  /// Phase A's contributions.
+  #[test]
+  fn phase_e_and_phase_a_refs_compose_in_same_section() {
+    use crate::documentation::ast::{DocumentationAST, DocumentationNode};
+    let mut audit =
+      domain::new_audit_data("test".to_string(), HashSet::new(), None);
+
+    let vault = topic::new_node_topic(&100);
+    let token = topic::new_node_topic(&200);
+    let vault_a = topic::new_node_topic(&101);
+    let token_b = topic::new_node_topic(&201);
+    let token_c = topic::new_node_topic(&202);
+
+    for (t, name, kind, scope) in [
+      (
+        vault,
+        "Vault",
+        NamedTopicKind::Contract(ContractKind::Contract),
+        Scope::Container { container: domain::ProjectPath { file_path: "Vault.sol".into() } },
+      ),
+      (
+        token,
+        "Token",
+        NamedTopicKind::Contract(ContractKind::Contract),
+        Scope::Container { container: domain::ProjectPath { file_path: "Token.sol".into() } },
+      ),
+      (
+        vault_a,
+        "doA",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component { container: domain::ProjectPath { file_path: "Vault.sol".into() }, component: vault },
+      ),
+      (
+        token_b,
+        "doB",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component { container: domain::ProjectPath { file_path: "Token.sol".into() }, component: token },
+      ),
+      (
+        token_c,
+        "doB",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component { container: domain::ProjectPath { file_path: "Vault.sol".into() }, component: vault },
+      ),
+    ] {
+      audit.topic_metadata.insert(
+        t,
+        TopicMetadata::NamedTopic {
+          topic: t,
+          scope,
+          kind,
+          name: name.to_string(),
+          visibility: NamedTopicVisibility::Public,
+          is_mutable: false,
+          mutations: vec![],
+          ancestors: vec![],
+          descendants: vec![],
+          relatives: vec![],
+          transitive_topic: None,
+          doc_references: vec![],
+        },
+      );
+    }
+
+    let section_id = 700;
+    let section_topic = topic::new_documentation_topic(section_id);
+    let phase_a_ident = DocumentationNode::CodeIdentifier {
+      node_id: 901,
+      value: "doA".to_string(),
+      referenced_topic: Some(vault_a),
+      kind: Some(NamedTopicKind::Function(FunctionKind::Function)),
+      referenced_name: Some("doA".to_string()),
+      referenced_topic_candidates: vec![],
+    };
+    let phase_e_ident = DocumentationNode::CodeIdentifier {
+      node_id: 902,
+      value: "doB".to_string(),
+      referenced_topic: None,
+      kind: None,
+      referenced_name: None,
+      referenced_topic_candidates: vec![token_b, token_c],
+    };
+    let section = DocumentationNode::Section {
+      node_id: section_id,
+      title: "Overview".to_string(),
+      children: vec![DocumentationNode::Paragraph {
+        node_id: section_id + 1,
+        position: None,
+        children: vec![phase_a_ident, phase_e_ident],
+      }],
+    };
+    let doc_path = domain::ProjectPath { file_path: "README.md".into() };
+    audit.asts.insert(
+      doc_path.clone(),
+      domain::AST::Documentation(DocumentationAST {
+        nodes: vec![section],
+        project_path: doc_path,
+        source_content: String::new(),
+      }),
+    );
+
+    let result = mechanical_semantic_links(&audit);
+
+    // section_to_declarations: only Phase A contributes (vault_a).
+    let decls = result
+      .section_to_declarations
+      .get(&section_topic)
+      .expect("Phase A must contribute to declarations");
+    assert_eq!(*decls, vec![vault_a]);
+
+    // section_to_contracts: union of Phase A's contract (vault) and
+    // Phase E candidates' contracts (token, vault). Vault appears in
+    // both but is de-duplicated by the contains check.
+    let mut anchored = result
+      .section_to_contracts
+      .get(&section_topic)
+      .cloned()
+      .expect("Phase A + Phase E must both anchor");
+    anchored.sort_by_key(|t| t.id().to_string());
+    let mut expected = vec![vault, token];
+    expected.sort_by_key(|t| t.id().to_string());
+    assert_eq!(
+      anchored, expected,
+      "Phase A and Phase E unite their contract anchors",
+    );
+  }
+
+  /// Phase E refs nested under a child Section roll their anchors up to
+  /// the top-level Section topic — same rollup behavior as Phase A,
+  /// since both flow through the same `current_section` dispatch.
+  #[test]
+  fn phase_e_in_nested_section_rolls_up_to_top_level_anchor() {
+    use crate::documentation::ast::{DocumentationAST, DocumentationNode};
+    let mut audit =
+      domain::new_audit_data("test".to_string(), HashSet::new(), None);
+
+    let vault = topic::new_node_topic(&100);
+    let token = topic::new_node_topic(&200);
+    let vault_x = topic::new_node_topic(&101);
+    let token_x = topic::new_node_topic(&201);
+
+    for (t, name, kind, scope) in [
+      (
+        vault,
+        "Vault",
+        NamedTopicKind::Contract(ContractKind::Contract),
+        Scope::Container { container: domain::ProjectPath { file_path: "Vault.sol".into() } },
+      ),
+      (
+        token,
+        "Token",
+        NamedTopicKind::Contract(ContractKind::Contract),
+        Scope::Container { container: domain::ProjectPath { file_path: "Token.sol".into() } },
+      ),
+      (
+        vault_x,
+        "x",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component { container: domain::ProjectPath { file_path: "Vault.sol".into() }, component: vault },
+      ),
+      (
+        token_x,
+        "x",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component { container: domain::ProjectPath { file_path: "Token.sol".into() }, component: token },
+      ),
+    ] {
+      audit.topic_metadata.insert(
+        t,
+        TopicMetadata::NamedTopic {
+          topic: t,
+          scope,
+          kind,
+          name: name.to_string(),
+          visibility: NamedTopicVisibility::Public,
+          is_mutable: false,
+          mutations: vec![],
+          ancestors: vec![],
+          descendants: vec![],
+          relatives: vec![],
+          transitive_topic: None,
+          doc_references: vec![],
+        },
+      );
+    }
+
+    let outer_id = 700;
+    let inner_id = 701;
+    let outer_topic = topic::new_documentation_topic(outer_id);
+    let inner_topic = topic::new_documentation_topic(inner_id);
+    let phase_e_ident = DocumentationNode::CodeIdentifier {
+      node_id: 901,
+      value: "x".to_string(),
+      referenced_topic: None,
+      kind: None,
+      referenced_name: None,
+      referenced_topic_candidates: vec![vault_x, token_x],
+    };
+    let inner_section = DocumentationNode::Section {
+      node_id: inner_id,
+      title: "Inner".to_string(),
+      children: vec![DocumentationNode::Paragraph {
+        node_id: inner_id + 100,
+        position: None,
+        children: vec![phase_e_ident],
+      }],
+    };
+    let outer_section = DocumentationNode::Section {
+      node_id: outer_id,
+      title: "Outer".to_string(),
+      children: vec![inner_section],
+    };
+    let doc_path = domain::ProjectPath { file_path: "README.md".into() };
+    audit.asts.insert(
+      doc_path.clone(),
+      domain::AST::Documentation(DocumentationAST {
+        nodes: vec![outer_section],
+        project_path: doc_path,
+        source_content: String::new(),
+      }),
+    );
+
+    let result = mechanical_semantic_links(&audit);
+
+    // Anchor lands on OUTER, not inner. Same rollup contract as
+    // Phase A — `collect_mechanical_links_recursive` keeps
+    // `current_section` pinned to the top-level section.
+    let mut anchored = result
+      .section_to_contracts
+      .get(&outer_topic)
+      .cloned()
+      .expect("Phase E must anchor to top-level section");
+    anchored.sort_by_key(|t| t.id().to_string());
+    let mut expected = vec![vault, token];
+    expected.sort_by_key(|t| t.id().to_string());
+    assert_eq!(anchored, expected);
+
+    assert!(
+      !result.section_to_contracts.contains_key(&inner_topic),
+      "inner section must NOT receive its own anchor entry — rollup goes to outer",
+    );
+  }
+
+  /// A Phase E node whose candidate list is empty contributes nothing
+  /// — the field is the gate. (Phase E itself only writes the field
+  /// when candidates exist; a hand-constructed empty list mirrors the
+  /// pre-pass / no-candidate state.)
+  #[test]
+  fn phase_e_empty_candidate_list_contributes_nothing() {
+    use crate::documentation::ast::{DocumentationAST, DocumentationNode};
+    let mut audit =
+      domain::new_audit_data("test".to_string(), HashSet::new(), None);
+
+    let section_id = 700;
+    let section_topic = topic::new_documentation_topic(section_id);
+    let empty_phase_e = DocumentationNode::CodeIdentifier {
+      node_id: 901,
+      value: "missing".to_string(),
+      referenced_topic: None,
+      kind: None,
+      referenced_name: None,
+      // Empty candidates → no Phase E contribution downstream.
+      referenced_topic_candidates: vec![],
+    };
+    let section = DocumentationNode::Section {
+      node_id: section_id,
+      title: "Overview".to_string(),
+      children: vec![DocumentationNode::Paragraph {
+        node_id: section_id + 1,
+        position: None,
+        children: vec![empty_phase_e],
+      }],
+    };
+    let doc_path = domain::ProjectPath {
+      file_path: "README.md".to_string(),
+    };
+    audit.asts.insert(
+      doc_path.clone(),
+      domain::AST::Documentation(DocumentationAST {
+        nodes: vec![section],
+        project_path: doc_path,
+        source_content: String::new(),
+      }),
+    );
+
+    let result = mechanical_semantic_links(&audit);
+    assert!(
+      !result.section_to_contracts.contains_key(&section_topic),
+      "empty candidate list ⇒ no contract anchors",
+    );
+    assert!(
+      !result.section_to_declarations.contains_key(&section_topic),
+      "empty candidate list ⇒ no declarations",
+    );
   }
 }

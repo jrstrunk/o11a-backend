@@ -978,7 +978,8 @@ fn ratio_below_threshold_leaves_reference_unresolved() {
     })
     .unwrap();
   assert_eq!(trace.chosen_topic, None);
-  assert_eq!(trace.phase_resolved, ResolutionPhase::Unresolved);
+  // Phase E records the anchor-by-name fallback; no winner picked.
+  assert_eq!(trace.phase_resolved, ResolutionPhase::PhaseE);
   assert_eq!(trace.candidate_scores.len(), 2);
   assert_eq!(
     trace.candidate_scores[0].pr_score.to_bits(),
@@ -2023,7 +2024,10 @@ fn empty_resolution_graph_returns_unresolved_with_zero_scores() {
     })
     .unwrap();
   assert_eq!(trace.chosen_topic, None);
-  assert_eq!(trace.phase_resolved, ResolutionPhase::Unresolved);
+  // Phase E records the anchor-by-name fallback once Phases B + C exit
+  // without a winner; the trace is rewritten from `Unresolved` to
+  // `PhaseE` and the candidate scores stay attached for inspection.
+  assert_eq!(trace.phase_resolved, ResolutionPhase::PhaseE);
   // Both candidates appear in the trace with PR=0 — the seed lands
   // outside any edge, so PR has nothing to spread.
   assert_eq!(trace.candidate_scores.len(), 2);
@@ -2721,10 +2725,13 @@ fn scope_chain_truncates_at_max_seed_depth() {
   assert_eq!(res, vec![("amb".to_string(), None)]);
 }
 
+/// `referenced_topic_candidates` invariant: non-empty IFF the ref is
+/// unresolved. Stale Phase E candidates from a prior run must be
+/// cleared when Phase B/C succeeds — otherwise an audit re-run with a
+/// changed graph would leave inconsistent state. Mirrors the doc-tree
+/// counterpart and pins the same invariant for dev-doc comments.
 #[test]
-fn phase_b_does_not_touch_referenced_topic_candidates_field() {
-  // The Phase E fallback list (Phase 10's job) must remain untouched
-  // by Phase B for both winning and losing references.
+fn phase_b_clears_stale_candidates_phase_e_repopulates_them() {
   let vault = nt(10);
   let vault_transfer = nt(11);
   let mut audit = staged_audit();
@@ -2766,48 +2773,67 @@ fn phase_b_does_not_touch_referenced_topic_candidates_field() {
     (vault_transfer, vault, EdgeType::ContainsMember),
   ]));
 
-  let preexisting = vec![nt(7), nt(8)];
-  // Build the comment manually so the `referenced_topic_candidates`
-  // field on the CodeIdentifier carries a sentinel value.
-  let resolved_node = CommentNode::CodeIdentifier {
+  let stale_candidates = vec![nt(7), nt(8)];
+  // Build the comment manually with stale candidates pre-populated:
+  //   - First ref: Phase B will resolve `transfer` to `vault_transfer`
+  //     (scope-chain seed pulls PR mass via ContainsMember). Stale
+  //     candidates must be cleared.
+  //   - Second ref: name has no candidates → Phase B fails → Phase E
+  //     skips (empty candidate list) → stale candidates stay.
+  let phase_b_node = CommentNode::CodeIdentifier {
     value: "transfer".to_string(),
     referenced_topic: None,
     kind: None,
     referenced_name: None,
-    referenced_topic_candidates: preexisting.clone(),
+    referenced_topic_candidates: stale_candidates.clone(),
   };
-  let unresolved_node = CommentNode::CodeIdentifier {
+  let no_candidates_node = CommentNode::CodeIdentifier {
     value: "missingThing".to_string(),
     referenced_topic: None,
     kind: None,
     referenced_name: None,
-    referenced_topic_candidates: preexisting.clone(),
+    referenced_topic_candidates: stale_candidates.clone(),
   };
   let comment = insert_dev_doc(
     &mut audit,
     -10,
     vault,
     Author::DevTechnical,
-    vec![resolved_node, unresolved_node],
+    vec![phase_b_node, no_candidates_node],
   );
   resolve_dev_doc_comments(&mut audit);
 
   let Node::Comment(nodes) = audit.nodes.get(&comment).unwrap() else {
     panic!()
   };
-  for node in nodes {
-    let CommentNode::CodeIdentifier {
-      referenced_topic_candidates,
-      ..
-    } = node
-    else {
-      panic!("expected CodeIdentifier, got {:?}", node);
-    };
-    assert_eq!(
-      referenced_topic_candidates, &preexisting,
-      "Phase B must leave referenced_topic_candidates alone",
-    );
-  }
+  let CommentNode::CodeIdentifier {
+    referenced_topic: ref0,
+    referenced_topic_candidates: cand0,
+    ..
+  } = &nodes[0]
+  else {
+    panic!()
+  };
+  assert_eq!(*ref0, Some(vault_transfer));
+  assert!(
+    cand0.is_empty(),
+    "Phase B winner must clear stale Phase E candidates: got {:?}",
+    cand0,
+  );
+
+  let CommentNode::CodeIdentifier {
+    referenced_topic: ref1,
+    referenced_topic_candidates: cand1,
+    ..
+  } = &nodes[1]
+  else {
+    panic!()
+  };
+  assert_eq!(*ref1, None);
+  assert_eq!(
+    *cand1, stale_candidates,
+    "refs with no name candidates skip Phase E → field stays untouched",
+  );
 }
 
 // ---------------------------------------------------------------------
@@ -3004,6 +3030,8 @@ fn phase_c_dev_doc_abstains_on_multi_element_intersection() {
     "two-element intersection must abstain",
   );
 
+  // Both refs fall through to Phase E — the anchor-by-name fallback
+  // records the candidate list without picking one.
   for occ in [0u32, 1] {
     let trace = audit
       .resolution_traces
@@ -3012,7 +3040,7 @@ fn phase_c_dev_doc_abstains_on_multi_element_intersection() {
         occurrence: occ,
       })
       .unwrap();
-    assert_eq!(trace.phase_resolved, ResolutionPhase::Unresolved);
+    assert_eq!(trace.phase_resolved, ResolutionPhase::PhaseE);
   }
 }
 
@@ -3454,7 +3482,9 @@ fn phase_c_dev_doc_conflicting_pin_drops_only_the_conflicting_ref() {
       .unwrap()
       .clone()
   };
-  assert_eq!(trace_for(0).phase_resolved, ResolutionPhase::Unresolved);
+  // x conflicts (would-be foo.x via (x, y) AND would-be bar.x via
+  // (x, z)) → Phase C drops it → Phase E records the candidate set.
+  assert_eq!(trace_for(0).phase_resolved, ResolutionPhase::PhaseE);
   assert_eq!(trace_for(1).phase_resolved, ResolutionPhase::PhaseC);
   assert_eq!(trace_for(2).phase_resolved, ResolutionPhase::PhaseC);
   let _ = bar_x;
@@ -3568,7 +3598,9 @@ fn phase_d_dev_doc_unresolved_ref_records_iteration_of_last_attempt() {
       occurrence: 0,
     })
     .unwrap();
-  assert_eq!(trace.phase_resolved, ResolutionPhase::Unresolved);
+  // Phase E records the anchor-by-name fallback once Phases B + C exit
+  // without a winner; iteration mirrors the last B/C round.
+  assert_eq!(trace.phase_resolved, ResolutionPhase::PhaseE);
   assert_eq!(trace.iteration, 1);
 }
 
@@ -3653,8 +3685,8 @@ fn phase_c_dev_doc_abstains_when_singleton_scope_holds_multiple_candidates() {
   );
   resolve_dev_doc_comments(&mut audit);
 
-  // Both refs stay Unresolved — Phase C abstains because foo holds
-  // two `amount` candidates.
+  // Phase C abstains because foo holds two `amount` candidates → both
+  // refs fall through to Phase E (anchor-by-name fallback).
   for occ in [0u32, 1] {
     let trace = audit
       .resolution_traces
@@ -3665,7 +3697,7 @@ fn phase_c_dev_doc_abstains_when_singleton_scope_holds_multiple_candidates() {
       .unwrap();
     assert_eq!(
       trace.phase_resolved,
-      ResolutionPhase::Unresolved,
+      ResolutionPhase::PhaseE,
       "Phase C must abstain on multi-candidate singleton scope: {} → {:?}",
       trace.identifier,
       trace.phase_resolved,
@@ -3756,4 +3788,542 @@ fn phase_d_dev_doc_per_comment_isolation_during_iteration() {
       assert_eq!(trace.iteration, 1);
     }
   }
+}
+
+// ---------------------------------------------------------------------
+// Layer 8 — Phase E (anchor-by-name fallback)
+//
+// Phase E activates after Phase D's loop exits. For every still-
+// ambiguous reference whose `candidates_by_simple_name` lookup is non-
+// empty, the resolver:
+//
+// 1. Writes the full candidate list onto the comment node's
+//    `referenced_topic_candidates` field.
+// 2. Relabels the trace from `Unresolved` to `PhaseE` while preserving
+//    the candidate scores from the last Phase B / C attempt.
+// 3. Leaves `referenced_topic` `None`.
+//
+// Unlike the doc-tree consumer, the dev-doc consumer's contract anchor
+// is already pinned by the comment's `target_topic`, so no additional
+// section-level anchoring is needed downstream — the field exists for
+// operator inspection.
+// ---------------------------------------------------------------------
+
+/// Pin the field-write contract: a comment whose ambiguous ref Phase D
+/// could not resolve gets `referenced_topic_candidates` populated with
+/// the full candidate list (in topic-ID ascending order — the
+/// `candidates_by_simple_name` contract).
+#[test]
+fn phase_e_dev_doc_populates_referenced_topic_candidates() {
+  // Two `transfer` candidates split across two contracts, no graph
+  // signal favoring either, comment attached to a third (unrelated)
+  // function whose scope chain seeds nothing useful for either
+  // candidate. Phase B abstains, Phase C abstains (single ref) → Phase
+  // E records candidates.
+  let vault = nt(10);
+  let vault_transfer = nt(11);
+  let token = nt(20);
+  let token_transfer = nt(21);
+  let helper_contract = nt(30);
+  let helper_func = nt(31);
+
+  let mut audit = staged_audit();
+  for (t, name, kind, scope) in [
+    (
+      vault,
+      "Vault",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container { container: pp("test.sol") },
+    ),
+    (
+      token,
+      "Token",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container { container: pp("test.sol") },
+    ),
+    (
+      helper_contract,
+      "Helper",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container { container: pp("test.sol") },
+    ),
+    (
+      vault_transfer,
+      "transfer",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component { container: pp("test.sol"), component: vault },
+    ),
+    (
+      token_transfer,
+      "transfer",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component { container: pp("test.sol"), component: token },
+    ),
+    (
+      helper_func,
+      "doStuff",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: helper_contract,
+      },
+    ),
+  ] {
+    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  // No edges into either transfer from helper_contract or helper_func.
+  audit.resolution_graph = Some(graph_from(&[
+    (vault, vault_transfer, EdgeType::ContainsMember),
+    (vault_transfer, vault, EdgeType::ContainsMember),
+    (token, token_transfer, EdgeType::ContainsMember),
+    (token_transfer, token, EdgeType::ContainsMember),
+    (helper_contract, helper_func, EdgeType::ContainsMember),
+    (helper_func, helper_contract, EdgeType::ContainsMember),
+  ]));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    helper_func,
+    Author::DevTechnical,
+    vec![code_id("transfer", None)],
+  );
+  resolve_dev_doc_comments(&mut audit);
+
+  // referenced_topic stays None; referenced_topic_candidates carries
+  // both candidates in ascending topic-ID order.
+  let Some(Node::Comment(nodes)) = audit.nodes.get(&comment) else {
+    unreachable!()
+  };
+  let CommentNode::CodeIdentifier {
+    referenced_topic,
+    referenced_topic_candidates,
+    ..
+  } = &nodes[0]
+  else {
+    unreachable!()
+  };
+  assert!(
+    referenced_topic.is_none(),
+    "Phase E never picks a winner",
+  );
+  assert_eq!(
+    *referenced_topic_candidates,
+    vec![vault_transfer, token_transfer],
+    "Phase E writes full candidate list, sorted ascending by topic ID",
+  );
+
+  // Trace shape: PhaseE, no chosen, candidate_scores carry both.
+  let trace = audit
+    .resolution_traces
+    .get(&ResolutionRefId::DevDocComment {
+      comment_topic: comment,
+      occurrence: 0,
+    })
+    .unwrap();
+  assert_eq!(trace.phase_resolved, ResolutionPhase::PhaseE);
+  assert_eq!(trace.chosen_topic, None);
+  assert_eq!(trace.candidate_scores.len(), 2);
+}
+
+/// A dev-doc ref whose candidates is empty stays `Unresolved` — no
+/// fallback fires, no field write happens.
+#[test]
+fn phase_e_dev_doc_skips_refs_with_no_name_candidates() {
+  let mut audit = staged_audit();
+  let func = nt(10);
+  audit.topic_metadata.insert(
+    func,
+    named_topic(func, "f", NamedTopicKind::Builtin, Scope::Global),
+  );
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(resolution_graph::build(&audit));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    func,
+    Author::DevTechnical,
+    vec![code_id("missingThing", None)],
+  );
+  resolve_dev_doc_comments(&mut audit);
+
+  let trace = audit
+    .resolution_traces
+    .get(&ResolutionRefId::DevDocComment {
+      comment_topic: comment,
+      occurrence: 0,
+    })
+    .unwrap();
+  assert_eq!(
+    trace.phase_resolved,
+    ResolutionPhase::Unresolved,
+    "no candidates ⇒ no Phase E ⇒ trace stays Unresolved",
+  );
+
+  let Some(Node::Comment(nodes)) = audit.nodes.get(&comment) else {
+    unreachable!()
+  };
+  let CommentNode::CodeIdentifier {
+    referenced_topic_candidates,
+    ..
+  } = &nodes[0]
+  else {
+    unreachable!()
+  };
+  assert!(
+    referenced_topic_candidates.is_empty(),
+    "no candidates ⇒ field stays empty",
+  );
+}
+
+/// Phase E never overwrites a Phase B / C win in the dev-doc tree:
+/// a comment containing one resolved-by-B ref and one falling-to-E ref
+/// produces an empty candidates list on the winner and a populated
+/// list on the loser.
+#[test]
+fn phase_e_dev_doc_does_not_touch_phase_b_winners() {
+  let vault = nt(10);
+  let vault_transfer = nt(11);
+  let vault_func = nt(12);
+  let token = nt(20);
+  let token_transfer = nt(21);
+  let other_a = nt(50);
+  let other_b = nt(60);
+
+  let mut audit = staged_audit();
+  for (t, name, kind, scope) in [
+    (
+      vault,
+      "Vault",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container { container: pp("test.sol") },
+    ),
+    (
+      token,
+      "Token",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container { container: pp("test.sol") },
+    ),
+    (
+      vault_transfer,
+      "transfer",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component { container: pp("test.sol"), component: vault },
+    ),
+    (
+      vault_func,
+      "doStuff",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component { container: pp("test.sol"), component: vault },
+    ),
+    (
+      token_transfer,
+      "transfer",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component { container: pp("test.sol"), component: token },
+    ),
+    (other_a, "ambig", NamedTopicKind::Builtin, Scope::Global),
+    (other_b, "ambig", NamedTopicKind::Builtin, Scope::Global),
+  ] {
+    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(graph_from(&[
+    (vault, vault_transfer, EdgeType::ContainsMember),
+    (vault_transfer, vault, EdgeType::ContainsMember),
+    (vault, vault_func, EdgeType::ContainsMember),
+    (vault_func, vault, EdgeType::ContainsMember),
+    (token, token_transfer, EdgeType::ContainsMember),
+    (token_transfer, token, EdgeType::ContainsMember),
+  ]));
+
+  // Comment attached to vault.doStuff: scope chain seeds Vault →
+  // Vault.transfer wins via Phase B; "ambig" has no graph anchor →
+  // Phase E records candidates.
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    vault_func,
+    Author::DevTechnical,
+    vec![code_id("transfer", None), code_id("ambig", None)],
+  );
+  resolve_dev_doc_comments(&mut audit);
+
+  let Some(Node::Comment(nodes)) = audit.nodes.get(&comment) else {
+    unreachable!()
+  };
+  // First ref — Phase B winner.
+  let CommentNode::CodeIdentifier {
+    referenced_topic: tref0,
+    referenced_topic_candidates: tcand0,
+    ..
+  } = &nodes[0]
+  else {
+    unreachable!()
+  };
+  assert_eq!(*tref0, Some(vault_transfer));
+  assert!(tcand0.is_empty(), "Phase B winner's candidates field stays empty");
+
+  // Second ref — Phase E.
+  let CommentNode::CodeIdentifier {
+    referenced_topic: tref1,
+    referenced_topic_candidates: tcand1,
+    ..
+  } = &nodes[1]
+  else {
+    unreachable!()
+  };
+  assert_eq!(*tref1, None);
+  assert_eq!(*tcand1, vec![other_a, other_b]);
+}
+
+/// `mentions_index` and the `mentioned_topics` field are *not* touched
+/// for Phase E references — only Phase B / C winners contribute. Pin
+/// the contract: the dev-doc pass's mention-merge step only follows
+/// `referenced_topic`, never `referenced_topic_candidates`.
+#[test]
+fn phase_e_dev_doc_does_not_pollute_mentions_index() {
+  let mut audit = staged_audit();
+  let func = nt(10);
+  audit.topic_metadata.insert(
+    func,
+    named_topic(func, "f", NamedTopicKind::Builtin, Scope::Global),
+  );
+  for id in &[100, 200] {
+    audit.topic_metadata.insert(
+      nt(*id),
+      named_topic(nt(*id), "ambig", NamedTopicKind::Builtin, Scope::Global),
+    );
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(resolution_graph::build(&audit));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    func,
+    Author::DevTechnical,
+    vec![code_id("ambig", None)],
+  );
+  let mentions_before = audit.mentions_index.clone();
+  resolve_dev_doc_comments(&mut audit);
+
+  // mentions_index unchanged — Phase E does not produce a winner to
+  // record.
+  assert_eq!(
+    audit.mentions_index, mentions_before,
+    "Phase E must not contribute to mentions_index",
+  );
+
+  // mentioned_topics on the comment metadata is also unchanged.
+  let TopicMetadata::CommentTopic { mentioned_topics, .. } =
+    audit.topic_metadata.get(&comment).unwrap()
+  else {
+    unreachable!()
+  };
+  assert!(
+    mentioned_topics.is_empty(),
+    "Phase E must not contribute to mentioned_topics",
+  );
+}
+
+/// Phase E preserves candidate ordering: the `candidates_by_simple_name`
+/// slice is sorted ascending by topic ID; Phase E writes it verbatim.
+#[test]
+fn phase_e_dev_doc_preserves_candidate_iteration_order() {
+  let mut audit = staged_audit();
+  let func = nt(10);
+  audit.topic_metadata.insert(
+    func,
+    named_topic(func, "f", NamedTopicKind::Builtin, Scope::Global),
+  );
+  for id in &[500, 100, 300, 200] {
+    audit.topic_metadata.insert(
+      nt(*id),
+      named_topic(nt(*id), "thing", NamedTopicKind::Builtin, Scope::Global),
+    );
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(resolution_graph::build(&audit));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    func,
+    Author::DevTechnical,
+    vec![code_id("thing", None)],
+  );
+  resolve_dev_doc_comments(&mut audit);
+
+  let Some(Node::Comment(nodes)) = audit.nodes.get(&comment) else {
+    unreachable!()
+  };
+  let CommentNode::CodeIdentifier {
+    referenced_topic_candidates,
+    ..
+  } = &nodes[0]
+  else {
+    unreachable!()
+  };
+  assert_eq!(
+    *referenced_topic_candidates,
+    vec![nt(100), nt(200), nt(300), nt(500)],
+    "Phase E writes candidates in candidates_by_simple_name's sorted order",
+  );
+}
+
+/// Determinism: the same audit + same comment runs twice → same
+/// trace bytes, same comment-tree bytes (including
+/// `referenced_topic_candidates`).
+#[test]
+fn phase_e_dev_doc_is_byte_deterministic_across_repeat_runs() {
+  fn build() -> AuditData {
+    let vault = nt(10);
+    let vault_transfer = nt(11);
+    let vault_func = nt(12);
+    let token = nt(20);
+    let token_transfer = nt(21);
+
+    let mut audit = staged_audit();
+    for (t, name, kind, scope) in [
+      (
+        vault,
+        "Vault",
+        NamedTopicKind::Contract(ContractKind::Contract),
+        Scope::Container { container: pp("test.sol") },
+      ),
+      (
+        token,
+        "Token",
+        NamedTopicKind::Contract(ContractKind::Contract),
+        Scope::Container { container: pp("test.sol") },
+      ),
+      (
+        vault_transfer,
+        "transfer",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component {
+          container: pp("test.sol"),
+          component: vault,
+        },
+      ),
+      (
+        vault_func,
+        "doStuff",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component {
+          container: pp("test.sol"),
+          component: vault,
+        },
+      ),
+      (
+        token_transfer,
+        "transfer",
+        NamedTopicKind::Function(FunctionKind::Function),
+        Scope::Component {
+          container: pp("test.sol"),
+          component: token,
+        },
+      ),
+    ] {
+      audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+    }
+    audit.name_index = TopicNameIndex::build(&audit);
+    // No edges so PR is uniformly zero — `transfer` falls to Phase E.
+    audit.resolution_graph = Some(graph_from(&[]));
+    insert_dev_doc(
+      &mut audit,
+      -10,
+      vault_func,
+      Author::DevTechnical,
+      vec![code_id("transfer", None)],
+    );
+    audit
+  }
+
+  let mut a = build();
+  let mut b = build();
+  resolve_dev_doc_comments(&mut a);
+  resolve_dev_doc_comments(&mut b);
+
+  // Compare comment-tree bytes via the `nodes` map entry for the
+  // synthetic comment.
+  let nodes_a = a.nodes.get(&ct(-10)).cloned().unwrap();
+  let nodes_b = b.nodes.get(&ct(-10)).cloned().unwrap();
+  assert_eq!(
+    serde_json::to_vec(&nodes_a).unwrap(),
+    serde_json::to_vec(&nodes_b).unwrap(),
+    "comment tree bytes must match across repeat runs",
+  );
+
+  // Trace contents match too. (`resolution_traces` is keyed by
+  // `ResolutionRefId`, which serde_json can't render as a JSON map
+  // key, so we compare the values vector instead — same determinism
+  // contract, expressible in JSON.)
+  let traces_a: Vec<_> = a.resolution_traces.iter().collect();
+  let traces_b: Vec<_> = b.resolution_traces.iter().collect();
+  assert_eq!(
+    serde_json::to_vec(&traces_a).unwrap(),
+    serde_json::to_vec(&traces_b).unwrap(),
+    "trace bytes must match across repeat runs",
+  );
+}
+
+/// Phase E idempotency for the dev-doc consumer: running the pass
+/// twice on the same audit produces byte-identical state. Pins the
+/// contract that the resolver can re-run safely (e.g., after a re-load
+/// that doesn't change the underlying graph).
+#[test]
+fn phase_e_dev_doc_is_idempotent_across_repeat_passes() {
+  let mut audit = staged_audit();
+  let func = nt(10);
+  audit.topic_metadata.insert(
+    func,
+    named_topic(func, "f", NamedTopicKind::Builtin, Scope::Global),
+  );
+  for id in &[100, 200] {
+    audit.topic_metadata.insert(
+      nt(*id),
+      named_topic(nt(*id), "ambig", NamedTopicKind::Builtin, Scope::Global),
+    );
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(resolution_graph::build(&audit));
+
+  let comment = insert_dev_doc(
+    &mut audit,
+    -10,
+    func,
+    Author::DevTechnical,
+    vec![code_id("ambig", None)],
+  );
+
+  resolve_dev_doc_comments(&mut audit);
+  let nodes_first = audit.nodes.get(&comment).cloned().unwrap();
+  let traces_first: Vec<_> =
+    audit.resolution_traces.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+  let mentions_first = audit.mentions_index.clone();
+
+  resolve_dev_doc_comments(&mut audit);
+  let nodes_second = audit.nodes.get(&comment).cloned().unwrap();
+  let traces_second: Vec<_> =
+    audit.resolution_traces.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+  let mentions_second = audit.mentions_index.clone();
+
+  assert_eq!(
+    serde_json::to_vec(&nodes_first).unwrap(),
+    serde_json::to_vec(&nodes_second).unwrap(),
+    "comment tree must be byte-identical after repeat pass",
+  );
+  assert_eq!(
+    serde_json::to_vec(&traces_first).unwrap(),
+    serde_json::to_vec(&traces_second).unwrap(),
+    "traces must be byte-identical after repeat pass",
+  );
+  assert_eq!(
+    mentions_first, mentions_second,
+    "mentions_index must be unchanged across repeat pass",
+  );
 }

@@ -1,11 +1,18 @@
-//! Phases B + C + D of the resolution pipeline for synthetic developer
-//! documentation: NatSpec docstrings on contracts/functions/modifiers,
-//! per-parameter `@param` blocks, and SemanticBlock inline source
-//! comments. Mirrors the doc-tree pass in
+//! Phases B + C + D + E of the resolution pipeline for synthetic
+//! developer documentation: NatSpec docstrings on contracts /
+//! functions / modifiers, per-parameter `@param` blocks, and
+//! SemanticBlock inline source comments. Mirrors the doc-tree pass in
 //! `crates/o11a-analyze/src/documentation/resolution_pass.rs` — same
 //! algorithm, same threshold, same determinism contract — but seeds
 //! from the source-tree scope chain of each comment's `target_topic`
 //! instead of the doc-tree header hierarchy.
+//!
+//! Phase E (the anchor-by-name fallback) writes the full candidate list
+//! into `CommentNode::CodeIdentifier::referenced_topic_candidates` for
+//! every ref Phase D could not pin. Unlike the doc-tree consumer, the
+//! comment's `target_topic` already pins a specific contract, so no
+//! additional contract anchoring is needed downstream — the field is
+//! purely for operator inspection here.
 //!
 //! Pipeline order (set by `analysis.rs`):
 //!
@@ -279,15 +286,20 @@ fn collect_refs(
 // Pass 2 — scoring (Phases B + C inside Phase D loop)
 // ---------------------------------------------------------------------
 
-/// One winning resolution. Carried out of Pass 2 and applied to the
-/// comment's node tree in Pass 3. The new `kind` and `referenced_name`
-/// mirror what the parser would have written next to a Phase-A
-/// resolution.
+/// One outcome from the resolution pipeline. Carried out of Pass 2 (or
+/// Phase E) and applied to the comment's node tree in Pass 3. Phases
+/// B / C produce `Resolved` (a chosen topic plus the snapshot fields
+/// the parser stamps next to a Phase-A winner). Phase E produces
+/// `Candidates` (a list of all candidates, with `referenced_topic`
+/// left `None`).
 #[derive(Debug)]
-struct AppliedResolution {
-  chosen_topic: topic::Topic,
-  kind: Option<domain::NamedTopicKind>,
-  referenced_name: Option<String>,
+enum AppliedResolution {
+  Resolved {
+    chosen_topic: topic::Topic,
+    kind: Option<domain::NamedTopicKind>,
+    referenced_name: Option<String>,
+  },
+  Candidates(Vec<topic::Topic>),
 }
 
 /// Map of winning resolutions, keyed by `(comment_topic, occurrence)`
@@ -361,7 +373,56 @@ fn compute_resolutions(
     }
   }
 
+  // Phase E — anchor-by-name fallback. Refs that survived Phase D get
+  // their candidate list recorded onto the AST node so operator
+  // inspection sees the full set even though `referenced_topic` stays
+  // `None`. The dev-doc consumer's contract anchor is already pinned by
+  // the comment's `target_topic`, so no additional contract anchoring
+  // is needed here.
+  run_phase_e(plans, audit_data, &mut resolutions, &mut traces);
+
   (resolutions, traces)
+}
+
+/// Phase E — anchor-by-name fallback for dev-doc comments. Walks every
+/// plan's surviving ambiguous refs after Phase D exits, records the
+/// full candidate list as `AppliedResolution::Candidates` for the Pass
+/// 3 mutator to write into `referenced_topic_candidates`, and relabels
+/// the trace from `Unresolved` to `PhaseE`. Refs whose candidate list
+/// is empty stay `Unresolved` — there is nothing to anchor on.
+///
+/// Iteration order is plan order then ambiguous-ref insertion order,
+/// both deterministic. The trace's `iteration` field is preserved from
+/// the last Phase B attempt.
+fn run_phase_e(
+  plans: &[CommentPlan],
+  audit_data: &domain::AuditData,
+  resolutions: &mut ResolutionMap,
+  traces: &mut TraceMap,
+) {
+  for plan in plans {
+    for ambiguous in &plan.ambiguous_refs {
+      let candidates = audit_data
+        .name_index
+        .candidates_by_simple_name(&ambiguous.identifier);
+      if candidates.is_empty() {
+        continue;
+      }
+
+      resolutions.insert(
+        (plan.comment_topic, ambiguous.occurrence),
+        AppliedResolution::Candidates(candidates.to_vec()),
+      );
+
+      let trace_key = ResolutionRefId::DevDocComment {
+        comment_topic: plan.comment_topic,
+        occurrence: ambiguous.occurrence,
+      };
+      if let Some(trace) = traces.get_mut(&trace_key) {
+        trace.phase_resolved = ResolutionPhase::PhaseE;
+      }
+    }
+  }
 }
 
 /// Run Phase B for one comment plan: build the seed vector, run PR,
@@ -410,7 +471,7 @@ fn run_phase_b(
       let (kind, referenced_name) = lookup_kind_and_name(chosen_topic, audit_data);
       resolutions.insert(
         (comment_topic, ambiguous.occurrence),
-        AppliedResolution {
+        AppliedResolution::Resolved {
           chosen_topic,
           kind,
           referenced_name,
@@ -512,7 +573,7 @@ fn run_phase_c(
       let (kind, referenced_name) = lookup_kind_and_name(chosen_topic, audit_data);
       resolutions.insert(
         (comment_topic, ambiguous.occurrence),
-        AppliedResolution {
+        AppliedResolution::Resolved {
           chosen_topic,
           kind,
           referenced_name,
@@ -804,6 +865,7 @@ fn apply_to_node(
       referenced_topic,
       kind,
       referenced_name,
+      referenced_topic_candidates,
       ..
     } => {
       let occurrence = *counter;
@@ -817,11 +879,27 @@ fn apply_to_node(
         return;
       }
 
-      if let Some(applied) = resolutions.get(&(comment_topic, occurrence)) {
-        *referenced_topic = Some(applied.chosen_topic);
-        *kind = applied.kind.clone();
-        *referenced_name = applied.referenced_name.clone();
-        new_mentions.insert(applied.chosen_topic);
+      match resolutions.get(&(comment_topic, occurrence)) {
+        Some(AppliedResolution::Resolved {
+          chosen_topic,
+          kind: applied_kind,
+          referenced_name: applied_name,
+        }) => {
+          *referenced_topic = Some(*chosen_topic);
+          *kind = applied_kind.clone();
+          *referenced_name = applied_name.clone();
+          new_mentions.insert(*chosen_topic);
+          // Clear any stale Phase E candidates — the contract is
+          // "candidates non-empty IFF referenced_topic is None".
+          // Matters when the resolver re-runs against an audit whose
+          // graph has changed enough that a previously-Phase-E ref
+          // now resolves via B/C.
+          referenced_topic_candidates.clear();
+        }
+        Some(AppliedResolution::Candidates(candidates)) => {
+          *referenced_topic_candidates = candidates.clone();
+        }
+        None => {}
       }
     }
     CommentNode::InlineCode { children, .. } => {

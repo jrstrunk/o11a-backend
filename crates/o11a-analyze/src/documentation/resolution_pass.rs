@@ -1,4 +1,5 @@
-//! Phases B + C + D of the resolution pipeline for documentation files.
+//! Phases B + C + D + E of the resolution pipeline for documentation
+//! files.
 //!
 //! Runs after the doc parser stamps Phase-A resolutions on every
 //! `CodeIdentifier` (qualified-name and unique-simple-name lookups via
@@ -17,6 +18,13 @@
 //! 3. **Phase D** — re-iterate: each new resolution becomes a Phase-A
 //!    seed for the next iteration, which may unlock further refs. Cap
 //!    at `MAX_ITERATIONS` rounds.
+//! 4. **Phase E** — anchor-by-name fallback for refs the prior phases
+//!    could not pin to one topic. Their full candidate list is written
+//!    into `CodeIdentifier::referenced_topic_candidates` so downstream
+//!    consumers (`mechanical_semantic_links`) can union each candidate's
+//!    containing contract into the section's contract anchor set.
+//!    `referenced_topic` stays `None` — the resolver does not contribute
+//!    a specific declaration to the section, only contract anchors.
 //!
 //! The pass is a pure read-then-mutate over the parsed `DocumentationAST`
 //! and a read of `AuditData`. The graph itself is consulted only for PR
@@ -47,8 +55,8 @@ use o11a_core::resolution_graph::{
 /// fallback" section. A candidate wins when
 /// `score_top / (score_top + score_runner_up) >= THRESHOLD`. Below
 /// this, Phase B falls through to Phase C; if Phase C also abstains,
-/// the resolver leaves `referenced_topic = None` and Phase 10's
-/// anchor-by-name fallback (out of scope here) takes over.
+/// Phase E records the full candidate list as the anchor-by-name
+/// fallback and `referenced_topic` stays `None`.
 const CONFIDENCE_THRESHOLD: f32 = 0.65;
 
 /// Maximum depth contribution for ancestor-section seeding. Beyond this
@@ -116,9 +124,17 @@ pub fn resolve_doc_tree(
     }
   }
 
-  // Pass 3: mutation. Walk the tree once with `&mut`, set
-  // `referenced_topic` (and the `kind` / `referenced_name` snapshots
-  // the parser fills in alongside it) on every winning reference.
+  // Phase E — anchor-by-name fallback. Refs still in `ambiguous_refs`
+  // after Phase D record the full candidate list onto the AST node so
+  // `mechanical_semantic_links` can union each candidate's containing
+  // contract into the section's anchor set. `referenced_topic` stays
+  // `None`: the resolver does not contribute a specific declaration,
+  // only contracts.
+  run_phase_e(&sections, audit_data, &mut resolutions, &mut traces);
+
+  // Pass 3: mutation. Walk the tree once with `&mut`, applying each
+  // resolved entry's chosen topic (Phases B / C) or candidate list
+  // (Phase E) to the matching `CodeIdentifier`.
   if !resolutions.is_empty() {
     apply_resolutions(doc_root, &resolutions);
   }
@@ -273,15 +289,19 @@ fn collect_sections(
 // Pass 2 — scoring (Phases B + C inside Phase D loop)
 // ---------------------------------------------------------------------
 
-/// One winning resolution. Carried out of Pass 2 and applied to the
-/// tree in Pass 3. The new `kind` and `referenced_name` mirror what
-/// the parser would have written if Phase A had succeeded for this
-/// reference.
+/// One outcome from the resolution pipeline. Carried out of Pass 2 (or
+/// Phase E) and applied to the AST tree in Pass 3. Phases B / C produce
+/// `Resolved` (a chosen topic plus the snapshot fields the parser
+/// stamps next to a Phase-A winner). Phase E produces `Candidates` (a
+/// list of all candidates, with `referenced_topic` left `None`).
 #[derive(Debug)]
-struct AppliedResolution {
-  chosen_topic: topic::Topic,
-  kind: Option<domain::NamedTopicKind>,
-  referenced_name: Option<String>,
+enum AppliedResolution {
+  Resolved {
+    chosen_topic: topic::Topic,
+    kind: Option<domain::NamedTopicKind>,
+    referenced_name: Option<String>,
+  },
+  Candidates(Vec<topic::Topic>),
 }
 
 /// One iteration of Phase D: run Phase B per section, then Phase C on
@@ -392,7 +412,7 @@ fn run_phase_b(
       let (kind, referenced_name) = lookup_kind_and_name(chosen_topic, audit_data);
       resolutions.insert(
         ambiguous.node_id,
-        AppliedResolution {
+        AppliedResolution::Resolved {
           chosen_topic,
           kind,
           referenced_name,
@@ -500,7 +520,7 @@ fn run_phase_c(
       let (kind, referenced_name) = lookup_kind_and_name(chosen_topic, audit_data);
       resolutions.insert(
         ambiguous.node_id,
-        AppliedResolution {
+        AppliedResolution::Resolved {
           chosen_topic,
           kind,
           referenced_name,
@@ -538,6 +558,47 @@ fn run_phase_c(
   section.ambiguous_refs = survivors;
   section.direct_phase_a_topics.sort();
   section.direct_phase_a_topics.dedup();
+}
+
+/// Phase E — anchor-by-name fallback. After Phase D's loop exits,
+/// walk every section's surviving ambiguous refs. Each ref with at
+/// least one candidate gets its full candidate list pushed into
+/// `referenced_topic_candidates` (via `AppliedResolution::Candidates`)
+/// and its trace relabeled from `Unresolved` to `PhaseE`. Refs whose
+/// candidate list is empty stay `Unresolved` — there is nothing to
+/// anchor on.
+///
+/// Iteration order is `sections` index then ref insertion order, both
+/// deterministic. The trace's `iteration` field is preserved from the
+/// last Phase B attempt, which already records the round in which the
+/// ref was last considered.
+fn run_phase_e(
+  sections: &[SectionInfo],
+  audit_data: &domain::AuditData,
+  resolutions: &mut BTreeMap<i32, AppliedResolution>,
+  traces: &mut BTreeMap<ResolutionRefId, ResolutionTrace>,
+) {
+  for section in sections {
+    for ambiguous in &section.ambiguous_refs {
+      let candidates = audit_data
+        .name_index
+        .candidates_by_simple_name(&ambiguous.identifier);
+      if candidates.is_empty() {
+        // Nothing to anchor on; trace stays `Unresolved`.
+        continue;
+      }
+
+      resolutions.insert(
+        ambiguous.node_id,
+        AppliedResolution::Candidates(candidates.to_vec()),
+      );
+
+      let trace_key = ResolutionRefId::DocumentationNode(ambiguous.node_id);
+      if let Some(trace) = traces.get_mut(&trace_key) {
+        trace.phase_resolved = ResolutionPhase::PhaseE;
+      }
+    }
+  }
 }
 
 /// Walks the section's ancestor chain (including itself) and sums
@@ -743,12 +804,15 @@ fn lookup_kind_and_name(
 // Pass 3 — mutation
 // ---------------------------------------------------------------------
 
-/// Walk the doc tree once with `&mut`, replacing each ambiguous
-/// `CodeIdentifier`'s `referenced_topic` (and the snapshot fields the
-/// parser writes alongside it) with the chosen topic.
+/// Walk the doc tree once with `&mut`, applying each ambiguous
+/// `CodeIdentifier`'s outcome from the resolution pipeline:
+/// - `AppliedResolution::Resolved` writes `referenced_topic` plus the
+///   `kind` / `referenced_name` snapshots the parser stamps next to it.
+/// - `AppliedResolution::Candidates` writes `referenced_topic_candidates`
+///   (Phase E fallback). `referenced_topic` stays `None`.
 ///
-/// Phase B / C never overwrite Phase A: the lookup is keyed on
-/// `node_id`, and the resolver only enters resolutions for references
+/// Phase B / C / E never overwrite Phase A: the lookup is keyed on
+/// `node_id`, and the resolver only enters entries for references
 /// whose Phase-A `referenced_topic` was `None`.
 fn apply_resolutions(
   node: &mut DocumentationNode,
@@ -760,6 +824,7 @@ fn apply_resolutions(
       referenced_topic,
       kind,
       referenced_name,
+      referenced_topic_candidates,
       ..
     } => {
       // Defensive guard: never overwrite a Phase-A resolution. The
@@ -771,10 +836,26 @@ fn apply_resolutions(
       if referenced_topic.is_some() {
         return;
       }
-      if let Some(applied) = resolutions.get(node_id) {
-        *referenced_topic = Some(applied.chosen_topic);
-        *kind = applied.kind.clone();
-        *referenced_name = applied.referenced_name.clone();
+      match resolutions.get(node_id) {
+        Some(AppliedResolution::Resolved {
+          chosen_topic,
+          kind: applied_kind,
+          referenced_name: applied_name,
+        }) => {
+          *referenced_topic = Some(*chosen_topic);
+          *kind = applied_kind.clone();
+          *referenced_name = applied_name.clone();
+          // Clear any stale Phase E candidates — the contract is
+          // "candidates non-empty IFF referenced_topic is None".
+          // Matters when the resolver re-runs against an audit whose
+          // graph has changed enough that a previously-Phase-E ref
+          // now resolves via B/C.
+          referenced_topic_candidates.clear();
+        }
+        Some(AppliedResolution::Candidates(candidates)) => {
+          *referenced_topic_candidates = candidates.clone();
+        }
+        None => {}
       }
     }
 

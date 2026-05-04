@@ -644,7 +644,9 @@ fn sibling_section_seeds_do_not_cross_pollinate() {
   );
   assert_eq!(traces.len(), 1);
   assert_eq!(traces[0].1.chosen_topic, None);
-  assert_eq!(traces[0].1.phase_resolved, ResolutionPhase::Unresolved);
+  // Phase E records the anchor-by-name fallback for the unresolved
+  // ref; both candidates remain attached to the trace at zero PR.
+  assert_eq!(traces[0].1.phase_resolved, ResolutionPhase::PhaseE);
   // Both candidates show up in the trace with PR `0.0` — the seed
   // vector for Token section is empty, so PR returns zero everywhere.
   assert_eq!(traces[0].1.candidate_scores.len(), 2);
@@ -1069,8 +1071,11 @@ fn ratio_below_threshold_leaves_reference_unresolved_with_full_trace() {
     "symmetric topology must produce bit-identical PR"
   );
   assert_eq!(trace.chosen_topic, None);
-  assert_eq!(trace.phase_resolved, ResolutionPhase::Unresolved);
-  // No top-edges populated for unresolved — there is no winner to
+  // Phase E records the anchor-by-name fallback once Phases B + C exit
+  // without a winner; the trace is rewritten from `Unresolved` to
+  // `PhaseE` and the candidate scores stay attached for inspection.
+  assert_eq!(trace.phase_resolved, ResolutionPhase::PhaseE);
+  // No top-edges populated for an unwon ref — there is no winner to
   // attribute mass to.
   assert!(trace.top_contributing_edges.is_empty());
 }
@@ -1861,12 +1866,15 @@ fn phase_b_winner_carries_kind_and_referenced_name_snapshots() {
   }
 }
 
-/// `referenced_topic_candidates` is the Phase-E fallback field
-/// (Phase 10's job to populate). Phase B must not touch it — neither
-/// for resolved refs nor for unresolved ones — because the rollout
-/// expects it to land empty until Phase 10 runs.
+/// `referenced_topic_candidates` invariant: non-empty IFF the ref is
+/// unresolved (`referenced_topic = None`). Stale Phase E candidates
+/// must be cleared when Phase B succeeds — otherwise an audit re-run
+/// where the graph has changed enough to resolve a previously-Phase-E
+/// ref would leave inconsistent state. This test pre-populates the
+/// field on two refs (one Phase B will resolve, one falls through to
+/// Phase E) and asserts the post-pass invariant.
 #[test]
-fn phase_b_does_not_touch_referenced_topic_candidates_field() {
+fn phase_b_clears_stale_candidates_phase_e_repopulates_them() {
   let vault_contract = nt(10);
   let vault_transfer = nt(11);
   let token_contract = nt(20);
@@ -1927,78 +1935,110 @@ fn phase_b_does_not_touch_referenced_topic_candidates_field() {
     (token_transfer, token_contract, EdgeType::ContainsMember),
   ]));
 
-  // Construct two CodeIdentifier nodes: one whose Phase B will
-  // succeed, and one whose Phase B will fail. Both arrive with
-  // pre-populated `referenced_topic_candidates` (simulating a
-  // hypothetical earlier pass that filled them in). The pass must
-  // leave both untouched.
-  let preexisting = vec![nt(99), nt(100)];
-  let resolved_node = DocumentationNode::CodeIdentifier {
+  // Three CodeIdentifier nodes, all pre-populated with stale candidates
+  // (simulating a prior Phase E run against a different graph state):
+  //   - node 3: Phase A resolved (Vault). Phase B's apply pass early-
+  //     returns on the `referenced_topic.is_some()` guard → candidates
+  //     stay as-is (Phase A is upstream of this resolver).
+  //   - node 4: Phase B will succeed (Vault → Vault.transfer via
+  //     ContainsMember edge). Stale candidates must be cleared.
+  //   - node 5: name has no candidates in the audit at all → Phase B
+  //     fails, Phase E skips (empty candidate list) → stale candidates
+  //     stay (no apply entry written).
+  let stale_candidates = vec![nt(99), nt(100)];
+  let phase_a_node = DocumentationNode::CodeIdentifier {
+    node_id: 3,
+    value: "Vault".to_string(),
+    referenced_topic: Some(vault_contract),
+    kind: Some(NamedTopicKind::Contract(ContractKind::Contract)),
+    referenced_name: Some("Vault".to_string()),
+    referenced_topic_candidates: stale_candidates.clone(),
+  };
+  let phase_b_node = DocumentationNode::CodeIdentifier {
     node_id: 4,
     value: "transfer".to_string(),
     referenced_topic: None,
     kind: None,
     referenced_name: None,
-    referenced_topic_candidates: preexisting.clone(),
+    referenced_topic_candidates: stale_candidates.clone(),
   };
-  let unresolved_node = DocumentationNode::CodeIdentifier {
+  let no_candidates_node = DocumentationNode::CodeIdentifier {
     node_id: 5,
     value: "missingThing".to_string(),
     referenced_topic: None,
     kind: None,
     referenced_name: None,
-    referenced_topic_candidates: preexisting.clone(),
+    referenced_topic_candidates: stale_candidates.clone(),
   };
   let mut tree = root(
     1,
     vec![paragraph(
       2,
-      vec![
-        code_id(3, "Vault", Some(vault_contract)),
-        resolved_node,
-        unresolved_node,
-      ],
+      vec![phase_a_node, phase_b_node, no_candidates_node],
     )],
   );
 
   let _ = resolve_doc_tree(&mut tree, &audit);
 
-  fn assert_candidates_unchanged(
+  fn find_candidates(
     node: &DocumentationNode,
-    expected_id: i32,
-    expected: &[topic::Topic],
-  ) {
+    target_id: i32,
+  ) -> Option<Vec<topic::Topic>> {
     match node {
       DocumentationNode::CodeIdentifier {
         node_id,
         referenced_topic_candidates,
         ..
-      } if *node_id == expected_id => {
-        assert_eq!(
-          referenced_topic_candidates, expected,
-          "CodeIdentifier({}) must keep its pre-existing candidates list",
-          node_id,
-        );
-      }
+      } if *node_id == target_id => Some(referenced_topic_candidates.clone()),
       DocumentationNode::Heading {
         children, section, ..
       } => {
         for c in children {
-          assert_candidates_unchanged(c, expected_id, expected);
+          if let Some(v) = find_candidates(c, target_id) {
+            return Some(v);
+          }
         }
-        if let Some(s) = section {
-          assert_candidates_unchanged(s, expected_id, expected);
+        if let Some(s) = section
+          && let Some(v) = find_candidates(s, target_id)
+        {
+          return Some(v);
         }
+        None
       }
       other => {
         for c in other.children() {
-          assert_candidates_unchanged(c, expected_id, expected);
+          if let Some(v) = find_candidates(c, target_id) {
+            return Some(v);
+          }
         }
+        None
       }
     }
   }
-  assert_candidates_unchanged(&tree, 4, &preexisting);
-  assert_candidates_unchanged(&tree, 5, &preexisting);
+
+  // Phase A node: pass never enters apply for it (referenced_topic was
+  // already Some at Pass 1 collection). Stale candidates persist.
+  // Documenting this not as a desired property but as the current
+  // contract — the resolver only owns refs that were Phase-A `None`.
+  assert_eq!(
+    find_candidates(&tree, 3),
+    Some(stale_candidates.clone()),
+    "Phase A refs are never visited by the resolver's apply step",
+  );
+
+  // Phase B winner: stale candidates cleared.
+  assert_eq!(
+    find_candidates(&tree, 4),
+    Some(vec![]),
+    "Phase B winner must clear stale Phase E candidates",
+  );
+
+  // No-candidates ref: nothing to write; field unchanged.
+  assert_eq!(
+    find_candidates(&tree, 5),
+    Some(stale_candidates),
+    "refs with no name candidates skip Phase E → field stays untouched",
+  );
 }
 
 /// When the same identifier appears multiple times in one section,
@@ -2344,7 +2384,8 @@ fn phase_c_pins_pair_when_intersection_is_singleton() {
 
 /// Phase C — multi-element intersection abstains. Both `amount` and
 /// `tmp` exist in {foo, bar}; the spec says intersection > 1 → no
-/// pinning. Both refs stay unresolved.
+/// pinning. Both refs fall through to Phase E (anchor-by-name), which
+/// records candidates without choosing a winner.
 #[test]
 fn phase_c_abstains_when_intersection_has_multiple_scopes() {
   let (audit, _foo, _bar, _foo_amount, _foo_tmp, _bar_amount, _bar_tmp) =
@@ -2371,14 +2412,14 @@ fn phase_c_abstains_when_intersection_has_multiple_scopes() {
   );
   assert_eq!(traces.len(), 2);
   for (_, trace) in &traces {
-    assert_eq!(trace.phase_resolved, ResolutionPhase::Unresolved);
+    assert_eq!(trace.phase_resolved, ResolutionPhase::PhaseE);
     assert_eq!(trace.chosen_topic, None);
   }
 }
 
 /// Phase C — single-ref section. With only one ambiguous ref, there is
 /// no pair to co-locate — Phase C trivially abstains, leaving the ref
-/// in the Unresolved state Phase B left it in.
+/// for Phase E to record as the anchor-by-name fallback.
 #[test]
 fn phase_c_no_op_with_single_ambiguous_ref() {
   let (audit, _foo, _bar, _foo_amount, _foo_tmp, _bar_amount, _bar_tmp) =
@@ -2394,7 +2435,7 @@ fn phase_c_no_op_with_single_ambiguous_ref() {
   collect_resolutions(&tree, &mut resolved);
   assert_eq!(resolved, vec![(3, None)]);
   assert_eq!(traces.len(), 1);
-  assert_eq!(traces[0].1.phase_resolved, ResolutionPhase::Unresolved);
+  assert_eq!(traces[0].1.phase_resolved, ResolutionPhase::PhaseE);
 }
 
 /// Phase D — a second iteration unlocks a third reference. Iteration 1
@@ -2536,6 +2577,7 @@ fn phase_d_exits_early_when_no_new_resolutions() {
   // Section with one ambiguous ref that nothing can resolve. Phase B
   // returns zero PR (no seeds), Phase C abstains (single ref). The
   // outer loop should NOT keep iterating — it exits after iter 1.
+  // Phase E then records the candidates as the anchor-by-name fallback.
   let mut tree = root(
     1,
     vec![paragraph(2, vec![code_id(3, "amount", None)])],
@@ -2543,9 +2585,10 @@ fn phase_d_exits_early_when_no_new_resolutions() {
   let traces = resolve_doc_tree(&mut tree, &audit);
   assert_eq!(traces.len(), 1);
   // The trace's iteration field holds the round in which the (only)
-  // attempt was made — iteration 1, since the loop exits immediately.
+  // Phase B/C attempt was made — iteration 1, since the loop exits
+  // immediately.
   assert_eq!(traces[0].1.iteration, 1);
-  assert_eq!(traces[0].1.phase_resolved, ResolutionPhase::Unresolved);
+  assert_eq!(traces[0].1.phase_resolved, ResolutionPhase::PhaseE);
 }
 
 /// Phase D — bound check. Every iteration's traces must report
@@ -2747,7 +2790,8 @@ fn phase_c_conflicting_pin_drops_only_the_conflicting_ref() {
     vec![(3, None), (4, Some(foo_y)), (5, Some(bar_z))],
   );
 
-  // Three traces; x's is Unresolved, the other two PhaseC.
+  // Three traces; x falls through to Phase E (anchor-by-name), the
+  // other two are pinned by Phase C.
   let trace_for = |id: i32| {
     traces
       .iter()
@@ -2758,7 +2802,7 @@ fn phase_c_conflicting_pin_drops_only_the_conflicting_ref() {
       .1
       .clone()
   };
-  assert_eq!(trace_for(3).phase_resolved, ResolutionPhase::Unresolved);
+  assert_eq!(trace_for(3).phase_resolved, ResolutionPhase::PhaseE);
   assert_eq!(trace_for(4).phase_resolved, ResolutionPhase::PhaseC);
   assert_eq!(trace_for(5).phase_resolved, ResolutionPhase::PhaseC);
 }
@@ -3157,7 +3201,612 @@ fn phase_d_unresolved_ref_records_iteration_of_last_attempt() {
   let traces = resolve_doc_tree(&mut tree, &audit);
   assert_eq!(traces.len(), 1);
   let trace = &traces[0].1;
-  assert_eq!(trace.phase_resolved, ResolutionPhase::Unresolved);
+  // Phase E records the anchor-by-name fallback once Phases B + C exit
+  // without picking a winner; iteration mirrors the last B/C round.
+  assert_eq!(trace.phase_resolved, ResolutionPhase::PhaseE);
   assert_eq!(trace.iteration, 1);
   assert_eq!(trace.chosen_topic, None);
+}
+
+// ---------------------------------------------------------------------
+// Layer 9 — Phase E (anchor-by-name fallback)
+//
+// Phase E activates after Phase D's loop exits. For every still-
+// ambiguous reference whose `candidates_by_simple_name` lookup is non-
+// empty, the resolver:
+//
+// 1. Writes the full candidate list onto the AST node's
+//    `referenced_topic_candidates` field.
+// 2. Relabels the trace from `Unresolved` to `PhaseE` while preserving
+//    the candidate scores from the last Phase B / C attempt.
+// 3. Leaves `referenced_topic` `None` — Phase E is an anchor-by-name
+//    fallback, not a winner-picker.
+//
+// References whose candidate list is *empty* (no name match anywhere
+// in the audit) stay `Unresolved` — there is nothing to anchor on.
+// ---------------------------------------------------------------------
+
+/// Pass shape: a doc tree where Phase B + C cannot disambiguate fills
+/// `referenced_topic_candidates` with the full candidate list and
+/// reports `phase_resolved = PhaseE`. The candidates appear in
+/// `candidates_by_simple_name` order — sorted ascending by topic ID,
+/// which the name-index build pins.
+#[test]
+fn phase_e_populates_referenced_topic_candidates_when_unresolved() {
+  let (audit, _foo, _bar, foo_amount, _foo_tmp, bar_amount, _bar_tmp) =
+    co_loc_fixture();
+
+  // No singleton intersection (both `amount` candidates remain), no
+  // graph signal favoring one over the other → Phase B fails, Phase C
+  // abstains (single ref), Phase E takes over.
+  let mut tree = root(
+    1,
+    vec![paragraph(2, vec![code_id(3, "amount", None)])],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+
+  // referenced_topic stays None; referenced_topic_candidates carries
+  // the full ranked list.
+  let DocumentationNode::Root { children, .. } = &tree else {
+    unreachable!()
+  };
+  let DocumentationNode::Paragraph { children: pchildren, .. } = &children[0]
+  else {
+    unreachable!()
+  };
+  let DocumentationNode::CodeIdentifier {
+    referenced_topic,
+    referenced_topic_candidates,
+    ..
+  } = &pchildren[0]
+  else {
+    unreachable!()
+  };
+  assert!(
+    referenced_topic.is_none(),
+    "Phase E never picks a winner — referenced_topic stays None",
+  );
+  assert_eq!(
+    *referenced_topic_candidates,
+    vec![foo_amount, bar_amount],
+    "Phase E writes the full candidate list, sorted ascending by topic ID",
+  );
+
+  // Trace bookkeeping: phase_resolved == PhaseE, candidate_scores
+  // populated from the iteration's PR ranking (zero scores since the
+  // seed vector was empty), no chosen_topic.
+  assert_eq!(traces.len(), 1);
+  let (_, trace) = &traces[0];
+  assert_eq!(trace.phase_resolved, ResolutionPhase::PhaseE);
+  assert_eq!(trace.chosen_topic, None);
+  assert_eq!(trace.candidate_scores.len(), 2);
+}
+
+/// Refs with no candidates at all (no topic in the audit shares the
+/// simple name) stay `Unresolved` — Phase E only fires when there is
+/// a candidate to anchor on. Their `referenced_topic_candidates` field
+/// stays empty.
+#[test]
+fn phase_e_skips_refs_with_no_name_candidates() {
+  let audit = empty_audit();
+  let mut tree = root(
+    1,
+    vec![paragraph(2, vec![code_id(3, "missingThing", None)])],
+  );
+  let traces = resolve_doc_tree(&mut tree, &audit);
+
+  assert_eq!(traces.len(), 1);
+  let (_, trace) = &traces[0];
+  assert_eq!(
+    trace.phase_resolved,
+    ResolutionPhase::Unresolved,
+    "no candidates ⇒ no Phase E ⇒ trace stays Unresolved",
+  );
+
+  let DocumentationNode::Root { children, .. } = &tree else {
+    unreachable!()
+  };
+  let DocumentationNode::Paragraph { children: pchildren, .. } = &children[0]
+  else {
+    unreachable!()
+  };
+  let DocumentationNode::CodeIdentifier {
+    referenced_topic_candidates,
+    ..
+  } = &pchildren[0]
+  else {
+    unreachable!()
+  };
+  assert!(
+    referenced_topic_candidates.is_empty(),
+    "no candidates ⇒ field stays empty",
+  );
+}
+
+/// Phase E never overwrites a Phase B / C win. A section with one
+/// resolved ref (Phase B) and one unresolved ref (Phase E) results in
+/// the resolved ref's `referenced_topic_candidates` staying empty,
+/// while the unresolved ref's is populated.
+#[test]
+fn phase_e_does_not_touch_phase_b_winners() {
+  let vault_contract = nt(10);
+  let vault_transfer = nt(11);
+  let token_contract = nt(20);
+  let token_transfer = nt(21);
+  let other_a = nt(30);
+  let other_b = nt(40);
+
+  let mut audit = staged_audit();
+  for (t, name, kind, scope) in [
+    (
+      vault_contract,
+      "Vault",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container { container: pp("test.sol") },
+    ),
+    (
+      token_contract,
+      "Token",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container { container: pp("test.sol") },
+    ),
+    (
+      vault_transfer,
+      "transfer",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: vault_contract,
+      },
+    ),
+    (
+      token_transfer,
+      "transfer",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: token_contract,
+      },
+    ),
+    (other_a, "ambig", NamedTopicKind::Builtin, Scope::Global),
+    (other_b, "ambig", NamedTopicKind::Builtin, Scope::Global),
+  ] {
+    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(graph_from(&[
+    (vault_contract, vault_transfer, EdgeType::ContainsMember),
+    (vault_transfer, vault_contract, EdgeType::ContainsMember),
+    (token_contract, token_transfer, EdgeType::ContainsMember),
+    (token_transfer, token_contract, EdgeType::ContainsMember),
+  ]));
+
+  // Vault is Phase-A-resolved → seeds PR mass into Vault → Vault.transfer.
+  // `transfer` resolves via Phase B; `ambig` has no graph anchor and
+  // no co-location signal → falls to Phase E.
+  let mut tree = root(
+    1,
+    vec![paragraph(
+      2,
+      vec![
+        code_id(3, "Vault", Some(vault_contract)),
+        code_id(4, "transfer", None),
+        code_id(5, "ambig", None),
+      ],
+    )],
+  );
+  let _ = resolve_doc_tree(&mut tree, &audit);
+
+  let mut transfer_candidates = None;
+  let mut transfer_referenced = None;
+  let mut ambig_candidates = None;
+  let mut ambig_referenced = None;
+  let DocumentationNode::Root { children, .. } = &tree else {
+    unreachable!()
+  };
+  let DocumentationNode::Paragraph { children: pchildren, .. } = &children[0]
+  else {
+    unreachable!()
+  };
+  for child in pchildren {
+    if let DocumentationNode::CodeIdentifier {
+      node_id,
+      referenced_topic,
+      referenced_topic_candidates,
+      ..
+    } = child
+    {
+      if *node_id == 4 {
+        transfer_candidates = Some(referenced_topic_candidates.clone());
+        transfer_referenced = Some(*referenced_topic);
+      } else if *node_id == 5 {
+        ambig_candidates = Some(referenced_topic_candidates.clone());
+        ambig_referenced = Some(*referenced_topic);
+      }
+    }
+  }
+
+  assert_eq!(
+    transfer_referenced.unwrap(),
+    Some(vault_transfer),
+    "Phase B resolves transfer to Vault.transfer",
+  );
+  assert!(
+    transfer_candidates.unwrap().is_empty(),
+    "Phase B winner's candidates field must stay empty",
+  );
+
+  assert_eq!(ambig_referenced.unwrap(), None, "ambig stays unresolved");
+  assert_eq!(
+    ambig_candidates.unwrap(),
+    vec![other_a, other_b],
+    "Phase E records both ambig candidates in topic-ID order",
+  );
+}
+
+/// A second `resolve_doc_tree` call against the same input produces a
+/// byte-identical tree (including `referenced_topic_candidates`) and a
+/// byte-identical trace map. Pin the determinism contract for Phase E
+/// alongside the existing Phase B / C / D contract.
+#[test]
+fn phase_e_is_byte_deterministic_across_repeat_runs() {
+  let (audit, _foo, _bar, _foo_amount, _foo_tmp, _bar_amount, _bar_tmp) =
+    co_loc_fixture();
+
+  let build_tree = || {
+    root(
+      1,
+      vec![paragraph(
+        2,
+        vec![
+          code_id(3, "amount", None),
+          code_id(4, "tmp", None),
+        ],
+      )],
+    )
+  };
+
+  let mut tree_a = build_tree();
+  let mut tree_b = build_tree();
+  let traces_a = resolve_doc_tree(&mut tree_a, &audit);
+  let traces_b = resolve_doc_tree(&mut tree_b, &audit);
+
+  assert_eq!(
+    serde_json::to_vec(&tree_a).unwrap(),
+    serde_json::to_vec(&tree_b).unwrap(),
+    "Phase E mutations are byte-deterministic",
+  );
+  assert_eq!(
+    serde_json::to_vec(&traces_a).unwrap(),
+    serde_json::to_vec(&traces_b).unwrap(),
+    "Phase E traces are byte-deterministic",
+  );
+}
+
+/// Section anchoring contract for the downstream consumer
+/// (`mechanical_semantic_links` reads `referenced_topic_candidates` and
+/// adds each candidate's containing contract to
+/// `section_to_contracts`). This test exercises that wiring end-to-end:
+/// a doc-tree reference falls through Phases B + C, Phase E populates
+/// candidates spanning two distinct contracts, and the downstream
+/// consumer sees both contracts in the section's anchor set.
+#[test]
+fn phase_e_anchors_section_to_each_candidates_containing_contract() {
+  use o11a_core::collaborator::agent::context::mechanical_semantic_links;
+
+  let vault = nt(10);
+  let vault_transfer = nt(11);
+  let token = nt(20);
+  let token_transfer = nt(21);
+
+  let mut audit = staged_audit();
+  for (t, name, kind, scope) in [
+    (
+      vault,
+      "Vault",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container { container: pp("test.sol") },
+    ),
+    (
+      token,
+      "Token",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      Scope::Container { container: pp("test.sol") },
+    ),
+    (
+      vault_transfer,
+      "transfer",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: vault,
+      },
+    ),
+    (
+      token_transfer,
+      "transfer",
+      NamedTopicKind::Function(FunctionKind::Function),
+      Scope::Component {
+        container: pp("test.sol"),
+        component: token,
+      },
+    ),
+  ] {
+    audit.topic_metadata.insert(t, named_topic(t, name, kind, scope));
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  // No edges → Phase B sees zero PR for both candidates → no winner →
+  // single ref → Phase C abstains → Phase E fires.
+  audit.resolution_graph = Some(graph_from(&[]));
+
+  // A real Section node so the downstream consumer can attribute the
+  // candidates back to a section topic.
+  let section_id = 200;
+  let tree = section(
+    section_id,
+    "Overview",
+    vec![paragraph(2, vec![code_id(3, "transfer", None)])],
+  );
+
+  // Run the resolver against the section's subtree.
+  let mut tree_owned = tree;
+  let _ = resolve_doc_tree(&mut tree_owned, &audit);
+
+  // Wire the resolved tree into the audit's `asts` keyed by a doc
+  // path so `mechanical_semantic_links` walks it.
+  let path = pp("test.md");
+  audit.asts.insert(
+    path.clone(),
+    domain::AST::Documentation(o11a_core::documentation::ast::DocumentationAST {
+      nodes: vec![tree_owned],
+      project_path: path.clone(),
+      source_content: String::new(),
+    }),
+  );
+
+  let result = mechanical_semantic_links(&audit);
+
+  let section_topic = dt(section_id);
+  // section_to_declarations stays empty — Phase E does not contribute
+  // members.
+  assert!(
+    !result.section_to_declarations.contains_key(&section_topic),
+    "Phase E must not add to section_to_declarations: {:?}",
+    result.section_to_declarations.get(&section_topic),
+  );
+
+  // section_to_contracts contains BOTH candidate contracts (Vault,
+  // Token) — the union of each candidate's containing contract.
+  let mut anchored = result
+    .section_to_contracts
+    .get(&section_topic)
+    .cloned()
+    .unwrap_or_default();
+  anchored.sort_by_key(|t| t.id().to_string());
+  let mut expected = vec![vault, token];
+  expected.sort_by_key(|t| t.id().to_string());
+  assert_eq!(
+    anchored, expected,
+    "Phase E unions both candidate contracts into the section's anchor set",
+  );
+}
+
+/// A Phase E reference whose candidates all live outside a contract
+/// (e.g., `Builtin` global declarations) contributes nothing to
+/// `section_to_contracts` — `containing_contract_topic` returns `None`
+/// for them. The trace still records the candidate set for operator
+/// inspection.
+#[test]
+fn phase_e_global_scope_candidates_contribute_no_contract_anchors() {
+  use o11a_core::collaborator::agent::context::mechanical_semantic_links;
+
+  let mut audit = staged_audit();
+  for id in &[100, 200] {
+    audit.topic_metadata.insert(
+      nt(*id),
+      named_topic(nt(*id), "globalThing", NamedTopicKind::Builtin, Scope::Global),
+    );
+  }
+  finalize(&mut audit);
+
+  let section_id = 300;
+  let mut tree_section = section(
+    section_id,
+    "Overview",
+    vec![paragraph(2, vec![code_id(3, "globalThing", None)])],
+  );
+  let _ = resolve_doc_tree(&mut tree_section, &audit);
+
+  let path = pp("test.md");
+  audit.asts.insert(
+    path.clone(),
+    domain::AST::Documentation(o11a_core::documentation::ast::DocumentationAST {
+      nodes: vec![tree_section],
+      project_path: path.clone(),
+      source_content: String::new(),
+    }),
+  );
+
+  let result = mechanical_semantic_links(&audit);
+  let section_topic = dt(section_id);
+  assert!(
+    !result.section_to_contracts.contains_key(&section_topic),
+    "global-scope candidates have no containing contract — section anchor stays empty",
+  );
+  assert!(
+    !result.section_to_declarations.contains_key(&section_topic),
+    "Phase E does not contribute declarations either",
+  );
+}
+
+/// Phase E preserves candidate ordering: candidates_by_simple_name
+/// returns the audit-built order (ascending by topic ID); Phase E
+/// writes that slice verbatim. Pin the contract — downstream tooling
+/// inspects the candidates and a flicker would make traces non-
+/// reproducible.
+#[test]
+fn phase_e_preserves_candidate_iteration_order() {
+  let mut audit = staged_audit();
+  // Insert in reverse topic-ID order to make sure the name index's
+  // internal sort (not insertion order) governs the result.
+  for id in &[500, 100, 300, 200] {
+    audit.topic_metadata.insert(
+      nt(*id),
+      named_topic(nt(*id), "thing", NamedTopicKind::Builtin, Scope::Global),
+    );
+  }
+  finalize(&mut audit);
+
+  let mut tree = root(
+    1,
+    vec![paragraph(2, vec![code_id(3, "thing", None)])],
+  );
+  let _ = resolve_doc_tree(&mut tree, &audit);
+
+  let DocumentationNode::Root { children, .. } = &tree else {
+    unreachable!()
+  };
+  let DocumentationNode::Paragraph { children: pchildren, .. } = &children[0]
+  else {
+    unreachable!()
+  };
+  let DocumentationNode::CodeIdentifier {
+    referenced_topic_candidates,
+    ..
+  } = &pchildren[0]
+  else {
+    unreachable!()
+  };
+
+  // Ascending by topic ID.
+  let expected = vec![nt(100), nt(200), nt(300), nt(500)];
+  assert_eq!(
+    *referenced_topic_candidates, expected,
+    "Phase E writes candidates in `candidates_by_simple_name`'s sorted order",
+  );
+}
+
+/// Phase E idempotency: running the pass twice on the same audit
+/// produces byte-identical state. Pins the contract that the resolver
+/// can re-run safely (e.g., after an audit reload that doesn't change
+/// the underlying graph). The fix that clears stale candidates on
+/// Phase B winners would otherwise allow drift on re-run.
+#[test]
+fn phase_e_is_idempotent_across_repeat_passes() {
+  let (audit, _foo, _bar, _foo_amount, _foo_tmp, _bar_amount, _bar_tmp) =
+    co_loc_fixture();
+
+  let mut tree = root(
+    1,
+    vec![paragraph(
+      2,
+      vec![
+        code_id(3, "amount", None),
+        code_id(4, "tmp", None),
+      ],
+    )],
+  );
+
+  // First run: Phase C pins both refs (singleton intersection won't
+  // hold, so they fall to Phase E with the multi-element intersection
+  // — actually this fixture has both candidates in {foo, bar}, so
+  // Phase C abstains and Phase E populates candidates).
+  let traces_first = resolve_doc_tree(&mut tree, &audit);
+  let tree_after_first = serde_json::to_vec(&tree).unwrap();
+  let traces_first_bytes = serde_json::to_vec(&traces_first).unwrap();
+
+  // Second run on the same tree: must produce identical state.
+  let traces_second = resolve_doc_tree(&mut tree, &audit);
+  let tree_after_second = serde_json::to_vec(&tree).unwrap();
+  let traces_second_bytes = serde_json::to_vec(&traces_second).unwrap();
+
+  assert_eq!(
+    tree_after_first, tree_after_second,
+    "tree state must be byte-identical after repeat pass",
+  );
+  assert_eq!(
+    traces_first_bytes, traces_second_bytes,
+    "trace state must be byte-identical after repeat pass",
+  );
+}
+
+/// Phase E candidates that are themselves Contract topics anchor to
+/// themselves. A common case in practice: ambiguous bare contract
+/// names (e.g., two `Vault` contracts in different files) fall to
+/// Phase E and each Vault becomes both a candidate AND a contract
+/// anchor.
+#[test]
+fn phase_e_contract_candidates_anchor_to_themselves() {
+  use o11a_core::collaborator::agent::context::mechanical_semantic_links;
+
+  let vault_a = nt(10);
+  let vault_b = nt(20);
+
+  let mut audit = staged_audit();
+  for (t, file) in [(vault_a, "A.sol"), (vault_b, "B.sol")] {
+    audit.topic_metadata.insert(
+      t,
+      named_topic(
+        t,
+        "Vault",
+        NamedTopicKind::Contract(ContractKind::Contract),
+        Scope::Container { container: pp(file) },
+      ),
+    );
+  }
+  audit.name_index = TopicNameIndex::build(&audit);
+  audit.resolution_graph = Some(graph_from(&[]));
+
+  let section_id = 200;
+  let mut tree = section(
+    section_id,
+    "Overview",
+    vec![paragraph(2, vec![code_id(3, "Vault", None)])],
+  );
+  let _ = resolve_doc_tree(&mut tree, &audit);
+
+  // Verify Phase E populated the candidates.
+  let DocumentationNode::Section { children, .. } = &tree else {
+    unreachable!()
+  };
+  let DocumentationNode::Paragraph { children: pchildren, .. } = &children[0]
+  else {
+    unreachable!()
+  };
+  let DocumentationNode::CodeIdentifier {
+    referenced_topic,
+    referenced_topic_candidates,
+    ..
+  } = &pchildren[0]
+  else {
+    unreachable!()
+  };
+  assert!(referenced_topic.is_none());
+  assert_eq!(*referenced_topic_candidates, vec![vault_a, vault_b]);
+
+  // Wire the tree into the audit and verify the downstream consumer
+  // anchors both contracts to themselves.
+  let path = pp("test.md");
+  audit.asts.insert(
+    path.clone(),
+    domain::AST::Documentation(o11a_core::documentation::ast::DocumentationAST {
+      nodes: vec![tree],
+      project_path: path.clone(),
+      source_content: String::new(),
+    }),
+  );
+  let result = mechanical_semantic_links(&audit);
+  let section_topic = dt(section_id);
+  let mut anchored = result
+    .section_to_contracts
+    .get(&section_topic)
+    .cloned()
+    .expect("contract candidates must anchor");
+  anchored.sort_by_key(|t| t.id().to_string());
+  let mut expected = vec![vault_a, vault_b];
+  expected.sort_by_key(|t| t.id().to_string());
+  assert_eq!(
+    anchored, expected,
+    "each candidate (a Contract) anchors itself",
+  );
 }
