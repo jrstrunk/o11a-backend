@@ -2749,31 +2749,6 @@ pub struct MechanicalLinkResult {
 pub fn mechanical_semantic_links(
   audit_data: &AuditData,
 ) -> MechanicalLinkResult {
-  mechanical_semantic_links_excluding(audit_data, &HashSet::new())
-}
-
-/// Same as `mechanical_semantic_links`, but treats every doc-tree
-/// `CodeIdentifier` whose `node_id` is in `exclude_doc_node_ids` as if
-/// its `referenced_topic` were `None`. Used by the comparison harness to
-/// recover the pre-graph "Phase A only" baseline by filtering out
-/// identifiers the graph-driven resolution passes (Phase B, and
-/// eventually Phases C / D / E) resolved.
-///
-/// IDs in `exclude_doc_node_ids` that don't appear in any
-/// documentation AST are silently ignored — the harness derives the
-/// set from `audit_data.resolution_traces`, which can outlive a doc
-/// node if downstream tooling rewrites the tree between trace
-/// recording and a re-walk. Treat unknown IDs as "nothing to undo",
-/// not "drop everything".
-///
-/// Invariant: the returned `MechanicalLinkResult` is a per-section
-/// subset of `mechanical_semantic_links(audit_data)` — exclusion can
-/// remove links but never add them. Pinned by
-/// `excluding_is_per_section_subset_of_unfiltered`.
-pub fn mechanical_semantic_links_excluding(
-  audit_data: &AuditData,
-  exclude_doc_node_ids: &HashSet<i32>,
-) -> MechanicalLinkResult {
   let mut section_to_contracts: std::collections::HashMap<
     topic::Topic,
     Vec<topic::Topic>,
@@ -2794,7 +2769,6 @@ pub fn mechanical_semantic_links_excluding(
         node,
         None, // no parent section yet
         audit_data,
-        exclude_doc_node_ids,
         &mut section_to_contracts,
         &mut section_to_declarations,
       );
@@ -2844,7 +2818,6 @@ fn collect_mechanical_links_recursive(
   node: &crate::documentation::ast::DocumentationNode,
   current_section: Option<&topic::Topic>,
   audit_data: &AuditData,
-  exclude_doc_node_ids: &HashSet<i32>,
   section_to_contracts: &mut std::collections::HashMap<
     topic::Topic,
     Vec<topic::Topic>,
@@ -2869,7 +2842,6 @@ fn collect_mechanical_links_recursive(
           child,
           Some(effective_section),
           audit_data,
-          exclude_doc_node_ids,
           section_to_contracts,
           section_to_declarations,
         );
@@ -2885,7 +2857,6 @@ fn collect_mechanical_links_recursive(
           child,
           current_section,
           audit_data,
-          exclude_doc_node_ids,
           section_to_contracts,
           section_to_declarations,
         );
@@ -2896,7 +2867,6 @@ fn collect_mechanical_links_recursive(
           sec,
           current_section,
           audit_data,
-          exclude_doc_node_ids,
           section_to_contracts,
           section_to_declarations,
         );
@@ -2905,9 +2875,8 @@ fn collect_mechanical_links_recursive(
 
     DocumentationNode::CodeIdentifier {
       referenced_topic: Some(ref_topic),
-      node_id,
       ..
-    } if !exclude_doc_node_ids.contains(node_id) => {
+    } => {
       if let Some(section_topic) = current_section {
         // Record section → declaration
         let decls = section_to_declarations.entry(*section_topic).or_default();
@@ -2935,11 +2904,8 @@ fn collect_mechanical_links_recursive(
     DocumentationNode::CodeIdentifier {
       referenced_topic: None,
       referenced_topic_candidates,
-      node_id,
       ..
-    } if !exclude_doc_node_ids.contains(node_id)
-      && !referenced_topic_candidates.is_empty() =>
-    {
+    } if !referenced_topic_candidates.is_empty() => {
       if let Some(section_topic) = current_section {
         // Only touch the entry once we know we have a contract to add
         // — otherwise sections whose only Phase E candidates live at
@@ -2972,15 +2938,13 @@ fn collect_mechanical_links_recursive(
           child,
           current_section,
           audit_data,
-          exclude_doc_node_ids,
           section_to_contracts,
           section_to_declarations,
         );
       }
     }
 
-    // Leaf nodes, excluded CodeIdentifiers (the `if !exclude…` guard
-    // above sends them here), and nodes without relevant children.
+    // Leaf nodes and nodes without relevant children.
     _ => {}
   }
 }
@@ -3668,476 +3632,6 @@ mod tests {
   }
 
   // ---------------------------------------------------------------------
-  // mechanical_semantic_links_excluding (Phase 8)
-  //
-  // Pin the contract: the excluded set drops doc-tree CodeIdentifiers
-  // from the mechanical link computation, recovering the pre-Phase-B
-  // baseline used by the comparison harness's `mechanical` variant.
-  // ---------------------------------------------------------------------
-
-  /// Build a minimal `AuditData` whose only documentation AST is one
-  /// section containing two `CodeIdentifier`s — both already resolved to
-  /// the same contract topic. Returns the audit, the section topic, the
-  /// contract topic, and the two identifier node IDs so a test can ask
-  /// the resolver to drop one of them.
-  fn audit_with_two_resolved_identifiers()
-  -> (AuditData, topic::Topic, topic::Topic, i32, i32) {
-    use crate::documentation::ast::{DocumentationAST, DocumentationNode};
-    let mut audit =
-      domain::new_audit_data("test".to_string(), HashSet::new(), None);
-
-    let contract_topic = topic::new_node_topic(&500);
-    audit.topic_metadata.insert(
-      contract_topic,
-      TopicMetadata::NamedTopic {
-        topic: contract_topic,
-        scope: Scope::Container {
-          container: domain::ProjectPath {
-            file_path: "Vault.sol".to_string(),
-          },
-        },
-        kind: NamedTopicKind::Contract(ContractKind::Contract),
-        name: "Vault".to_string(),
-        visibility: NamedTopicVisibility::Public,
-        is_mutable: false,
-        mutations: vec![],
-        ancestors: vec![],
-        descendants: vec![],
-        relatives: vec![],
-        transitive_topic: None,
-        doc_references: vec![],
-      },
-    );
-
-    let id_a = 901;
-    let id_b = 902;
-    let section_id = 700;
-    let section_topic = topic::new_documentation_topic(section_id);
-    let mk_ident = |node_id: i32| DocumentationNode::CodeIdentifier {
-      node_id,
-      value: "Vault".to_string(),
-      referenced_topic: Some(contract_topic),
-      kind: Some(NamedTopicKind::Contract(ContractKind::Contract)),
-      referenced_name: Some("Vault".to_string()),
-      referenced_topic_candidates: vec![],
-    };
-    let section = DocumentationNode::Section {
-      node_id: section_id,
-      title: "Overview".to_string(),
-      children: vec![DocumentationNode::Paragraph {
-        node_id: section_id + 1,
-        position: None,
-        children: vec![mk_ident(id_a), mk_ident(id_b)],
-      }],
-    };
-    let doc_path = domain::ProjectPath {
-      file_path: "README.md".to_string(),
-    };
-    audit.asts.insert(
-      doc_path.clone(),
-      domain::AST::Documentation(DocumentationAST {
-        nodes: vec![section],
-        project_path: doc_path,
-        source_content: String::new(),
-      }),
-    );
-
-    (audit, section_topic, contract_topic, id_a, id_b)
-  }
-
-  #[test]
-  fn excluding_empty_set_matches_unfiltered_call() {
-    // Sanity: an empty exclude set must produce the same result as
-    // `mechanical_semantic_links` — the no-arg public entry point is a
-    // thin wrapper around the filtered one and downstream callers
-    // depend on equivalence.
-    let (audit, _, _, _, _) = audit_with_two_resolved_identifiers();
-    let unfiltered = mechanical_semantic_links(&audit);
-    let empty_excluded =
-      mechanical_semantic_links_excluding(&audit, &HashSet::new());
-    assert_eq!(
-      unfiltered.section_to_contracts,
-      empty_excluded.section_to_contracts
-    );
-    assert_eq!(
-      unfiltered.section_to_declarations,
-      empty_excluded.section_to_declarations
-    );
-  }
-
-  #[test]
-  fn excluding_a_doc_node_drops_only_its_resolution() {
-    // Two CodeIdentifiers in the section both point to the same
-    // contract via the same declaration topic. Excluding one leaves the
-    // section→declaration entry intact (the other identifier still
-    // names it), and the section→contract anchor likewise survives.
-    // Excluding both clears the section's mechanical links entirely.
-    let (audit, section_topic, contract_topic, id_a, id_b) =
-      audit_with_two_resolved_identifiers();
-
-    let mut exclude_one = HashSet::new();
-    exclude_one.insert(id_a);
-    let r1 = mechanical_semantic_links_excluding(&audit, &exclude_one);
-    assert_eq!(
-      r1.section_to_contracts.get(&section_topic),
-      Some(&vec![contract_topic]),
-    );
-    assert_eq!(
-      r1.section_to_declarations.get(&section_topic),
-      Some(&vec![contract_topic]),
-    );
-
-    let mut exclude_both = HashSet::new();
-    exclude_both.insert(id_a);
-    exclude_both.insert(id_b);
-    let r2 = mechanical_semantic_links_excluding(&audit, &exclude_both);
-    assert!(!r2.section_to_contracts.contains_key(&section_topic));
-    assert!(!r2.section_to_declarations.contains_key(&section_topic));
-  }
-
-  #[test]
-  fn excluding_unrelated_doc_node_id_changes_nothing() {
-    // Excluding a doc-node ID that the AST doesn't contain must be a
-    // no-op — the harness builds its exclude set from
-    // `audit_data.resolution_traces`, which can outlive the AST node
-    // (e.g. if downstream tooling rewrites doc nodes between the trace
-    // and a re-walk). Treat unknown IDs as "no Phase B effect to
-    // undo", not "clear everything".
-    let (audit, section_topic, contract_topic, _, _) =
-      audit_with_two_resolved_identifiers();
-    let mut exclude = HashSet::new();
-    exclude.insert(424242); // not in the AST
-    let r = mechanical_semantic_links_excluding(&audit, &exclude);
-    assert_eq!(
-      r.section_to_contracts.get(&section_topic),
-      Some(&vec![contract_topic]),
-    );
-  }
-
-  #[test]
-  fn excluding_is_deterministic_across_repeat_calls() {
-    // Determinism contract — same audit + same exclude set must return
-    // structurally equal results across repeated calls. The internal
-    // `HashMap`s order non-deterministically across runs, so compare
-    // the per-section sorted contents rather than raw map equality.
-    let (audit, section_topic, _, id_a, _) =
-      audit_with_two_resolved_identifiers();
-    let mut exclude = HashSet::new();
-    exclude.insert(id_a);
-    let r1 = mechanical_semantic_links_excluding(&audit, &exclude);
-    let r2 = mechanical_semantic_links_excluding(&audit, &exclude);
-    assert_eq!(
-      r1.section_to_contracts.get(&section_topic),
-      r2.section_to_contracts.get(&section_topic),
-    );
-    assert_eq!(
-      r1.section_to_declarations.get(&section_topic),
-      r2.section_to_declarations.get(&section_topic),
-    );
-  }
-
-  /// Build an `AuditData` whose documentation AST holds two top-level
-  /// sections, each containing one resolved `CodeIdentifier`. The two
-  /// identifiers point to different contracts. Returns the audit, the
-  /// (section_topic, contract_topic, identifier_node_id) triple per
-  /// section so a test can exercise per-section exclusion without the
-  /// two sections' resolutions interfering.
-  fn audit_with_two_sections_two_distinct_contracts() -> (
-    AuditData,
-    (topic::Topic, topic::Topic, i32),
-    (topic::Topic, topic::Topic, i32),
-  ) {
-    use crate::documentation::ast::{DocumentationAST, DocumentationNode};
-    let mut audit =
-      domain::new_audit_data("test".to_string(), HashSet::new(), None);
-
-    let mut named_contract = |t: topic::Topic, name: &str| {
-      audit.topic_metadata.insert(
-        t,
-        TopicMetadata::NamedTopic {
-          topic: t,
-          scope: Scope::Container {
-            container: domain::ProjectPath {
-              file_path: format!("{}.sol", name),
-            },
-          },
-          kind: NamedTopicKind::Contract(ContractKind::Contract),
-          name: name.to_string(),
-          visibility: NamedTopicVisibility::Public,
-          is_mutable: false,
-          mutations: vec![],
-          ancestors: vec![],
-          descendants: vec![],
-          relatives: vec![],
-          transitive_topic: None,
-          doc_references: vec![],
-        },
-      );
-    };
-    let contract_a = topic::new_node_topic(&500);
-    let contract_b = topic::new_node_topic(&600);
-    named_contract(contract_a, "Vault");
-    named_contract(contract_b, "Token");
-
-    let mk_ident = |node_id: i32, value: &str, target: topic::Topic| {
-      DocumentationNode::CodeIdentifier {
-        node_id,
-        value: value.to_string(),
-        referenced_topic: Some(target),
-        kind: Some(NamedTopicKind::Contract(ContractKind::Contract)),
-        referenced_name: Some(value.to_string()),
-        referenced_topic_candidates: vec![],
-      }
-    };
-    let mk_section =
-      |section_id: i32, ident: DocumentationNode| DocumentationNode::Section {
-        node_id: section_id,
-        title: format!("Section {}", section_id),
-        children: vec![DocumentationNode::Paragraph {
-          node_id: section_id + 1,
-          position: None,
-          children: vec![ident],
-        }],
-      };
-
-    let id_a = 901;
-    let id_b = 902;
-    let section_a_id = 700;
-    let section_b_id = 800;
-    let section_a =
-      mk_section(section_a_id, mk_ident(id_a, "Vault", contract_a));
-    let section_b =
-      mk_section(section_b_id, mk_ident(id_b, "Token", contract_b));
-
-    let doc_path = domain::ProjectPath {
-      file_path: "README.md".to_string(),
-    };
-    audit.asts.insert(
-      doc_path.clone(),
-      domain::AST::Documentation(DocumentationAST {
-        nodes: vec![section_a, section_b],
-        project_path: doc_path,
-        source_content: String::new(),
-      }),
-    );
-
-    let section_a_topic = topic::new_documentation_topic(section_a_id);
-    let section_b_topic = topic::new_documentation_topic(section_b_id);
-    (
-      audit,
-      (section_a_topic, contract_a, id_a),
-      (section_b_topic, contract_b, id_b),
-    )
-  }
-
-  /// Excluding identifier in section A must leave section B untouched.
-  /// A regression here (e.g. shared mutable state in the recursive
-  /// walk) would silently leak between siblings — a class of bug
-  /// Rust's borrow checker can't catch when the walker takes the
-  /// state through `&mut HashMap`.
-  #[test]
-  fn excluding_in_one_section_does_not_affect_other_sections() {
-    let (audit, (sec_a, contract_a, id_a), (sec_b, contract_b, _)) =
-      audit_with_two_sections_two_distinct_contracts();
-    let mut exclude = HashSet::new();
-    exclude.insert(id_a);
-
-    let r = mechanical_semantic_links_excluding(&audit, &exclude);
-
-    // Section A: identifier excluded — no contract should anchor.
-    assert!(!r.section_to_contracts.contains_key(&sec_a));
-    assert!(!r.section_to_declarations.contains_key(&sec_a));
-    // Section B: untouched — its identifier stays.
-    assert_eq!(r.section_to_contracts.get(&sec_b), Some(&vec![contract_b]),);
-    assert_eq!(
-      r.section_to_declarations.get(&sec_b),
-      Some(&vec![contract_b]),
-    );
-    // Sanity: the unfiltered baseline still anchors both sections.
-    let baseline = mechanical_semantic_links(&audit);
-    assert_eq!(
-      baseline.section_to_contracts.get(&sec_a),
-      Some(&vec![contract_a]),
-    );
-    assert_eq!(
-      baseline.section_to_contracts.get(&sec_b),
-      Some(&vec![contract_b]),
-    );
-  }
-
-  /// The recall-delta scenario: a Phase-B-resolved identifier whose
-  /// target topic is reached by no other identifier in the section.
-  /// Excluding it must drop the contract from `section_to_contracts`
-  /// entirely, not merely from `section_to_declarations`. This is the
-  /// case the comparison harness's `mechanical-graph - mechanical`
-  /// diff is supposed to surface.
-  #[test]
-  fn excluding_a_uniquely_introduced_contract_drops_it_from_section_anchors() {
-    use crate::documentation::ast::{DocumentationAST, DocumentationNode};
-    let mut audit =
-      domain::new_audit_data("test".to_string(), HashSet::new(), None);
-
-    // Two contracts; section will reference each via a distinct
-    // identifier so we can exclude one and observe the other.
-    let mut named_contract = |t: topic::Topic, name: &str| {
-      audit.topic_metadata.insert(
-        t,
-        TopicMetadata::NamedTopic {
-          topic: t,
-          scope: Scope::Container {
-            container: domain::ProjectPath {
-              file_path: format!("{}.sol", name),
-            },
-          },
-          kind: NamedTopicKind::Contract(ContractKind::Contract),
-          name: name.to_string(),
-          visibility: NamedTopicVisibility::Public,
-          is_mutable: false,
-          mutations: vec![],
-          ancestors: vec![],
-          descendants: vec![],
-          relatives: vec![],
-          transitive_topic: None,
-          doc_references: vec![],
-        },
-      );
-    };
-    let phase_a_contract = topic::new_node_topic(&500);
-    let phase_b_contract = topic::new_node_topic(&600);
-    named_contract(phase_a_contract, "Vault");
-    named_contract(phase_b_contract, "Token");
-
-    let id_phase_a = 901;
-    let id_phase_b = 902;
-    let section_id = 700;
-    let section_topic = topic::new_documentation_topic(section_id);
-
-    let mk_ident =
-      |node_id: i32, target: topic::Topic| DocumentationNode::CodeIdentifier {
-        node_id,
-        value: format!("ident_{}", node_id),
-        referenced_topic: Some(target),
-        kind: Some(NamedTopicKind::Contract(ContractKind::Contract)),
-        referenced_name: Some(format!("ident_{}", node_id)),
-        referenced_topic_candidates: vec![],
-      };
-    let section = DocumentationNode::Section {
-      node_id: section_id,
-      title: "Mixed".to_string(),
-      children: vec![DocumentationNode::Paragraph {
-        node_id: section_id + 1,
-        position: None,
-        children: vec![
-          mk_ident(id_phase_a, phase_a_contract),
-          mk_ident(id_phase_b, phase_b_contract),
-        ],
-      }],
-    };
-    let doc_path = domain::ProjectPath {
-      file_path: "README.md".to_string(),
-    };
-    audit.asts.insert(
-      doc_path.clone(),
-      domain::AST::Documentation(DocumentationAST {
-        nodes: vec![section],
-        project_path: doc_path,
-        source_content: String::new(),
-      }),
-    );
-
-    // Production baseline: both contracts anchor.
-    let baseline = mechanical_semantic_links(&audit);
-    let mut baseline_contracts = baseline
-      .section_to_contracts
-      .get(&section_topic)
-      .unwrap()
-      .clone();
-    baseline_contracts.sort_by_key(|t| t.id().to_string());
-    let mut expected = vec![phase_a_contract, phase_b_contract];
-    expected.sort_by_key(|t| t.id().to_string());
-    assert_eq!(baseline_contracts, expected);
-
-    // Excluding the Phase B identifier — the only path to
-    // `phase_b_contract` — must drop it from anchors.
-    let mut exclude = HashSet::new();
-    exclude.insert(id_phase_b);
-    let filtered = mechanical_semantic_links_excluding(&audit, &exclude);
-    assert_eq!(
-      filtered.section_to_contracts.get(&section_topic),
-      Some(&vec![phase_a_contract]),
-      "phase_b_contract must be gone; phase_a_contract must remain",
-    );
-    assert_eq!(
-      filtered.section_to_declarations.get(&section_topic),
-      Some(&vec![phase_a_contract]),
-      "the only declaration left is the Phase A one",
-    );
-  }
-
-  /// Exclusion is a per-section subset operation: for any audit and any
-  /// exclude set, every section→contract and section→declaration entry
-  /// the filtered call returns must also appear (with no items added)
-  /// in the unfiltered baseline. This is the load-bearing invariant
-  /// the comparison harness relies on — it is what lets `mechanical`
-  /// be interpreted as "what `mechanical-graph` would have produced
-  /// without Phase B's lifts." A regression here (e.g. a future
-  /// refactor that mutates state during the walk) would silently
-  /// invert the recall comparison.
-  #[test]
-  fn excluding_is_per_section_subset_of_unfiltered() {
-    let (audit, section_topic, _, id_a, id_b) =
-      audit_with_two_resolved_identifiers();
-    let baseline = mechanical_semantic_links(&audit);
-
-    // Try every subset of {id_a, id_b} as the exclude set.
-    for exclude in [
-      HashSet::<i32>::new(),
-      HashSet::from([id_a]),
-      HashSet::from([id_b]),
-      HashSet::from([id_a, id_b]),
-      // An ID not present in the AST — proves the invariant survives
-      // unknown IDs as well.
-      HashSet::from([id_a, 9_999_999]),
-    ] {
-      let filtered = mechanical_semantic_links_excluding(&audit, &exclude);
-      let baseline_contracts: std::collections::HashSet<_> = baseline
-        .section_to_contracts
-        .get(&section_topic)
-        .map(|v| v.iter().copied().collect())
-        .unwrap_or_default();
-      let filtered_contracts: std::collections::HashSet<_> = filtered
-        .section_to_contracts
-        .get(&section_topic)
-        .map(|v| v.iter().copied().collect())
-        .unwrap_or_default();
-      assert!(
-        filtered_contracts.is_subset(&baseline_contracts),
-        "excluding {:?} produced contracts {:?} not in baseline {:?}",
-        exclude,
-        filtered_contracts,
-        baseline_contracts
-      );
-      let baseline_decls: std::collections::HashSet<_> = baseline
-        .section_to_declarations
-        .get(&section_topic)
-        .map(|v| v.iter().copied().collect())
-        .unwrap_or_default();
-      let filtered_decls: std::collections::HashSet<_> = filtered
-        .section_to_declarations
-        .get(&section_topic)
-        .map(|v| v.iter().copied().collect())
-        .unwrap_or_default();
-      assert!(
-        filtered_decls.is_subset(&baseline_decls),
-        "excluding {:?} produced declarations {:?} not in baseline {:?}",
-        exclude,
-        filtered_decls,
-        baseline_decls
-      );
-    }
-  }
-
-  // ---------------------------------------------------------------------
   // Phase E (anchor-by-name) downstream consumer contract
   //
   // The doc-tree resolution pass (in `o11a-analyze`) writes the full
@@ -4291,38 +3785,6 @@ mod tests {
       !result.section_to_declarations.contains_key(&section_topic),
       "Phase E must not contribute to section_to_declarations: {:?}",
       result.section_to_declarations.get(&section_topic),
-    );
-  }
-
-  /// Excluding the Phase E node by `node_id` removes its candidates'
-  /// contracts from the section's anchor set. Verifies the exclude
-  /// gate honors Phase E references — the comparison harness depends
-  /// on this behavior to compute recall deltas.
-  #[test]
-  fn excluding_a_phase_e_ref_drops_its_candidate_contracts() {
-    let (audit, section_topic, _, _) =
-      audit_with_phase_e_candidates_in_two_contracts();
-
-    // No exclude: both contracts anchor.
-    let baseline = mechanical_semantic_links(&audit);
-    assert!(
-      baseline.section_to_contracts.contains_key(&section_topic),
-      "baseline must anchor"
-    );
-
-    // Exclude the only Phase E node: section drops out entirely.
-    let mut exclude = HashSet::new();
-    exclude.insert(901);
-    let filtered = mechanical_semantic_links_excluding(&audit, &exclude);
-    assert!(
-      !filtered.section_to_contracts.contains_key(&section_topic),
-      "excluding the Phase E node removes the contract anchors",
-    );
-    assert!(
-      !filtered
-        .section_to_declarations
-        .contains_key(&section_topic),
-      "Phase E never adds declarations",
     );
   }
 

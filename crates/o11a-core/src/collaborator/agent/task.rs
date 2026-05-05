@@ -24,7 +24,7 @@
 //! 1. **Normalize** (`normalize_documentation`): Strip emojis, HTML, etc.
 //! 2. **Extract requirements** (`extract_requirements_from_documentation`):
 //!    Per-document extraction grouped by section, then consolidation.
-//! 3. **Semantic linking** (`semantic_link_pass1`, `semantic_link_pass2`):
+//! 3. **Semantic linking** (`semantic_link_pass3` only — Pass 1 + Pass 2 are mechanical / BM25):
 //!    Connect doc sections to code declarations via mechanical resolution
 //!    + two LLM passes, producing functional semantics with provenance.
 //! 4. **Extract behaviors** (`extract_behaviors_from_contract`): Per-contract
@@ -399,74 +399,6 @@ pub async fn extract_requirements_from_documentation(
 // Semantic Linking LLM Tasks
 // ============================================================================
 
-/// LLM pass 1: Given a documentation section and a list of contract signatures,
-/// identify which contracts are relevant to this section.
-const SEMANTIC_LINK_PASS1_PROMPT: &str = "Below is a documentation section from a smart contract \
-project and a list of contracts with their member signatures.\n\n\
-Some contracts have been pre-identified as relevant through inline code \
-references in the documentation (marked as \"confirmed\"). These are already \
-matched — do not repeat them in your response.\n\n\
-Your task is to identify any **additional** contracts that this documentation \
-section is relevant to beyond the confirmed ones.\n\n\
-A contract is relevant if the documentation section describes behavior, \
-requirements, or properties that apply to that contract's functionality.\n\n\
-Return a JSON object with a `contract_topics` key whose value is an array of \
-N-prefixed contract topic ID strings for ONLY the newly identified contracts. \
-If there are no additional contracts beyond the confirmed ones, return \
-`{\"contract_topics\": []}`.\n\n";
-
-static SEMANTIC_PASS1_SCHEMA: LazyLock<JsonSchema> =
-  LazyLock::new(|| JsonSchema {
-    name: "semantic_link_pass1",
-    schema: json!({
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["contract_topics"],
-      "properties": {
-        "contract_topics": {
-          "type": "array",
-          "items": { "type": "string" }
-        }
-      }
-    }),
-    empty_response: r#"{"contract_topics":[]}"#,
-  });
-
-#[derive(Deserialize)]
-struct LLMPass1Response {
-  contract_topics: Vec<String>,
-}
-
-/// LLM pass 2: Given a documentation section and a contract's member signatures,
-/// identify which members this section is relevant to.
-const SEMANTIC_LINK_PASS2_PROMPT: &str = "Below is a documentation section from a smart contract \
-project and a contract's member signatures (functions, modifiers, state \
-variables, events, etc.).\n\n\
-The documentation section contains D-prefixed topic IDs (like \"D42\") on \
-each paragraph, list, code block, and subsection.\n\n\
-Some members have been pre-identified as relevant through inline code \
-references in the documentation (marked as \"confirmed\"). These are already \
-matched — do not repeat them in your response.\n\n\
-Your task is to identify any **additional** members that this documentation \
-section is relevant to beyond the confirmed ones, and for each member, \
-specify which specific D-prefixed child elements of the documentation \
-describe it.\n\n\
-A member is relevant if the documentation section describes behavior, \
-requirements, or properties that apply to that member's functionality.\n\n\
-Return a JSON object with a `members` key whose value is an array of objects, \
-each with:\n\
-- `member_topic`: the N-prefixed member topic ID\n\
-- `doc_topics`: array of D-prefixed topic IDs for the specific paragraphs, \
-lists, or subsections within the documentation that describe this member\n\n\
-Example: `{\"members\": [{\"member_topic\": \"N-1234\", \"doc_topics\": [\"D42\", \"D43\"]}]}`\n\n\
-Rules:\n\
-- Only include members not already in the confirmed list.\n\
-- The `doc_topics` must be D-prefixed IDs that actually appear in the \
-provided documentation section. Do not invent IDs.\n\
-- If a member relates to the entire section rather than specific child \
-elements, use the section's own D-prefixed ID.\n\
-- If there are no additional members, return `{\"members\": []}`.\n\n";
-
 /// LLM pass 3: Given a documentation section, a list of declarations needing
 /// semantics, and the member's source code for disambiguation.
 const SEMANTIC_LINK_PASS3_PROMPT: &str = "Below is a documentation section from a smart contract \
@@ -515,63 +447,6 @@ the provided documentation section.\n\
 return `{\"links\": []}`.\n\
 - Every link object MUST include all three fields.\n\n";
 
-/// Result of LLM pass 1: relevant contract topics for a section.
-pub struct SemanticLinkPass1Result {
-  pub section_topic: topic::Topic,
-  pub contract_topics: Vec<topic::Topic>,
-}
-
-/// A member matched by pass 2 with the specific doc child sections it relates to.
-pub struct MemberDocMapping {
-  pub member_topic: topic::Topic,
-  pub doc_topics: Vec<topic::Topic>,
-}
-
-/// Result of LLM pass 2: members mapped to specific child doc sections.
-pub struct SemanticLinkPass2Result {
-  pub section_topic: topic::Topic,
-  pub member_mappings: Vec<MemberDocMapping>,
-}
-
-#[derive(Deserialize)]
-struct LLMPass2MemberMapping {
-  member_topic: String,
-  doc_topics: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct LLMPass2Response {
-  members: Vec<LLMPass2MemberMapping>,
-}
-
-static SEMANTIC_PASS2_SCHEMA: LazyLock<JsonSchema> =
-  LazyLock::new(|| JsonSchema {
-    name: "semantic_link_pass2",
-    schema: json!({
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["members"],
-      "properties": {
-        "members": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["member_topic", "doc_topics"],
-            "properties": {
-              "member_topic": { "type": "string" },
-              "doc_topics": {
-                "type": "array",
-                "items": { "type": "string" }
-              }
-            }
-          }
-        }
-      }
-    }),
-    empty_response: r#"{"members":[]}"#,
-  });
-
 /// A single semantic link from LLM pass 3.
 #[derive(Deserialize)]
 struct LLMSemanticLink {
@@ -618,129 +493,6 @@ static SEMANTIC_PASS3_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| {
 /// Result of LLM pass 3: semantic links for a (section, member) pair.
 pub struct SemanticLinkPass3Result {
   pub links: Vec<domain::SemanticLink>,
-}
-
-/// LLM pass 1: For each section, identify relevant contracts.
-/// Takes pre-rendered section text, contract list JSON, and confirmed associations.
-pub async fn semantic_link_pass1(
-  section_topic: &topic::Topic,
-  section_text: &str,
-  contracts_json: &str,
-  confirmed_contracts: &[topic::Topic],
-) -> Result<SemanticLinkPass1Result, TaskError> {
-  let confirmed_str = if confirmed_contracts.is_empty() {
-    String::new()
-  } else {
-    let ids: Vec<String> = confirmed_contracts.iter().map(|t| t.id()).collect();
-    format!("\nConfirmed relevant contracts: {}\n", ids.join(", "))
-  };
-
-  let prompt = format!(
-    "{}{}Section:\n{}\n\nContracts:\n{}",
-    SEMANTIC_LINK_PASS1_PROMPT, confirmed_str, section_text, contracts_json
-  );
-
-  let label = format!("semantic_pass1_{}", section_topic.id());
-  let response = router::chat_completion(
-    TaskSize::Small,
-    router::SYSTEM_MESSAGE_DOCUMENTATION,
-    &prompt,
-    Some(&label),
-    Some(&SEMANTIC_PASS1_SCHEMA),
-  )
-  .await?;
-
-  let wrapper: LLMPass1Response =
-    router::parse_response(&response, "semantic link pass1", &prompt)?;
-
-  Ok(SemanticLinkPass1Result {
-    section_topic: *section_topic,
-    contract_topics: wrapper
-      .contract_topics
-      .into_iter()
-      .filter_map(|id| match topic::parse_topic(&id) {
-        Ok(t) => Some(t),
-        Err(e) => {
-          tracing::warn!(
-            "semantic_link_pass1 dropping malformed contract_topic '{}': {}",
-            id,
-            e
-          );
-          None
-        }
-      })
-      .collect(),
-  })
-}
-
-/// LLM pass 2: For a (section, contract) pair, identify relevant members.
-pub async fn semantic_link_pass2(
-  section_topic: &topic::Topic,
-  section_text: &str,
-  contract_json: &str,
-  confirmed_members: &[topic::Topic],
-) -> Result<SemanticLinkPass2Result, TaskError> {
-  let confirmed_str = if confirmed_members.is_empty() {
-    String::new()
-  } else {
-    let ids: Vec<String> = confirmed_members.iter().map(|t| t.id()).collect();
-    format!("\nConfirmed relevant members: {}\n", ids.join(", "))
-  };
-
-  let prompt = format!(
-    "{}{}Section:\n{}\n\nContract members:\n{}",
-    SEMANTIC_LINK_PASS2_PROMPT, confirmed_str, section_text, contract_json
-  );
-
-  let label = format!("semantic_pass2_{}", section_topic.id());
-  let response = router::chat_completion(
-    TaskSize::Medium,
-    router::SYSTEM_MESSAGE_DOCUMENTATION,
-    &prompt,
-    Some(&label),
-    Some(&SEMANTIC_PASS2_SCHEMA),
-  )
-  .await?;
-
-  let wrapper: LLMPass2Response =
-    router::parse_response(&response, "semantic link pass2", &prompt)?;
-
-  Ok(SemanticLinkPass2Result {
-    section_topic: *section_topic,
-    member_mappings: wrapper
-      .members
-      .into_iter()
-      .filter_map(|m| {
-        let member_topic =
-          topic::parse_topic(&m.member_topic).ok().or_else(|| {
-            tracing::warn!(
-              "semantic_link_pass2 dropping mapping with malformed member_topic '{}'",
-              m.member_topic
-            );
-            None
-          })?;
-        let doc_topics = m
-          .doc_topics
-          .into_iter()
-          .filter_map(|d| match topic::parse_topic(&d) {
-            Ok(t) => Some(t),
-            Err(e) => {
-              tracing::warn!(
-                "semantic_link_pass2 dropping malformed doc_topic '{}': {}",
-                d,
-                e
-              );
-              None
-            }
-          })
-          .collect();
-        Some(MemberDocMapping {
-          member_topic,
-          doc_topics,
-        })
-      })
-      .collect(),
-  })
 }
 
 /// LLM pass 3: Assign semantic meanings to declarations based on documentation.

@@ -61,14 +61,6 @@ pub async fn run(args: &[String]) -> ExitCode {
        artifact into <project_root>/{}/ (creating the directory if\n\
        necessary).\n\n\
        Flags:\n\
-         --semantic-linking-mode <auto|llm|bm25|mechanical>\n\
-             Override per-document workflow routing. Default: auto.\n\
-         --semantic-linking-pass2-algo <gap|top-k-floor>\n\
-             BM25 cutoff algorithm. Default: gap.\n\
-         --semantic-linking-compare-all\n\
-             Run all workflow variants per section and write per-variant\n\
-             logs to <project_root>/{}/semantic-linking-compare/. The main\n\
-             artifact reflects only the configured workflow.\n\
          --semantic-linking-mechanical-trace\n\
              Run only mechanical Pass 1 + Pass 2 (no LLM, no Pass 3),\n\
              write a pretty-printed JSON trace of every section's\n\
@@ -76,7 +68,7 @@ pub async fn run(args: &[String]) -> ExitCode {
              contract / member candidates to\n\
              <project_root>/{}/mechanical-trace.json, then exit. Used to\n\
              validate the deterministic name resolver.",
-      OUTPUT_DIR_NAME, OUTPUT_DIR_NAME, OUTPUT_DIR_NAME
+      OUTPUT_DIR_NAME, OUTPUT_DIR_NAME
     );
     return ExitCode::from(2);
   }
@@ -93,10 +85,7 @@ pub async fn run(args: &[String]) -> ExitCode {
   let audit_id = positional[1].clone();
 
   tracing::info!(
-    "Semantic linking config: mode={} pass2_algo={} compare_all={} mechanical_trace={}",
-    semantic_linking_cfg.mode.as_str(),
-    semantic_linking_cfg.pass2_algo.as_str(),
-    semantic_linking_cfg.compare_all,
+    "Semantic linking config: mechanical_trace={}",
     semantic_linking_cfg.mechanical_trace,
   );
 

@@ -37,20 +37,19 @@ pub enum PipelineError {
 /// `AppState` without depending on the HTTP layer.
 pub struct PipelineState {
   pub data_context: Arc<Mutex<DataContext>>,
-  /// Configuration for the semantic-linking step. Defaults to `Auto` mode +
-  /// `Gap` algorithm + `compare_all = false`. The CLI populates this from
-  /// `--semantic-linking-*` flags.
+  /// Configuration for the semantic-linking step. The CLI populates this
+  /// from `--semantic-linking-*` flags; only `mechanical_trace` is wired
+  /// today.
   pub semantic_linking: SemanticLinkingConfig,
-  /// Output directory for side effects that don't go into the main artifact
-  /// (currently: per-variant logs from `--semantic-linking-compare-all`).
-  /// `None` disables those side outputs even if `compare_all` is true.
+  /// Output directory for side effects that don't go into the main
+  /// artifact (currently only `--semantic-linking-mechanical-trace`).
   pub output_dir: Option<PathBuf>,
 }
 
 impl PipelineState {
   /// Construct a `PipelineState` with default semantic-linking config and no
   /// side-output directory. Used by callers (HTTP handlers, tests) that
-  /// don't care about the comparison harness.
+  /// don't need the trace mode.
   pub fn new(data_context: Arc<Mutex<DataContext>>) -> Self {
     PipelineState {
       data_context,
@@ -81,16 +80,6 @@ pub async fn run_full_pipeline(
 
   tracing::info!("[1/4] Semantic Linking");
   build_semantic_links(state, audit_id).await?;
-
-  // The `--semantic-linking-compare-all` flag is for evaluating the semantic
-  // linking step in isolation; downstream steps would just waste LLM calls.
-  if state.semantic_linking.compare_all {
-    tracing::info!(
-      "compare-all set; stopping pipeline after semantic linking for audit {}",
-      audit_id
-    );
-    return Ok(());
-  }
 
   tracing::info!("[2/4] Requirement Extraction");
   build_requirements(state, audit_id).await?;
@@ -459,15 +448,17 @@ pub async fn build_behaviors(
 }
 
 /// Build semantic links between documentation sections and code declarations.
-/// Three passes: section→contracts, section×contract→members, section×member→semantics.
+/// Three passes:
 ///
-/// Each section is routed to one of three workflows based on its document's
-/// `is_technical` flag and the configured [`SemanticLinkingMode`]:
-/// - **Mechanical**: mechanical pre-step only, no LLM/BM25 expansion.
-/// - **LLM**: mechanical seed + LLM Pass 1 + LLM Pass 2 expansion.
-/// - **BM25**: mechanical seed + BM25 Pass 2 expansion within anchored contracts.
+/// 1. **Pass 1** — section → contracts: mechanical anchors plus BM25
+///    contract discovery (top-K above `MIN_SCORE`).
+/// 2. **Pass 2** — section × contract → members: mechanical seed plus BM25
+///    member expansion (top-K above `MIN_SCORE` per contract, with the
+///    short-document length floor described in `bm25/score.rs`).
+/// 3. **Pass 3** — section × member → semantics: LLM batched per
+///    (section, doc_topic) plus one contract-scoped batch per section.
 ///
-/// Pass 3 always uses the LLM regardless of routing. See
+/// One workflow for every section, regardless of `is_technical`. See
 /// `docs/specs/semantic-linking.md`.
 #[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
 pub async fn build_semantic_links(
@@ -475,19 +466,15 @@ pub async fn build_semantic_links(
   audit_id: &str,
 ) -> Result<(), PipelineError> {
   use crate::collaborator::agent::context;
-  use crate::collaborator::agent::semantic_linking::{
-    self, SectionWorkflow, bm25,
-  };
+  use crate::collaborator::agent::semantic_linking::bm25;
   use std::collections::{BTreeMap, HashMap};
   use std::time::Instant;
 
   let total_start = Instant::now();
   tracing::info!("Building semantic links for audit {}", audit_id);
 
-  let cfg = state.semantic_linking;
-
-  // Mechanical resolution (shared by all workflows)
-  let (mechanical, sections, contracts, section_workflows) = {
+  // Mechanical resolution (the seed for every section)
+  let (mechanical, sections, contracts) = {
     let ctx = state
       .data_context
       .lock()
@@ -504,39 +491,15 @@ pub async fn build_semantic_links(
     let contracts =
       context::render_contract_list_for_semantic_linking(audit_data);
 
-    let is_tech_idx = semantic_linking::IsTechnicalIndex::build(audit_data);
-    let section_workflows: HashMap<topic::Topic, SectionWorkflow> = sections
-      .iter()
-      .map(|s| {
-        let is_tech = is_tech_idx.lookup(s, audit_data);
-        (
-          *s,
-          semantic_linking::workflow_for_section(cfg.mode, is_tech),
-        )
-      })
-      .collect();
-
-    (mechanical, sections, contracts, section_workflows)
+    (mechanical, sections, contracts)
   };
 
-  let mut wf_counts = (0usize, 0usize, 0usize); // (mechanical, llm, bm25)
-  for w in section_workflows.values() {
-    match w {
-      SectionWorkflow::Mechanical => wf_counts.0 += 1,
-      SectionWorkflow::Llm => wf_counts.1 += 1,
-      SectionWorkflow::Bm25 => wf_counts.2 += 1,
-    }
-  }
   tracing::info!(
-    "Mechanical: {} sections, {} contracts, {} section-contract links, {} section-declaration links | workflows: {} mechanical, {} llm, {} bm25 (mode={})",
+    "Mechanical: {} sections, {} contracts, {} section-contract links, {} section-declaration links",
     sections.len(),
     contracts.len(),
     mechanical.section_to_contracts.len(),
     mechanical.section_to_declarations.len(),
-    wf_counts.0,
-    wf_counts.1,
-    wf_counts.2,
-    cfg.mode.as_str(),
   );
 
   if sections.is_empty() || contracts.is_empty() {
@@ -544,34 +507,17 @@ pub async fn build_semantic_links(
     return Ok(());
   }
 
-  let contract_list_json = {
-    let list: Vec<serde_json::Value> = contracts
-      .iter()
-      .map(|(ct, json)| {
-        serde_json::json!({
-          "contract_topic": ct.id(),
-          "contract": serde_json::from_str::<serde_json::Value>(json).unwrap_or_default(),
-        })
-      })
-      .collect();
-    serde_json::to_string(&list).unwrap_or_default()
-  };
-
-  let contract_json_by_topic: HashMap<&topic::Topic, &str> = contracts
-    .iter()
-    .map(|(ct, json)| (ct, json.as_str()))
-    .collect();
-
   // ---- Pass 1: section → contracts ----
-  // section_contracts is now (topic, source) pairs so Pass 3 can stamp
-  // provenance on the resulting semantics.
+  // Mechanical anchors first; BM25 Pass 1 then unions in contracts the
+  // section's prose lexically resembles. section_contracts carries
+  // (topic, source) so Pass 3 can stamp provenance on the resulting
+  // semantics.
   let pass1_start = Instant::now();
   let mut section_contracts: HashMap<
     topic::Topic,
     Vec<(topic::Topic, domain::MatchSource)>,
   > = HashMap::new();
 
-  // Seed every section with its mechanical contracts (always Mechanical source).
   for (st, ctrs) in &mechanical.section_to_contracts {
     let v: Vec<_> = ctrs
       .iter()
@@ -580,88 +526,6 @@ pub async fn build_semantic_links(
     section_contracts.insert(*st, v);
   }
 
-  // For LLM-workflow sections, run LLM Pass 1 to expand beyond mechanical.
-  // Mechanical and BM25 sections skip Pass 1 entirely (per spec, BM25 has
-  // no Pass 1 implementation).
-  let mut pass1_handles = Vec::new();
-  let mut sections_with_text = 0usize;
-  let mut sections_empty = 0usize;
-  for section_topic in &sections {
-    let workflow = section_workflows
-      .get(section_topic)
-      .copied()
-      .unwrap_or(SectionWorkflow::Llm);
-    if workflow != SectionWorkflow::Llm {
-      continue;
-    }
-
-    let section_text = {
-      let ctx = state
-        .data_context
-        .lock()
-        .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
-      let audit_data = ctx.get_audit(audit_id).ok_or_else(|| {
-        PipelineError::AuditNotFound {
-          audit_id: audit_id.to_string(),
-        }
-      })?;
-      context::render_section_text(section_topic, audit_data)
-        .unwrap_or_default()
-    };
-
-    if section_text.is_empty() {
-      sections_empty += 1;
-      continue;
-    }
-
-    let confirmed = mechanical
-      .section_to_contracts
-      .get(section_topic)
-      .cloned()
-      .unwrap_or_default();
-
-    sections_with_text += 1;
-    let st = *section_topic;
-    let clj = contract_list_json.clone();
-    pass1_handles.push(tokio::spawn(async move {
-      task::semantic_link_pass1(&st, &section_text, &clj, &confirmed).await
-    }));
-  }
-
-  tracing::info!(
-    "Pass 1: {} LLM calls queued ({} sections with text, {} empty)",
-    pass1_handles.len(),
-    sections_with_text,
-    sections_empty,
-  );
-
-  for handle in pass1_handles {
-    match handle.await {
-      Ok(Ok(result)) => {
-        let contracts =
-          section_contracts.entry(result.section_topic).or_default();
-        for ct in result.contract_topics {
-          if !contracts.iter().any(|(c, _)| *c == ct) {
-            contracts.push((ct, domain::MatchSource::Llm));
-          }
-        }
-      }
-      Ok(Err(e)) => tracing::error!("semantic_link pass1 failed: {}", e),
-      Err(e) => tracing::error!("semantic_link pass1 panicked: {}", e),
-    }
-  }
-
-  tracing::info!(
-    "Pass 1 complete in {:?}: {} section-contract pairs",
-    pass1_start.elapsed(),
-    section_contracts.values().map(|v| v.len()).sum::<usize>()
-  );
-
-  // ---- BM25 Pass 1: contract discovery for BM25-routed sections ----
-  // BM25 sections skip LLM Pass 1, so without this they'd inherit only
-  // mechanical's contract reach. Score every in-scope contract against the
-  // section text and add top-K to the section's contract list.
-  let bm25_pass1_start = Instant::now();
   let mut bm25_pass1_added = 0usize;
   {
     let ctx = state
@@ -676,24 +540,15 @@ pub async fn build_semantic_links(
         })?;
 
     for section_topic in &sections {
-      let workflow = section_workflows
-        .get(section_topic)
-        .copied()
-        .unwrap_or(SectionWorkflow::Llm);
-      if workflow != SectionWorkflow::Bm25 {
-        continue;
-      }
       let section_text =
         match context::render_section_text(section_topic, audit_data) {
           Some(s) if !s.is_empty() => s,
           _ => continue,
         };
-      let discovered = semantic_linking::bm25::discover_top_k_contracts(
+      let discovered = bm25::discover_top_k_contracts(
         &section_text,
         audit_data,
-        // Production default: Body. The harness compare-all run will
-        // re-evaluate this — see `bm25-pass1-ranking.jsonl` per-variant.
-        semantic_linking::bm25::SummaryCorpusVariant::Body,
+        bm25::SummaryCorpusVariant::Body,
       );
       let entry = section_contracts.entry(*section_topic).or_default();
       for (ct, _score) in discovered {
@@ -704,37 +559,24 @@ pub async fn build_semantic_links(
       }
     }
   }
-  if bm25_pass1_added > 0 {
-    tracing::info!(
-      "BM25 Pass 1 complete in {:?}: added {} (section, contract) pairs",
-      bm25_pass1_start.elapsed(),
-      bm25_pass1_added,
-    );
-  }
+  tracing::info!(
+    "Pass 1 complete in {:?}: {} section-contract pairs ({} added by BM25)",
+    pass1_start.elapsed(),
+    section_contracts.values().map(|v| v.len()).sum::<usize>(),
+    bm25_pass1_added,
+  );
 
   // ---- Pass 2: section × contract → members ----
+  // Mechanical seed + BM25 expansion (top-K above MIN_SCORE per contract).
   let pass2_start = Instant::now();
-  // For each section, derive the workflow once and dispatch:
-  //   - Mechanical: just use mechanical_section_to_members.
-  //   - LLM: mechanical seed + LLM Pass 2 expansion.
-  //   - BM25: mechanical seed + BM25 expansion within each anchored contract.
-  let mut pass2_handles = Vec::new();
-  // Per-section pre-computed text + mechanical members + workflow, used both
-  // by the LLM Pass 2 spawns below and by the BM25 expansion inline branch.
   struct SectionPass2Ctx {
     section_text: String,
     mech_members_by_contract: HashMap<topic::Topic, Vec<topic::Topic>>,
-    workflow: SectionWorkflow,
   }
   let mut pass2_ctx_by_section: HashMap<topic::Topic, SectionPass2Ctx> =
     HashMap::new();
 
   for (section_topic, contract_topics) in &section_contracts {
-    let workflow = section_workflows
-      .get(section_topic)
-      .copied()
-      .unwrap_or(SectionWorkflow::Llm);
-
     let (section_text, mech_members_by_contract) = {
       let ctx = state
         .data_context
@@ -771,51 +613,19 @@ pub async fn build_semantic_links(
     pass2_ctx_by_section.insert(
       *section_topic,
       SectionPass2Ctx {
-        section_text: section_text.clone(),
-        mech_members_by_contract: mech_members_by_contract.clone(),
-        workflow,
+        section_text,
+        mech_members_by_contract,
       },
     );
-
-    if workflow != SectionWorkflow::Llm {
-      // Mechanical and BM25 workflows skip the LLM Pass 2 call. BM25
-      // expansion is run synchronously below in the result-collection phase.
-      continue;
-    }
-
-    // Confirmed members across all contracts (LLM uses one flat list).
-    let mut confirmed_members: Vec<topic::Topic> = Vec::new();
-    for v in mech_members_by_contract.values() {
-      for m in v {
-        if !confirmed_members.contains(m) {
-          confirmed_members.push(*m);
-        }
-      }
-    }
-
-    for (ct, _) in contract_topics {
-      let contract_json = match contract_json_by_topic.get(ct) {
-        Some(json) => json.to_string(),
-        None => continue,
-      };
-
-      let st = *section_topic;
-      let stxt = section_text.clone();
-      let confirmed = confirmed_members.clone();
-      pass2_handles.push(tokio::spawn(async move {
-        task::semantic_link_pass2(&st, &stxt, &contract_json, &confirmed).await
-      }));
-    }
   }
 
-  // Collect pass2 results: build section -> doc_topic -> [(member, source)].
+  // Build section -> doc_topic -> [(member, source)] for Pass 3 input.
   let mut section_doc_members: BTreeMap<
     topic::Topic,
     BTreeMap<topic::Topic, Vec<(topic::Topic, domain::MatchSource)>>,
   > = BTreeMap::new();
 
-  // (a) Seed with mechanical members for every section that has any.
-  // This guarantees mechanical/BM25 sections produce Pass 3 input.
+  // (a) Seed with mechanical members for every section.
   for (section_topic, ctx) in &pass2_ctx_by_section {
     let doc_members = section_doc_members.entry(*section_topic).or_default();
     for members in ctx.mech_members_by_contract.values() {
@@ -828,37 +638,10 @@ pub async fn build_semantic_links(
     }
   }
 
-  // (b) Apply LLM Pass 2 results.
-  for handle in pass2_handles {
-    match handle.await {
-      Ok(Ok(result)) => {
-        let doc_members =
-          section_doc_members.entry(result.section_topic).or_default();
-        for mapping in result.member_mappings {
-          let doc_topics = if mapping.doc_topics.is_empty() {
-            vec![result.section_topic]
-          } else {
-            mapping.doc_topics
-          };
-          for dt in doc_topics {
-            let entry = doc_members.entry(dt).or_default();
-            if !entry.iter().any(|(t, _)| *t == mapping.member_topic) {
-              entry.push((mapping.member_topic, domain::MatchSource::Llm));
-            }
-          }
-        }
-      }
-      Ok(Err(e)) => tracing::error!("semantic_link pass2 failed: {}", e),
-      Err(e) => tracing::error!("semantic_link pass2 panicked: {}", e),
-    }
-  }
-
-  // (c) For BM25 sections, run BM25 expansion inline (cheap, in-process).
+  // (b) BM25 expansion per (section, contract). Run inline — each call is
+  // cheap (one tokenize + one scored corpus pass).
   let mut bm25_expansions = 0usize;
   for (section_topic, ctx) in &pass2_ctx_by_section {
-    if ctx.workflow != SectionWorkflow::Bm25 {
-      continue;
-    }
     if ctx.section_text.is_empty() {
       continue;
     }
@@ -868,7 +651,6 @@ pub async fn build_semantic_links(
       .cloned()
       .unwrap_or_default();
 
-    // Borrow audit_data once for all contracts in this section.
     let ctx_lock = state
       .data_context
       .lock()
@@ -880,12 +662,8 @@ pub async fn build_semantic_links(
     })?;
 
     for (contract_topic, _src) in contracts_for_section {
-      let new_members = bm25::expand_members(
-        &ctx.section_text,
-        &contract_topic,
-        audit_data,
-        cfg.pass2_algo,
-      );
+      let new_members =
+        bm25::expand_members(&ctx.section_text, &contract_topic, audit_data);
       if new_members.is_empty() {
         continue;
       }
@@ -1249,34 +1027,6 @@ pub async fn build_semantic_links(
   }
 
   tracing::info!("Semantic linking complete in {:?}", total_start.elapsed());
-
-  // ---- Comparison harness: --semantic-linking-compare-all ----
-  if cfg.compare_all {
-    if let Some(out_dir) = state.output_dir.as_ref() {
-      tracing::info!(
-        "compare-all: running all four workflow variants for side-by-side logs"
-      );
-      let compare_start = Instant::now();
-      if let Err(e) = semantic_linking::compare::run(
-        state.data_context.clone(),
-        audit_id,
-        out_dir,
-      )
-      .await
-      {
-        tracing::error!("compare-all harness failed: {}", e);
-      } else {
-        tracing::info!(
-          "compare-all harness complete in {:?}",
-          compare_start.elapsed()
-        );
-      }
-    } else {
-      tracing::warn!(
-        "compare-all is set but PipelineState has no output_dir; skipping harness"
-      );
-    }
-  }
 
   Ok(())
 }
