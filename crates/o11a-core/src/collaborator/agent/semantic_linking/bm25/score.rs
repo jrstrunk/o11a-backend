@@ -23,8 +23,8 @@
 //! The length floor `MIN_LENGTH_RATIO` addresses an empirical pathology in
 //! the comparison-harness data: very short member documents (1–3 tokens —
 //! bare identifier names with no NatSpec) get the smallest possible
-//! denominator and produce inflated scores that don't correlate with
-//! Pass 3 LLM acceptance. Treating any document shorter than
+//! denominator and produce inflated scores that don't correlate with the
+//! downstream LLM step's acceptance. Treating any document shorter than
 //! `0.75 * avgdl` as if it were `0.75 * avgdl` long caps the bonus
 //! short docs receive without zeroing length normalization for
 //! mid-length docs. See the analysis in
@@ -56,7 +56,7 @@ const MIN_LENGTH_RATIO: f32 = 0.75;
 
 /// Trait for documents BM25 can score: any pre-tokenized text.
 /// Implemented by `MemberDoc` (member-level corpus) and `ContractDoc`
-/// (contract-summary corpus for Pass 1).
+/// (contract-summary corpus for step 1).
 pub trait BM25Doc {
   fn tokens(&self) -> &[String];
 }

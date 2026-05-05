@@ -62,10 +62,10 @@ pub async fn run(args: &[String]) -> ExitCode {
        necessary).\n\n\
        Flags:\n\
          --semantic-linking-mechanical-trace\n\
-             Run only mechanical Pass 1 + Pass 2 (no LLM, no Pass 3),\n\
-             write a pretty-printed JSON trace of every section's\n\
-             resolved / unresolved inline-code references and derived\n\
-             contract / member candidates to\n\
+             Run only the mechanical halves of step 1 + step 3 (no LLM,\n\
+             no synthesis steps), write a pretty-printed JSON trace of\n\
+             every section's resolved / unresolved inline-code references\n\
+             and derived contract / member candidates to\n\
              <project_root>/{}/mechanical-trace.json, then exit. Used to\n\
              validate the deterministic name resolver.",
       OUTPUT_DIR_NAME, OUTPUT_DIR_NAME
@@ -111,9 +111,10 @@ async fn do_run(
 
   let output_dir = project_root.join(OUTPUT_DIR_NAME);
 
-  // Mechanical-trace mode: run Pass 1 + Pass 2 only, write trace, exit.
-  // No LLM calls, no audit.json, no audit.analysis.bin — this is a
-  // diagnostic-only mode for the deterministic name resolver.
+  // Mechanical-trace mode: run the mechanical halves of step 1 + step 3
+  // only, write trace, exit. No LLM calls, no audit.json, no
+  // audit.analysis.bin — diagnostic-only mode for the deterministic name
+  // resolver.
   if semantic_linking.mechanical_trace {
     std::fs::create_dir_all(&output_dir)?;
     let path = semantic_linking::trace::run_mechanical_trace(

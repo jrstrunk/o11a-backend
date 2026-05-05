@@ -2416,47 +2416,137 @@ pub fn collect_contracts_for_behavior_extraction(
 }
 
 // ============================================================================
-// Semantic Linking: Pass 3 Context Rendering
+// Semantic Linking: Synthesis Step Context Rendering (steps 2, 4, 5)
 // ============================================================================
 
-/// Render a list of declarations within a member that need semantic assignment.
-/// Returns a JSON string of declaration names and topic IDs.
-pub fn render_member_declarations_for_semantics(
-  member_topic: &topic::Topic,
+/// Step 2 — render the list of contract entities needing semantics. One JSON
+/// array entry per contract: the topic id, the contract name, and the kind
+/// string `"contract"`. Pairs with `render_contract_summaries_for_semantics`
+/// for the source-code disambiguation block.
+pub fn render_contract_entities_for_semantics(
+  contract_topics: &[topic::Topic],
+  audit_data: &AuditData,
+) -> String {
+  let mut declarations: Vec<serde_json::Value> = Vec::new();
+  for ct in contract_topics {
+    let Some(TopicMetadata::NamedTopic {
+      name,
+      kind: NamedTopicKind::Contract(_),
+      ..
+    }) = audit_data.topic_metadata.get(ct)
+    else {
+      continue;
+    };
+    declarations.push(json!({
+      "topic": ct.id(),
+      "name": name,
+      "kind": "contract",
+    }));
+  }
+  serde_json::to_string(&declarations).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Step 2 — render a textual summary of each contract: name, contract-level
+/// NatSpec, and the names of its public-facing members (external/public
+/// functions and modifiers, public state variables, all events/errors, and
+/// all struct/enum definitions). This is the "source code (for disambiguation
+/// only)" payload the step 2 LLM call sees.
+pub fn render_contract_summaries_for_semantics(
+  contract_topics: &[topic::Topic],
+  audit_data: &AuditData,
+) -> String {
+  let mut parts: Vec<String> = Vec::new();
+  for ct in contract_topics {
+    let Some(TopicMetadata::NamedTopic {
+      name: contract_name,
+      kind: NamedTopicKind::Contract(_),
+      ..
+    }) = audit_data.topic_metadata.get(ct)
+    else {
+      continue;
+    };
+
+    let mut block = String::new();
+    block.push_str(&format!("Contract {}:", contract_name));
+    block.push('\n');
+
+    let natspec = collect_natspec_text(ct, audit_data);
+    if !natspec.trim().is_empty() {
+      block.push_str("  NatSpec: ");
+      block.push_str(natspec.trim());
+      block.push('\n');
+    }
+
+    let mut public_members: Vec<String> = Vec::new();
+    for meta in audit_data.topic_metadata.values() {
+      let TopicMetadata::NamedTopic {
+        name,
+        kind,
+        visibility,
+        scope,
+        ..
+      } = meta
+      else {
+        continue;
+      };
+      let component = match scope {
+        domain::Scope::Component { component, .. } => component,
+        _ => continue,
+      };
+      if component != ct {
+        continue;
+      }
+      if !is_public_member_kind(kind, visibility) {
+        continue;
+      }
+      public_members.push(name.clone());
+    }
+    if !public_members.is_empty() {
+      block.push_str("  Public members: ");
+      block.push_str(&public_members.join(", "));
+      block.push('\n');
+    }
+
+    parts.push(block);
+  }
+  parts.join("\n")
+}
+
+/// Step 4 (member-scoped batch) — render declarations whose semantics this
+/// batch will produce: each member topic itself plus its parameters and
+/// return values. Body locals are excluded — they belong to step 5.
+pub fn render_member_signature_declarations_for_semantics(
+  member_topics: &[topic::Topic],
   audit_data: &AuditData,
 ) -> String {
   let mut declarations: Vec<serde_json::Value> = Vec::new();
 
-  // Include the member itself as a candidate
-  if let Some(metadata) = audit_data.topic_metadata.get(member_topic)
-    && let Some(name) = metadata.name()
-  {
-    declarations.push(json!({
-      "topic": member_topic.id(),
-      "name": name,
-      "kind": "member",
-    }));
-  }
-
-  // Collect declarations scoped to this member
-  for (decl_topic, metadata) in &audit_data.topic_metadata {
-    let in_member = match metadata.scope() {
-      domain::Scope::Member { member, .. } => member == member_topic,
-      domain::Scope::ContainingBlock { member, .. } => member == member_topic,
-      _ => false,
-    };
-    if !in_member {
-      continue;
+  for member_topic in member_topics {
+    if let Some(metadata) = audit_data.topic_metadata.get(member_topic)
+      && let Some(name) = metadata.name()
+    {
+      declarations.push(json!({
+        "topic": member_topic.id(),
+        "name": name,
+        "kind": "member",
+      }));
     }
-    if let Some(name) = metadata.name() {
-      let kind = match metadata {
-        TopicMetadata::NamedTopic { kind, .. } => format!("{:?}", kind),
-        _ => continue,
+
+    for (decl_topic, metadata) in &audit_data.topic_metadata {
+      let in_signature = matches!(
+        metadata.scope(),
+        domain::Scope::Member { member, .. } if member == member_topic
+      );
+      if !in_signature {
+        continue;
+      }
+      let TopicMetadata::NamedTopic { name, kind, .. } = metadata else {
+        continue;
       };
       declarations.push(json!({
         "topic": decl_topic.id(),
         "name": name,
-        "kind": kind,
+        "kind": format!("{:?}", kind),
       }));
     }
   }
@@ -2464,52 +2554,70 @@ pub fn render_member_declarations_for_semantics(
   serde_json::to_string(&declarations).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Render declarations for multiple members in one JSON array for batched pass 3.
-pub fn render_batched_member_declarations_for_semantics(
-  member_topics: &[topic::Topic],
-  audit_data: &AuditData,
-) -> String {
-  let mut all_declarations: Vec<serde_json::Value> = Vec::new();
-  for mt in member_topics {
-    let single = render_member_declarations_for_semantics(mt, audit_data);
-    if let Ok(decls) = serde_json::from_str::<Vec<serde_json::Value>>(&single) {
-      all_declarations.extend(decls);
-    }
-  }
-  serde_json::to_string(&all_declarations).unwrap_or_else(|_| "[]".to_string())
-}
-
-/// Render source code for multiple members as a combined string for batched pass 3.
-pub fn render_batched_member_sources_for_semantics(
+/// Step 4 (member-scoped batch) — render the signature source for each
+/// member (function/modifier body stripped). Used as the disambiguation
+/// payload alongside `render_member_signature_declarations_for_semantics`.
+pub fn render_member_signature_sources_for_semantics(
   member_topics: &[topic::Topic],
   audit_data: &AuditData,
 ) -> String {
   let mut parts = Vec::new();
   for mt in member_topics {
-    if let Some(source) = render_member_source_for_semantics(mt, audit_data) {
+    if let Some(source) = render_member_signature_for_semantics(mt, audit_data)
+    {
       parts.push(source);
     }
   }
   parts.join("\n\n")
 }
 
-/// Render contract-level declarations for multiple contracts in one JSON array.
-pub fn render_batched_contract_declarations_for_semantics(
+/// Step 4 (contract-scoped batch) — render non-function component-scoped
+/// declarations for the listed contracts. Includes state variables, events,
+/// errors, struct/enum definitions, struct fields, and enum members.
+/// Functions and modifiers are *excluded* — they belong to the
+/// member-scoped batch in step 4 (alongside their params/returns).
+pub fn render_contract_level_declarations_for_semantics(
   contract_topics: &[topic::Topic],
   audit_data: &AuditData,
 ) -> String {
-  let mut all_declarations: Vec<serde_json::Value> = Vec::new();
+  let mut declarations: Vec<serde_json::Value> = Vec::new();
+
   for ct in contract_topics {
-    let single = render_contract_declarations_for_semantics(ct, audit_data);
-    if let Ok(decls) = serde_json::from_str::<Vec<serde_json::Value>>(&single) {
-      all_declarations.extend(decls);
+    for (decl_topic, metadata) in &audit_data.topic_metadata {
+      let TopicMetadata::NamedTopic { name, kind, .. } = metadata else {
+        continue;
+      };
+
+      if matches!(
+        kind,
+        NamedTopicKind::Function(_)
+          | NamedTopicKind::Modifier
+          | NamedTopicKind::Contract(_)
+      ) {
+        continue;
+      }
+
+      if !component_belongs_to_contract(metadata.scope(), ct, audit_data) {
+        continue;
+      }
+
+      declarations.push(json!({
+        "topic": decl_topic.id(),
+        "name": name,
+        "kind": format!("{:?}", kind),
+      }));
     }
   }
-  serde_json::to_string(&all_declarations).unwrap_or_else(|_| "[]".to_string())
+
+  serde_json::to_string(&declarations).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Render contract-level declaration signatures for multiple contracts.
-pub fn render_batched_contract_declaration_signatures(
+/// Step 4 (contract-scoped batch) — render the non-function members of each
+/// contract as Solidity signatures (state-variable declarations, event
+/// signatures, struct/enum definitions). Pairs with
+/// `render_contract_level_declarations_for_semantics` as the disambiguation
+/// payload.
+pub fn render_contract_level_signatures_for_semantics(
   contract_topics: &[topic::Topic],
   audit_data: &AuditData,
 ) -> String {
@@ -2523,7 +2631,243 @@ pub fn render_batched_contract_declaration_signatures(
   parts.join("\n\n")
 }
 
-/// Render a member's full source code as a JSON snippet for pass 3 context.
+/// Step 5 — render the body-local declarations for each member. These are
+/// the items in `Scope::ContainingBlock` (locals declared inside the
+/// function/modifier body). Member signatures and parameters are *not*
+/// included — those are handled by step 4.
+pub fn render_member_body_local_declarations_for_semantics(
+  member_topics: &[topic::Topic],
+  audit_data: &AuditData,
+) -> String {
+  let mut declarations: Vec<serde_json::Value> = Vec::new();
+
+  for member_topic in member_topics {
+    for (decl_topic, metadata) in &audit_data.topic_metadata {
+      let in_body = matches!(
+        metadata.scope(),
+        domain::Scope::ContainingBlock { member, .. } if member == member_topic
+      );
+      if !in_body {
+        continue;
+      }
+      let TopicMetadata::NamedTopic { name, kind, .. } = metadata else {
+        continue;
+      };
+      declarations.push(json!({
+        "topic": decl_topic.id(),
+        "name": name,
+        "kind": format!("{:?}", kind),
+      }));
+    }
+  }
+
+  serde_json::to_string(&declarations).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Step 5 — render the full body source for each member (function/modifier
+/// body included). Pairs with
+/// `render_member_body_local_declarations_for_semantics` as the
+/// disambiguation payload.
+pub fn render_member_body_sources_for_semantics(
+  member_topics: &[topic::Topic],
+  audit_data: &AuditData,
+) -> String {
+  let mut parts = Vec::new();
+  for mt in member_topics {
+    if let Some(source) = render_member_source_for_semantics(mt, audit_data) {
+      parts.push(source);
+    }
+  }
+  parts.join("\n\n")
+}
+
+/// Render the prior-step semantic links relevant to the current synthesis
+/// batch. `topics` is the set of declaration topics whose accumulated
+/// semantics should be surfaced (e.g., for step 4: the containing contracts
+/// of every member in the batch; for step 5: every topic that lives within
+/// any of those contracts — see `topics_within_contracts`). After per-step
+/// condensation, each topic has at most one link.
+///
+/// Lines are emitted in deterministic order (sorted by declaration topic)
+/// so prompt text is stable across runs. Returns an empty string when no
+/// relevant prior semantics exist, so callers can use `if !block.is_empty()`
+/// to decide whether to emit the "Previously derived semantics" prompt
+/// section.
+pub fn render_prior_semantics_block(
+  topics: &[topic::Topic],
+  links: &[domain::SemanticLink],
+  audit_data: &AuditData,
+) -> String {
+  use std::collections::HashSet;
+  let topic_set: HashSet<&topic::Topic> = topics.iter().collect();
+  let mut filtered: Vec<&domain::SemanticLink> = links
+    .iter()
+    .filter(|link| topic_set.contains(&link.declaration_topic))
+    .collect();
+  filtered.sort_by_key(|l| l.declaration_topic);
+  let mut lines: Vec<String> = Vec::with_capacity(filtered.len());
+  for link in filtered {
+    let name = audit_data
+      .topic_metadata
+      .get(&link.declaration_topic)
+      .and_then(|m| m.name())
+      .unwrap_or("");
+    lines.push(format!(
+      "- {} ({}): {}",
+      link.declaration_topic.id(),
+      name,
+      link.description
+    ));
+  }
+  lines.join("\n")
+}
+
+/// Returns every topic that "belongs to" any of the listed contracts —
+/// the contracts themselves plus everything in their `Component` /
+/// `Member` / `ContainingBlock` scope, including struct fields and enum
+/// members reached through one parent hop.
+///
+/// Used by step 5 to assemble the prior-semantics topic set: any topic
+/// step 2 or step 4 may have produced a semantic for that's reachable
+/// from a body local should appear in the step 5 prompt's prior-context
+/// block.
+pub fn topics_within_contracts(
+  contract_topics: &[topic::Topic],
+  audit_data: &AuditData,
+) -> Vec<topic::Topic> {
+  use std::collections::HashSet;
+  let contract_set: HashSet<&topic::Topic> = contract_topics.iter().collect();
+  let mut out: Vec<topic::Topic> = contract_topics.to_vec();
+  for (decl_topic, metadata) in &audit_data.topic_metadata {
+    if contract_set.contains(decl_topic) {
+      continue;
+    }
+    let component = match metadata.scope() {
+      domain::Scope::Component { component, .. }
+      | domain::Scope::Member { component, .. }
+      | domain::Scope::ContainingBlock { component, .. } => component,
+      _ => continue,
+    };
+    if contract_set.contains(component) {
+      out.push(*decl_topic);
+      continue;
+    }
+    // Struct field / enum member: walk one parent hop. The decl's scope
+    // points at the struct/enum; that struct/enum's scope points at the
+    // contract.
+    if let Some(parent_scope) = audit_data
+      .topic_metadata
+      .get(component)
+      .map(TopicMetadata::scope)
+    {
+      let grandparent = match parent_scope {
+        domain::Scope::Component { component, .. }
+        | domain::Scope::Member { component, .. }
+        | domain::Scope::ContainingBlock { component, .. } => component,
+        _ => continue,
+      };
+      if contract_set.contains(grandparent) {
+        out.push(*decl_topic);
+      }
+    }
+  }
+  out
+}
+
+fn is_public_member_kind(
+  kind: &NamedTopicKind,
+  visibility: &NamedTopicVisibility,
+) -> bool {
+  use NamedTopicKind as K;
+  use NamedTopicVisibility as V;
+  match kind {
+    K::Function(_) | K::Modifier => {
+      matches!(visibility, V::Public | V::External)
+    }
+    K::StateVariable(_) => matches!(visibility, V::Public),
+    K::Event | K::Error | K::Struct | K::Enum => true,
+    _ => false,
+  }
+}
+
+/// True when a declaration's `Component` scope rolls up to `contract_topic`,
+/// either directly or through one parent hop (the struct-field / enum-member
+/// case). Mirrors `bm25::corpus::belongs_to_contract` but only for
+/// `Scope::Component` — the other scope kinds are handled by their own
+/// renderers (step 4 member-scoped, step 5 body-locals).
+fn component_belongs_to_contract(
+  scope: &domain::Scope,
+  contract_topic: &topic::Topic,
+  audit_data: &AuditData,
+) -> bool {
+  let domain::Scope::Component { component, .. } = scope else {
+    return false;
+  };
+  if component == contract_topic {
+    return true;
+  }
+  audit_data
+    .topic_metadata
+    .get(component)
+    .map(TopicMetadata::scope)
+    .map(|parent| match parent {
+      domain::Scope::Member { component: c, .. }
+      | domain::Scope::ContainingBlock { component: c, .. }
+      | domain::Scope::Component { component: c, .. } => c == contract_topic,
+      _ => false,
+    })
+    .unwrap_or(false)
+}
+
+/// Concatenate the surface text of all NatSpec / dev comments attached to
+/// `topic`, separated by single spaces. Used by
+/// `render_contract_summaries_for_semantics` to assemble the per-contract
+/// NatSpec line for the step 2 prompt.
+fn collect_natspec_text(
+  topic: &topic::Topic,
+  audit_data: &AuditData,
+) -> String {
+  use crate::collaborator::parser::CommentNode;
+
+  fn append(node: &CommentNode, out: &mut String) {
+    match node {
+      CommentNode::Text { value }
+      | CommentNode::CodeText { value }
+      | CommentNode::CodeKeyword { value }
+      | CommentNode::CodeOperator { value }
+      | CommentNode::CodeIdentifier { value, .. } => {
+        out.push(' ');
+        out.push_str(value);
+      }
+      CommentNode::InlineCode { children, .. } => {
+        for c in children {
+          append(c, out);
+        }
+      }
+      CommentNode::Emphasis { text }
+      | CommentNode::Strong { text }
+      | CommentNode::Link { text, .. } => {
+        out.push(' ');
+        out.push_str(text);
+      }
+    }
+  }
+
+  let mut out = String::new();
+  if let Some(comment_topics) = audit_data.comment_index.get(topic) {
+    for ct in comment_topics {
+      if let Some(domain::Node::Comment(nodes)) = audit_data.nodes.get(ct) {
+        for node in nodes {
+          append(node, &mut out);
+        }
+      }
+    }
+  }
+  out
+}
+
+/// Render a member's full source code as a JSON snippet for synthesis-step
+/// disambiguation context (currently used by step 5).
 pub fn render_member_source_for_semantics(
   member_topic: &topic::Topic,
   audit_data: &AuditData,
@@ -2597,40 +2941,10 @@ pub fn render_member_signature_for_semantics(
   None
 }
 
-/// For pass 2 mechanical step: given a section's resolved declarations,
-/// find the containing members. For declarations scoped at component level
-/// (state variables), find members that read/write them.
-/// Render component-scoped declarations (state variables, events, structs, enums)
-/// for a contract that need semantic assignment. These are declarations at
-/// the contract level, not inside any function or modifier.
-pub fn render_contract_declarations_for_semantics(
-  contract_topic: &topic::Topic,
-  audit_data: &AuditData,
-) -> String {
-  let mut declarations: Vec<serde_json::Value> = Vec::new();
-
-  for (decl_topic, metadata) in &audit_data.topic_metadata {
-    let at_component = match metadata.scope() {
-      domain::Scope::Component { component, .. } => component == contract_topic,
-      _ => false,
-    };
-    if !at_component {
-      continue;
-    }
-    if let TopicMetadata::NamedTopic { name, kind, .. } = metadata {
-      declarations.push(json!({
-        "topic": decl_topic.id(),
-        "name": name,
-        "kind": format!("{:?}", kind),
-      }));
-    }
-  }
-
-  serde_json::to_string(&declarations).unwrap_or_else(|_| "[]".to_string())
-}
-
-/// Render contract-scoped declaration signatures as source context for pass 3.
-/// Returns a compact JSON of state variable declarations, event signatures, etc.
+/// Render contract-scoped declaration signatures as source context for the
+/// step 4 contract-scoped batch. Returns a compact JSON of state-variable
+/// declarations, event/error signatures, struct/enum definitions — i.e.,
+/// the non-function members of the contract.
 pub fn render_contract_declaration_signatures(
   contract_topic: &topic::Topic,
   audit_data: &AuditData,
@@ -4305,5 +4619,354 @@ mod tests {
       !result.section_to_declarations.contains_key(&section_topic),
       "empty candidate list ⇒ no declarations",
     );
+  }
+}
+
+#[cfg(test)]
+mod synthesis_render_tests {
+  //! Tests for the synthesis-step renderers and prior-context helpers
+  //! introduced for the 5-step semantic-linking pipeline. These exercise
+  //! the scope-filtering logic without standing up full ASTs — every helper
+  //! under test reads only `audit_data.topic_metadata`.
+  use super::*;
+  use crate::domain::{
+    self, ContractKind, FunctionKind, MatchSource, NamedTopicKind,
+    NamedTopicVisibility, Scope, SemanticLink, TopicMetadata, new_audit_data,
+  };
+  use std::collections::HashSet;
+  use topic::Topic;
+
+  fn project_path(file: &str) -> domain::ProjectPath {
+    domain::ProjectPath {
+      file_path: file.to_string(),
+    }
+  }
+
+  fn insert_named(
+    audit: &mut domain::AuditData,
+    topic: Topic,
+    name: &str,
+    kind: NamedTopicKind,
+    visibility: NamedTopicVisibility,
+    scope: Scope,
+  ) {
+    audit.topic_metadata.insert(
+      topic,
+      TopicMetadata::NamedTopic {
+        topic,
+        scope,
+        kind,
+        name: name.to_string(),
+        visibility,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+  }
+
+  /// Audit fixture: one Vault contract with one function `transfer` that
+  /// has param `to`, return value `result`, and body local `temp`. Plus
+  /// state var `balance` and event `Transfer` with arg `amount`.
+  /// Returns the topics in the order:
+  /// (vault, transfer, to, result, temp, balance, event_transfer, amount).
+  #[allow(clippy::type_complexity)]
+  fn build_vault_audit() -> (
+    domain::AuditData,
+    (Topic, Topic, Topic, Topic, Topic, Topic, Topic, Topic),
+  ) {
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let path = project_path("Vault.sol");
+    let vault = topic::new_node_topic(&100);
+    let transfer = topic::new_node_topic(&110);
+    let to = topic::new_node_topic(&111);
+    let result = topic::new_node_topic(&112);
+    let temp = topic::new_node_topic(&113);
+    let balance = topic::new_node_topic(&120);
+    let event_transfer = topic::new_node_topic(&130);
+    let amount = topic::new_node_topic(&131);
+
+    insert_named(
+      &mut audit,
+      vault,
+      "Vault",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      NamedTopicVisibility::Public,
+      Scope::Container {
+        container: path.clone(),
+      },
+    );
+    insert_named(
+      &mut audit,
+      transfer,
+      "transfer",
+      NamedTopicKind::Function(FunctionKind::Function),
+      NamedTopicVisibility::External,
+      Scope::Component {
+        container: path.clone(),
+        component: vault,
+      },
+    );
+    insert_named(
+      &mut audit,
+      to,
+      "to",
+      NamedTopicKind::LocalVariable,
+      NamedTopicVisibility::Internal,
+      Scope::Member {
+        container: path.clone(),
+        component: vault,
+        member: transfer,
+        signature_container: None,
+      },
+    );
+    insert_named(
+      &mut audit,
+      result,
+      "result",
+      NamedTopicKind::LocalVariable,
+      NamedTopicVisibility::Internal,
+      Scope::Member {
+        container: path.clone(),
+        component: vault,
+        member: transfer,
+        signature_container: None,
+      },
+    );
+    insert_named(
+      &mut audit,
+      temp,
+      "temp",
+      NamedTopicKind::LocalVariable,
+      NamedTopicVisibility::Internal,
+      Scope::ContainingBlock {
+        container: path.clone(),
+        component: vault,
+        member: transfer,
+        containing_blocks: vec![],
+      },
+    );
+    insert_named(
+      &mut audit,
+      balance,
+      "balance",
+      NamedTopicKind::StateVariable(domain::VariableMutability::Mutable),
+      NamedTopicVisibility::Public,
+      Scope::Component {
+        container: path.clone(),
+        component: vault,
+      },
+    );
+    insert_named(
+      &mut audit,
+      event_transfer,
+      "Transfer",
+      NamedTopicKind::Event,
+      NamedTopicVisibility::Public,
+      Scope::Component {
+        container: path.clone(),
+        component: vault,
+      },
+    );
+    insert_named(
+      &mut audit,
+      amount,
+      "amount",
+      NamedTopicKind::LocalVariable,
+      NamedTopicVisibility::Internal,
+      Scope::Member {
+        container: path.clone(),
+        component: vault,
+        member: event_transfer,
+        signature_container: None,
+      },
+    );
+
+    (
+      audit,
+      (
+        vault,
+        transfer,
+        to,
+        result,
+        temp,
+        balance,
+        event_transfer,
+        amount,
+      ),
+    )
+  }
+
+  fn json_topics(rendered: &str) -> Vec<String> {
+    let v: serde_json::Value = serde_json::from_str(rendered).unwrap();
+    v.as_array()
+      .unwrap()
+      .iter()
+      .map(|d| d.get("topic").unwrap().as_str().unwrap().to_string())
+      .collect()
+  }
+
+  #[test]
+  fn signature_decls_include_member_and_params_but_exclude_body_locals() {
+    let (audit, (_vault, transfer, to, result, temp, _, _, _)) =
+      build_vault_audit();
+    let rendered =
+      render_member_signature_declarations_for_semantics(&[transfer], &audit);
+    let topics = json_topics(&rendered);
+    // Member topic itself plus its Scope::Member items (params/returns).
+    assert!(topics.contains(&transfer.id().to_string()));
+    assert!(topics.contains(&to.id().to_string()));
+    assert!(topics.contains(&result.id().to_string()));
+    // Body local must not appear here — that's step 5's job.
+    assert!(!topics.contains(&temp.id().to_string()));
+  }
+
+  #[test]
+  fn body_local_decls_include_only_containing_block_scope() {
+    let (audit, (_vault, transfer, to, result, temp, _, _, _)) =
+      build_vault_audit();
+    let rendered =
+      render_member_body_local_declarations_for_semantics(&[transfer], &audit);
+    let topics = json_topics(&rendered);
+    assert_eq!(topics, vec![temp.id().to_string()]);
+    assert!(!topics.contains(&transfer.id().to_string()));
+    assert!(!topics.contains(&to.id().to_string()));
+    assert!(!topics.contains(&result.id().to_string()));
+  }
+
+  #[test]
+  fn contract_level_decls_exclude_functions_and_modifiers() {
+    let (audit, (vault, transfer, _, _, _, balance, event_transfer, _)) =
+      build_vault_audit();
+    let rendered =
+      render_contract_level_declarations_for_semantics(&[vault], &audit);
+    let topics = json_topics(&rendered);
+    // State variables and events appear; functions do not.
+    assert!(topics.contains(&balance.id().to_string()));
+    assert!(topics.contains(&event_transfer.id().to_string()));
+    assert!(!topics.contains(&transfer.id().to_string()));
+  }
+
+  #[test]
+  fn topics_within_contracts_walks_member_and_block_scope() {
+    let (audit, (vault, transfer, to, result, temp, balance, _, _)) =
+      build_vault_audit();
+    let topics = topics_within_contracts(&[vault], &audit);
+    let set: HashSet<Topic> = topics.into_iter().collect();
+    // Contract itself, plus everything scoped within it.
+    assert!(set.contains(&vault));
+    assert!(set.contains(&transfer));
+    assert!(set.contains(&to));
+    assert!(set.contains(&result));
+    assert!(set.contains(&temp));
+    assert!(set.contains(&balance));
+  }
+
+  #[test]
+  fn topics_within_contracts_walks_struct_field_one_hop() {
+    // Vault contract holds a struct Receipt { uint256 amount; }. The
+    // amount field's scope's component is the struct, whose component is
+    // the contract. The 1-hop walk should reach the contract.
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let path = project_path("Vault.sol");
+    let vault = topic::new_node_topic(&100);
+    let receipt = topic::new_node_topic(&140);
+    let receipt_amount = topic::new_node_topic(&141);
+
+    insert_named(
+      &mut audit,
+      vault,
+      "Vault",
+      NamedTopicKind::Contract(ContractKind::Contract),
+      NamedTopicVisibility::Public,
+      Scope::Container {
+        container: path.clone(),
+      },
+    );
+    insert_named(
+      &mut audit,
+      receipt,
+      "Receipt",
+      NamedTopicKind::Struct,
+      NamedTopicVisibility::Public,
+      Scope::Component {
+        container: path.clone(),
+        component: vault,
+      },
+    );
+    insert_named(
+      &mut audit,
+      receipt_amount,
+      "amount",
+      NamedTopicKind::LocalVariable,
+      NamedTopicVisibility::Internal,
+      Scope::Component {
+        container: path.clone(),
+        component: receipt,
+      },
+    );
+
+    let topics = topics_within_contracts(&[vault], &audit);
+    let set: HashSet<Topic> = topics.into_iter().collect();
+    assert!(
+      set.contains(&receipt_amount),
+      "struct field should roll up to its enclosing contract"
+    );
+  }
+
+  #[test]
+  fn prior_semantics_block_filters_and_sorts_deterministically() {
+    let (audit, (vault, transfer, to, _result, _temp, _balance, _, _)) =
+      build_vault_audit();
+    // Build links in deliberately non-sorted order so we exercise sorting.
+    let links = vec![
+      SemanticLink {
+        documentation_topics: vec![],
+        declaration_topic: transfer,
+        description: "atomic balance transfer".to_string(),
+        match_source: MatchSource::Mechanical,
+      },
+      SemanticLink {
+        documentation_topics: vec![],
+        declaration_topic: vault,
+        description: "the canonical staking vault".to_string(),
+        match_source: MatchSource::Mechanical,
+      },
+      // `to` is in the audit but NOT requested in the topic filter — must
+      // be excluded.
+      SemanticLink {
+        documentation_topics: vec![],
+        declaration_topic: to,
+        description: "irrelevant".to_string(),
+        match_source: MatchSource::Bm25,
+      },
+    ];
+    let block =
+      render_prior_semantics_block(&[vault, transfer], &links, &audit);
+    let lines: Vec<&str> = block.lines().collect();
+    assert_eq!(lines.len(), 2, "the unrequested `to` link must be excluded");
+    // Deterministic sort by declaration topic — Topic ordering is by
+    // numeric_id, so vault (100) precedes transfer (110).
+    assert!(lines[0].contains("Vault"));
+    assert!(lines[0].contains("the canonical staking vault"));
+    assert!(lines[1].contains("transfer"));
+    assert!(lines[1].contains("atomic balance transfer"));
+  }
+
+  #[test]
+  fn prior_semantics_block_returns_empty_string_when_no_matches() {
+    let (audit, (vault, _, _, _, _, _, _, _)) = build_vault_audit();
+    let links = vec![SemanticLink {
+      documentation_topics: vec![],
+      declaration_topic: topic::new_node_topic(&999),
+      description: "orphan".to_string(),
+      match_source: MatchSource::Mechanical,
+    }];
+    let block = render_prior_semantics_block(&[vault], &links, &audit);
+    assert!(block.is_empty());
   }
 }

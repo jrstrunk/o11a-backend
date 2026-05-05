@@ -24,9 +24,11 @@
 //! 1. **Normalize** (`normalize_documentation`): Strip emojis, HTML, etc.
 //! 2. **Extract requirements** (`extract_requirements_from_documentation`):
 //!    Per-document extraction grouped by section, then consolidation.
-//! 3. **Semantic linking** (`semantic_link_pass3` only — Pass 1 + Pass 2 are mechanical / BM25):
-//!    Connect doc sections to code declarations via mechanical resolution
-//!    + two LLM passes, producing functional semantics with provenance.
+//! 3. **Semantic linking** (LLM steps 2/4/5 — steps 1 and 3 are mechanical /
+//!    BM25): Connect doc sections to code declarations across three LLM
+//!    synthesis steps that build on each other (`link_contracts` →
+//!    `link_member_signatures` → `link_member_bodies`), producing functional
+//!    semantics with provenance.
 //! 4. **Extract behaviors** (`extract_behaviors_from_contract`): Per-contract
 //!    extraction with functional semantics in context.
 //! 5. **Synthesize features** (`synthesize_features`): Single-pass LLM
@@ -396,58 +398,153 @@ pub async fn extract_requirements_from_documentation(
 }
 
 // ============================================================================
-// Semantic Linking LLM Tasks
+// Semantic Linking LLM Tasks (steps 2, 4, 5)
 // ============================================================================
 
-/// LLM pass 3: Given a documentation section, a list of declarations needing
-/// semantics, and the member's source code for disambiguation.
-const SEMANTIC_LINK_PASS3_PROMPT: &str = "Below is a documentation section from a smart contract \
-project, followed by a list of code declarations that need semantic meaning \
-assigned, followed by the source code for reference.\n\n\
+/// Step 2 — generate semantics for *contract entities* matched to a
+/// documentation section. The "Declarations needing semantics" payload is
+/// the contract list itself; the "Source code" payload is each contract's
+/// name + NatSpec + public-member-name list.
+const LINK_CONTRACTS_PROMPT: &str = "Below is a documentation section from a smart contract \
+project, followed by a list of contract entities that need a semantic \
+meaning assigned, followed by per-contract NatSpec and public-member \
+summaries for reference.\n\n\
+Your task is to assign **semantic meaning** to each contract based on what \
+the **documentation says** the contract represents in the project. The \
+semantic should reflect the developer's documented intent for the contract \
+as a whole — its role in the system — not a mechanical description of its \
+member surface.\n\n\
+The contract summaries (NatSpec + member names) are provided ONLY to help \
+you identify which contract the documentation is describing — for example, \
+to confirm that \"the rewards pool\" in the documentation refers to \
+`RewardsVault`. Do NOT derive meaning from the member list. If the \
+documentation says a contract is \"the canonical reward source\" but its \
+implementation is delegated to another contract, the semantic should still \
+be \"the canonical reward source.\"\n\n\
+Return a JSON object with a `links` key whose value is an array of objects. \
+For each contract with documented semantics, include one object with ALL \
+of these fields (all are required):\n\
+- `declaration_topic` (required): the N-prefixed topic ID of the contract\n\
+- `semantic_text` (required): a concise description of what the documentation \
+says this contract represents (e.g., \"the canonical staking pool\", \"a \
+fee-collecting wrapper around the underlying market\")\n\
+- `documentation_topics` (required): array of D-prefixed topic IDs for the \
+specific paragraphs, lists, or subsections in the documentation that this \
+semantic was derived from\n\n\
+Rules:\n\
+- Derive semantics from the documentation section, not from member names.\n\
+- If the documentation does not describe a contract's role, omit it from \
+the output — do not invent a semantic from the member list.\n\
+- The semantic text should be project-specific meaning, not a generic \
+type description. \"a Solidity contract\" is not a semantic — \"the \
+canonical staking pool that mints reward shares\" is.\n\
+- Preserve the developer's specific terminology and phrasing nuances.\n\
+- Each `documentation_topics` entry must be a D-prefixed ID that appears \
+in the provided documentation section.\n\
+- If the documentation does not describe any of the provided contracts, \
+return `{\"links\": []}`.\n\
+- Every link object MUST include all three fields.\n\n";
+
+/// Step 4 — generate semantics for *member-level declarations* (functions
+/// and modifiers + their parameters and return values, OR non-function
+/// component-scoped declarations like state variables, events, errors,
+/// and struct/enum definitions). The "Source code" payload is the member
+/// signature(s) or contract-level signature snippets. Step 2's contract
+/// semantics are injected as prior-context.
+const LINK_MEMBER_SIGNATURES_PROMPT: &str = "Below is a documentation section from a smart contract \
+project, followed by previously-derived semantics for the containing \
+contracts (for context), followed by a list of code declarations that need \
+semantic meaning assigned, followed by the source code for reference.\n\n\
 The declarations may come from multiple functions, modifiers, or \
-contract-level definitions. Each declaration has a topic ID and name.\n\n\
+contract-level definitions. Each declaration has a topic ID and name. Use \
+the contract semantics to interpret what each member represents *within \
+that contract's role*.\n\n\
 Your task is to assign **semantic meaning** to each declaration based on \
 what the **documentation says** it represents in the project. The semantic \
 should reflect the developer's documented intent, NOT what the code does \
 with the declaration.\n\n\
 The source code is provided ONLY to help you identify which declarations \
-the documentation is describing — for example, to confirm that `pID` in the \
-documentation refers to the `participationId` parameter. Do NOT derive \
-meaning from how the code uses a variable. If the documentation says a \
-variable is a \"proportional reward factor\" but the code uses it as a \
-divisor, the semantic should still be \"proportional reward factor\" — that \
-mismatch is valuable information for auditors.\n\n\
-Return a JSON object with a `links` key whose value is an array of objects. \
-For each declaration with documented semantics, include one object with ALL \
-of these fields (all are required):\n\
+the documentation is describing — for example, to confirm that `pID` in \
+the documentation refers to the `participationId` parameter. Do NOT \
+derive meaning from how the code uses a variable. If the documentation \
+says a variable is a \"proportional reward factor\" but the code uses it \
+as a divisor, the semantic should still be \"proportional reward factor\" \
+— that mismatch is valuable information for auditors.\n\n\
+Return a JSON object with a `links` key whose value is an array of \
+objects. For each declaration with documented semantics, include one \
+object with ALL of these fields (all are required):\n\
 - `declaration_topic` (required): the N-prefixed topic ID of the declaration\n\
-- `semantic_text` (required): a concise description of what the documentation says this \
-declaration represents in project context (e.g., \"proportional reward \
-multiplier\", \"user's staked token balance\", \"reward distribution mechanism\")\n\
+- `semantic_text` (required): a concise description of what the documentation \
+says this declaration represents in project context (e.g., \"proportional \
+reward multiplier\", \"user's staked token balance\", \"reward distribution \
+mechanism\")\n\
 - `documentation_topics` (required): array of D-prefixed topic IDs for the \
 specific paragraphs, lists, or subsections in the documentation that this \
-semantic was derived from. Include all child elements that contributed to \
-the semantic meaning.\n\n\
+semantic was derived from\n\n\
 Rules:\n\
 - Derive semantics from the documentation section, not from code behavior.\n\
 - If the documentation does not describe a declaration's meaning, omit it \
-from the output — do not invent a semantic from the code.\n\
+from the output.\n\
 - The semantic text should be project-specific meaning, not a generic type \
-description. \"uint256 balance\" is not a semantic — \"user's total staked \
-balance\" is.\n\
-- Preserve the developer's specific terminology and phrasing nuances. \
-Subtle differences in how the documentation describes something often \
-reflect important design distinctions.\n\
+description.\n\
+- Preserve the developer's specific terminology and phrasing nuances.\n\
 - Functions and modifiers can receive semantics too — their semantic is \
 what they represent (e.g., \"reward distribution mechanism\", \"access \
 control check for admin role\").\n\
-- Each `documentation_topics` entry must be a D-prefixed ID that appears in \
-the provided documentation section.\n\
+- Each `documentation_topics` entry must be a D-prefixed ID that appears \
+in the provided documentation section.\n\
 - If the documentation does not describe any of the provided declarations, \
 return `{\"links\": []}`.\n\
 - Every link object MUST include all three fields.\n\n";
 
-/// A single semantic link from LLM pass 3.
+/// Step 5 — generate semantics for *body locals* declared inside member
+/// bodies. Step 2 contract semantics and step 4 member/signature semantics
+/// are both injected as prior-context, so a statement like
+/// `let ret = Contract.transfer(input, to)` can be interpreted with
+/// `Contract`, `transfer`, `input`, and `to` already meaningful.
+const LINK_MEMBER_BODIES_PROMPT: &str = "Below is a documentation section from a smart contract \
+project, followed by previously-derived semantics for the containing \
+contracts and their members (for context), followed by a list of body-local \
+declarations that need semantic meaning assigned, followed by the full \
+member source code for reference.\n\n\
+The declarations are locals declared inside function/modifier bodies. Use \
+the contract and member semantics already in context to interpret each \
+local in light of the values flowing into it. For example, in a body \
+statement like `let ret = Contract.transfer(input, to)`, knowing what \
+`Contract`, `transfer`, `input`, and `to` already represent lets you give \
+`ret` a meaningful semantic.\n\n\
+Your task is to assign **semantic meaning** to each local based on what \
+the **documentation says** the surrounding behavior represents. The \
+semantic should reflect the developer's documented intent for the value \
+the local holds, NOT a mechanical description of the expression that \
+produced it.\n\n\
+The source code is provided ONLY to help you identify which locals the \
+documentation is describing and to see how they relate to the already-known \
+contract and member semantics. Do NOT derive meaning from raw operator use.\n\n\
+Return a JSON object with a `links` key whose value is an array of objects. \
+For each local with documented semantics, include one object with ALL of \
+these fields (all are required):\n\
+- `declaration_topic` (required): the N-prefixed topic ID of the local\n\
+- `semantic_text` (required): a concise description of what the documentation \
+says this local represents in project context\n\
+- `documentation_topics` (required): array of D-prefixed topic IDs for the \
+specific paragraphs, lists, or subsections in the documentation that this \
+semantic was derived from\n\n\
+Rules:\n\
+- Derive semantics from the documentation section in light of the prior \
+contract/member semantics, not from raw code mechanics.\n\
+- If the documentation does not describe a local's meaning, omit it from \
+the output.\n\
+- The semantic text should be project-specific meaning, not a generic type \
+description.\n\
+- Preserve the developer's specific terminology and phrasing nuances.\n\
+- Each `documentation_topics` entry must be a D-prefixed ID that appears \
+in the provided documentation section.\n\
+- If the documentation does not describe any of the provided locals, \
+return `{\"links\": []}`.\n\
+- Every link object MUST include all three fields.\n\n";
+
+/// A single semantic link returned by any of the three synthesis steps.
 #[derive(Deserialize)]
 struct LLMSemanticLink {
   declaration_topic: String,
@@ -456,13 +553,13 @@ struct LLMSemanticLink {
 }
 
 #[derive(Deserialize)]
-struct LLMPass3Response {
+struct LLMSemanticLinkResponse {
   links: Vec<LLMSemanticLink>,
 }
 
-static SEMANTIC_PASS3_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| {
+static SEMANTIC_LINK_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| {
   JsonSchema {
-    name: "semantic_link_pass3",
+    name: "semantic_link",
     schema: json!({
       "type": "object",
       "additionalProperties": false,
@@ -490,44 +587,121 @@ static SEMANTIC_PASS3_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| {
   }
 });
 
-/// Result of LLM pass 3: semantic links for a (section, member) pair.
-pub struct SemanticLinkPass3Result {
+/// Result of one synthesis-step LLM call: the parsed semantic links.
+pub struct SemanticLinkResult {
   pub links: Vec<domain::SemanticLink>,
 }
 
-/// LLM pass 3: Assign semantic meanings to declarations based on documentation.
-/// Accepts batched declarations from multiple members. Source code is provided
-/// only for disambiguation — semantics must reflect documented intent.
+/// Which synthesis-step batch is being run. Picks the prompt template, the
+/// call label prefix, and the human-readable name used in log / warning
+/// messages.
 ///
-/// `fallback_doc_topic` is used when the LLM omits `documentation_topic` from
-/// a result object. `match_source` is the provenance tag stamped on every
-/// returned link — chosen by the caller based on which workflow variant
-/// produced the (section, member) pair this Pass 3 call is synthesizing.
-pub async fn semantic_link_pass3(
+/// Step 4 has two batch variants per section — `MemberSignaturesFunctions`
+/// (function/modifier topics + their params/returns) and
+/// `MemberSignaturesContractLevel` (non-function component-scoped
+/// declarations). They share the same prompt and JSON schema, but use
+/// distinct labels so log lines and saved-prompt files don't collide
+/// between the two batches per section.
+#[derive(Debug, Clone, Copy)]
+pub enum SemanticLinkStep {
+  /// Step 2 — semantics for contract entities.
+  Contracts,
+  /// Step 4(a) — semantics for function/modifier members and their
+  /// parameters/return values.
+  MemberSignaturesFunctions,
+  /// Step 4(b) — semantics for non-function component-scoped declarations
+  /// (state vars, events, errors, struct/enum defs, struct fields, enum
+  /// members).
+  MemberSignaturesContractLevel,
+  /// Step 5 — semantics for body locals inside member bodies.
+  MemberBodies,
+}
+
+impl SemanticLinkStep {
+  fn prompt_prefix(self) -> &'static str {
+    match self {
+      SemanticLinkStep::Contracts => LINK_CONTRACTS_PROMPT,
+      SemanticLinkStep::MemberSignaturesFunctions
+      | SemanticLinkStep::MemberSignaturesContractLevel => {
+        LINK_MEMBER_SIGNATURES_PROMPT
+      }
+      SemanticLinkStep::MemberBodies => LINK_MEMBER_BODIES_PROMPT,
+    }
+  }
+
+  fn label(self) -> &'static str {
+    match self {
+      SemanticLinkStep::Contracts => "step2_contracts",
+      SemanticLinkStep::MemberSignaturesFunctions => "step4a_member_signatures",
+      SemanticLinkStep::MemberSignaturesContractLevel => {
+        "step4b_contract_level"
+      }
+      SemanticLinkStep::MemberBodies => "step5_member_bodies",
+    }
+  }
+
+  fn diagnostic_name(self) -> &'static str {
+    match self {
+      SemanticLinkStep::Contracts => "link_contracts",
+      SemanticLinkStep::MemberSignaturesFunctions => {
+        "link_member_signatures (functions)"
+      }
+      SemanticLinkStep::MemberSignaturesContractLevel => {
+        "link_member_signatures (contract-level)"
+      }
+      SemanticLinkStep::MemberBodies => "link_member_bodies",
+    }
+  }
+}
+
+/// Run one synthesis-step LLM call. Steps 2, 4, and 5 share the same JSON
+/// schema and parsing path; only the prompt template and the
+/// `prior_semantics_block` (empty for step 2) differ.
+///
+/// `fallback_doc_topic` is used when the LLM omits `documentation_topics`
+/// from a returned link. `match_source` is the provenance tag stamped on
+/// every returned link.
+#[allow(clippy::too_many_arguments)]
+pub async fn link_step(
+  step: SemanticLinkStep,
   section_topic: &topic::Topic,
   section_text: &str,
+  prior_semantics_block: &str,
   declarations_json: &str,
   source_code: &str,
   fallback_doc_topic: &topic::Topic,
   match_source: domain::MatchSource,
-) -> Result<SemanticLinkPass3Result, TaskError> {
+) -> Result<SemanticLinkResult, TaskError> {
+  let prior_block = if prior_semantics_block.trim().is_empty() {
+    String::new()
+  } else {
+    format!(
+      "Previously derived semantics (for context):\n{}\n\n",
+      prior_semantics_block
+    )
+  };
+
   let prompt = format!(
-    "{}Documentation section:\n{}\n\nDeclarations needing semantics:\n{}\n\nSource code (for disambiguation only):\n{}",
-    SEMANTIC_LINK_PASS3_PROMPT, section_text, declarations_json, source_code
+    "{}Documentation section:\n{}\n\n{}Declarations needing semantics:\n{}\n\nSource code (for disambiguation only):\n{}",
+    step.prompt_prefix(),
+    section_text,
+    prior_block,
+    declarations_json,
+    source_code
   );
 
-  let label = format!("semantic_pass3_{}", section_topic.id());
+  let label = format!("{}_{}", step.label(), section_topic.id());
   let response = router::chat_completion(
     TaskSize::Large,
     router::SYSTEM_MESSAGE_DOCUMENTATION,
     &prompt,
     Some(&label),
-    Some(&SEMANTIC_PASS3_SCHEMA),
+    Some(&SEMANTIC_LINK_SCHEMA),
   )
   .await?;
 
-  let wrapper: LLMPass3Response =
-    router::parse_response(&response, "semantic link pass3", &prompt)?;
+  let wrapper: LLMSemanticLinkResponse =
+    router::parse_response(&response, step.diagnostic_name(), &prompt)?;
 
   let links = wrapper
     .links
@@ -537,7 +711,8 @@ pub async fn semantic_link_pass3(
         Ok(t) => t,
         Err(e) => {
           tracing::warn!(
-            "semantic_link_pass3 dropping link with malformed declaration_topic '{}': {}",
+            "{} dropping link with malformed declaration_topic '{}': {}",
+            step.diagnostic_name(),
             l.declaration_topic,
             e
           );
@@ -552,7 +727,8 @@ pub async fn semantic_link_pass3(
           Ok(t) => Some(t),
           Err(e) => {
             tracing::warn!(
-              "semantic_link_pass3 dropping malformed documentation_topic '{}': {}",
+              "{} dropping malformed documentation_topic '{}': {}",
+              step.diagnostic_name(),
               d,
               e
             );
@@ -574,7 +750,7 @@ pub async fn semantic_link_pass3(
     })
     .collect();
 
-  Ok(SemanticLinkPass3Result { links })
+  Ok(SemanticLinkResult { links })
 }
 
 /// Collect all documentation section topics that have content (TitledTopic entries).

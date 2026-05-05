@@ -1,5 +1,5 @@
-//! BM25 expansion for the semantic-linking pipeline (Pass 1 contract
-//! discovery + Pass 2 member expansion).
+//! BM25 expansion for the semantic-linking pipeline (step 1 contract
+//! discovery + step 3 member expansion).
 //!
 //! See `docs/specs/semantic-linking.md` for the full design. This module
 //! implements:
@@ -27,7 +27,7 @@ pub use tokenize::{tokenize_code_text, tokenize_prose_text};
 
 use crate::domain::{AuditData, topic};
 
-/// Expand the mechanical Pass 2 result with BM25-ranked members from a
+/// Expand the mechanical step-3 result with BM25-ranked members from a
 /// single contract. Returns each kept member with its BM25 score so callers
 /// can surface provenance.
 ///
@@ -64,12 +64,12 @@ pub fn expand_members(
 /// Tunable constants for the BM25 cutoffs. Calibrated empirically against
 /// the comparison harness; see `docs/specs/semantic-linking.md`.
 pub mod constants {
-  /// Pass 2 — drop candidates below this absolute score floor.
+  /// Step 3 — drop candidates below this absolute score floor.
   pub const MIN_SCORE: f32 = 1.0;
-  /// Pass 2 — keep at most this many members per (section, contract).
+  /// Step 3 — keep at most this many members per (section, contract).
   pub const TOP_K: usize = 10;
-  /// Pass 1 — top-K contracts per section to feed into Pass 2.
-  pub const PASS1_TOP_K: usize = 10;
+  /// Step 1 — top-K contracts per section to feed into step 3.
+  pub const STEP1_TOP_K: usize = 10;
 }
 
 /// A single BM25-scored candidate.
@@ -93,7 +93,7 @@ pub fn cutoff<T>(scored_desc: &[ScoredCandidate<T>]) -> Vec<usize> {
 }
 
 // ---------------------------------------------------------------------------
-// BM25 Pass 1: contract discovery
+// BM25 step 1: contract discovery
 // ---------------------------------------------------------------------------
 
 /// Score every contract's summary document against the section text.
@@ -129,7 +129,7 @@ pub fn rank_contracts(
     .collect()
 }
 
-/// Top-K contract topics from BM25 Pass 1 — the production cutoff used by
+/// Top-K contract topics from BM25 step 1 — the production cutoff used by
 /// the main pipeline.
 pub fn discover_top_k_contracts(
   section_text: &str,
@@ -139,7 +139,7 @@ pub fn discover_top_k_contracts(
   rank_contracts(section_text, audit_data, variant)
     .into_iter()
     .filter(|(_, score)| *score >= constants::MIN_SCORE)
-    .take(constants::PASS1_TOP_K)
+    .take(constants::STEP1_TOP_K)
     .collect()
 }
 

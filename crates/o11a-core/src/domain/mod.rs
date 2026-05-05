@@ -265,9 +265,11 @@ impl ThreatSeverity {
   }
 }
 
-/// An intermediate value carrying a semantic from `semantic_link_pass3`
-/// through the condensation step into a `FunctionalSemanticTopic`. Field
-/// names align with `FunctionalSemanticTopic` for direct mapping.
+/// An intermediate value carrying a semantic from one of the synthesis
+/// steps (`task::link_contracts`, `task::link_member_signatures`,
+/// `task::link_member_bodies`) through the per-step condensation into a
+/// `FunctionalSemanticTopic`. Field names align with
+/// `FunctionalSemanticTopic` for direct mapping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticLink {
   /// D-prefixed documentation topics that contributed to this semantic
@@ -293,8 +295,6 @@ pub enum MatchSource {
   Mechanical,
   /// The match came from BM25 expansion within an anchored contract.
   Bm25,
-  /// The match came from an LLM Pass 1 or Pass 2 call.
-  Llm,
 }
 
 impl MatchSource {
@@ -302,18 +302,16 @@ impl MatchSource {
     match self {
       MatchSource::Mechanical => "mechanical",
       MatchSource::Bm25 => "bm25",
-      MatchSource::Llm => "llm",
     }
   }
 
   /// Higher confidence wins when condensation merges links from different
-  /// sources. Order: mechanical > bm25 > llm.
+  /// sources. Order: mechanical > bm25.
   pub fn merge(self, other: MatchSource) -> MatchSource {
     use MatchSource::*;
     match (self, other) {
       (Mechanical, _) | (_, Mechanical) => Mechanical,
-      (Bm25, _) | (_, Bm25) => Bm25,
-      _ => Llm,
+      _ => Bm25,
     }
   }
 }

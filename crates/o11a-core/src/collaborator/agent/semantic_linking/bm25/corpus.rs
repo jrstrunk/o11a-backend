@@ -14,7 +14,7 @@ use crate::domain::{
   self, AuditData, NamedTopicKind, Scope, TopicMetadata, topic,
 };
 
-/// Which textual content goes into a contract's BM25 Pass 1 summary
+/// Which textual content goes into a contract's BM25 step-1 summary
 /// document. Both variants include the contract name + NatSpec + each
 /// indexable member's name + NatSpec — they differ only in whether they
 /// also include member source code, and if so, whether function bodies
@@ -146,12 +146,12 @@ fn belongs_to_contract(
 }
 
 // ---------------------------------------------------------------------------
-// Contract-summary corpus (BM25 Pass 1 input)
+// Contract-summary corpus (BM25 step 1 input)
 // ---------------------------------------------------------------------------
 
-/// One contract's BM25 document for Pass 1 contract discovery: contract name
-/// plus the names + NatSpec of all its indexable declarations, tokenized as
-/// one bag-of-words document.
+/// One contract's BM25 document for step-1 contract discovery: contract
+/// name plus the names + NatSpec of all its indexable declarations,
+/// tokenized as one bag-of-words document.
 pub struct ContractDoc {
   pub contract_topic: topic::Topic,
   pub tokens: Vec<String>,
@@ -160,7 +160,7 @@ pub struct ContractDoc {
 /// Build a BM25 corpus where each contract is one document. The document
 /// text is the contract name + its NatSpec + every indexable declaration's
 /// name + NatSpec, plus per-variant additions (signature text or full
-/// source). Used by BM25 Pass 1 to discover relevant contracts.
+/// source). Used by BM25 step 1 to discover relevant contracts.
 pub fn build_contract_summary_corpus(
   audit_data: &AuditData,
   variant: SummaryCorpusVariant,

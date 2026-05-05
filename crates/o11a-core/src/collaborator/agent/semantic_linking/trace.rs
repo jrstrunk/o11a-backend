@@ -1,9 +1,10 @@
 //! Mechanical name-resolution trace mode (`--semantic-linking-mechanical-trace`).
 //!
-//! Runs only Pass 1 (`mechanical_semantic_links` → contract anchors) and
-//! Pass 2 (`mechanical_section_to_members` → member candidates) against the
-//! parsed audit. Writes a single pretty-printed JSON file (an array of
-//! per-section records) describing every section's:
+//! Runs only the mechanical halves of step 1 (`mechanical_semantic_links`
+//! → contract anchors) and step 3 (`mechanical_section_to_members` →
+//! member candidates) against the parsed audit. Writes a single
+//! pretty-printed JSON file (an array of per-section records) describing
+//! every section's:
 //!
 //!   - Rendered text and title
 //!   - Every inline-code reference found (resolved or not) — so a reviewer

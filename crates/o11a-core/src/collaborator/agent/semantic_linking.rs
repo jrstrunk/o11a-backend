@@ -5,16 +5,25 @@
 //! pipeline has a single workflow, applied uniformly to every documentation
 //! section regardless of `is_technical`:
 //!
-//!   1. **Mechanical resolution** — anchor-by-name + graph-driven Phase B+
-//!      contract/member resolution (`context::mechanical_semantic_links`).
-//!   2. **BM25 contract discovery (Pass 1)** — score every in-scope contract
-//!      against the section text; take the top-K above `MIN_SCORE`.
-//!   3. **BM25 member expansion (Pass 2)** — for each anchored contract,
-//!      score its indexable members; keep the top-K above `MIN_SCORE`.
-//!   4. **LLM semantic synthesis (Pass 3)** — batched per (section,
-//!      doc_topic) plus one contract-scoped batch per section; LLM
-//!      generates per-declaration semantics and acts as the final
-//!      precision filter.
+//!   1. **Step 1 — associate document sections to contracts.** Mechanical
+//!      anchor resolution (`context::mechanical_semantic_links`) plus BM25
+//!      contract discovery (top-K above `MIN_SCORE`).
+//!   2. **Step 2 — add semantic links to contracts.** LLM synthesis of one
+//!      semantic per contract entity; condensed in place to one link per
+//!      contract.
+//!   3. **Step 3 — associate document sections to contract members.**
+//!      Mechanical seed (members reached by anchored declarations and by
+//!      state-variable mutation fanout) plus BM25 member expansion within
+//!      each anchored contract.
+//!   4. **Step 4 — add semantic links to contract members.** LLM
+//!      synthesis: one batch per section for function/modifier signatures
+//!      (with their params/returns), one for non-function component-scoped
+//!      declarations (state vars, events, errors, struct/enum defs +
+//!      fields/members). Step 2 contract semantics are injected as
+//!      context. Condensed in place to one link per declaration.
+//!   5. **Step 5 — add semantic links to contract member bodies.** LLM
+//!      synthesis of body locals (`Scope::ContainingBlock`); step 2 +
+//!      step 4 semantics are injected as context. Condensed in place.
 //!
 //! K is a build-time constant (`bm25::TOP_K = 10`). The cutoff calibration
 //! that arrived at K=10 is documented in the spec; rolling new defaults
@@ -32,11 +41,12 @@ use crate::domain::AuditData;
 /// production workflow is fixed (no mode / no algorithm flag).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SemanticLinkingConfig {
-  /// When set, run only mechanical Pass 1 + Pass 2 (no LLM, no Pass 3),
-  /// write a detailed JSONL trace of every section's resolved/unresolved
-  /// inline-code references and derived contract/member candidates to
-  /// `<output_dir>/mechanical-trace.jsonl`, then exit. Used to verify the
-  /// deterministic name resolver in isolation.
+  /// When set, run only the mechanical halves of step 1 + step 3 (no LLM,
+  /// no synthesis steps), write a detailed JSONL trace of every section's
+  /// resolved/unresolved inline-code references and derived
+  /// contract/member candidates to `<output_dir>/mechanical-trace.jsonl`,
+  /// then exit. Used to verify the deterministic name resolver in
+  /// isolation.
   pub mechanical_trace: bool,
 }
 
@@ -153,7 +163,7 @@ pub fn section_is_technical(
 pub mod bm25;
 
 // ---------------------------------------------------------------------------
-// Mechanical-only Pass 1 + Pass 2 trace mode (--semantic-linking-mechanical-trace)
+// Mechanical-only step 1 + step 3 trace mode (--semantic-linking-mechanical-trace)
 // ---------------------------------------------------------------------------
 
 pub mod trace;
