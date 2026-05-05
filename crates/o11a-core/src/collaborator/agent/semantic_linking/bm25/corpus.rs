@@ -240,15 +240,26 @@ pub fn build_contract_summary_corpus(
       // produce JSON; the tokenizer treats it as text so the JSON
       // wrappers contribute almost nothing once stop-words / common
       // tokens are pruned.
-      let extra = match variant {
-        SummaryCorpusVariant::Signatures => {
-          context::render_member_signature_for_semantics(mt, audit_data)
-        }
-        SummaryCorpusVariant::Body => {
-          context::render_member_source_for_semantics(mt, audit_data)
-        }
+      //
+      // The `Signatures` variant uses `topic::new_node_topic(&-1)` as the
+      // target_topic sentinel so `omit_function_and_modifier_bodies` actually
+      // applies. Setting `target_topic = *mt` would re-expand the body
+      // via the per-member override (see `ASTRenderContext::target_topic`).
+      let render_ctx = match variant {
+        SummaryCorpusVariant::Signatures => context::ASTRenderContext {
+          target_topic: topic::new_node_topic(&-1),
+          omit_function_and_modifier_bodies: true,
+          include_untrusted_comments: true,
+        },
+        SummaryCorpusVariant::Body => context::ASTRenderContext {
+          target_topic: *mt,
+          omit_function_and_modifier_bodies: false,
+          include_untrusted_comments: true,
+        },
       };
-      if let Some(s) = extra {
+      if let Some(s) =
+        context::render_member_for_agent(mt, &render_ctx, audit_data)
+      {
         text.push(' ');
         text.push_str(&s);
       }

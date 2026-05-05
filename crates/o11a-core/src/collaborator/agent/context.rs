@@ -374,22 +374,40 @@ fn annotation_kind_to_string(kind: &BlockAnnotationKind) -> &'static str {
 // AST Snippet Rendering
 // ============================================================================
 
-/// Controls which parts of the AST tree are expanded vs. stubbed.
-struct ASTRenderContext {
-  /// The topic the agent requested context for.
-  /// Used to decide whether to expand function bodies.
-  target_topic: topic::Topic,
-  /// When true, function/modifier bodies are omitted.
-  /// Set to true when converting ContractDefinition members.
-  omit_function_and_modifier_bodies: bool,
-  /// Whether source-derived (untrusted) comments — inline `//` dev comments
-  /// and NatSpec docstrings — should appear in the rendered output. Set to
-  /// `false` when the rendering feeds an agent task that must operate only on
-  /// trusted, pipeline-generated content (behavior extraction, where only
-  /// `functional_semantics` annotations are trusted). Set to `true` when the
-  /// developer's prose is useful context (semantic linking, topic views).
-  /// Auditor-authored `Info` comments are always included regardless.
-  include_untrusted_comments: bool,
+/// Controls how an agent task wants Solidity AST nodes rendered. The same
+/// underlying renderer (`render_solidity_ast_snippet`) is shared across
+/// every agent task — semantic linking, behavior extraction, contract-list
+/// rendering — and this context is the single knob that differentiates the
+/// variants. Mirrors the `RenderContext`-style pattern used by the
+/// web-backend's `topic_view::render_source_text`.
+pub struct ASTRenderContext {
+  /// "Keep this member's body expanded even when
+  /// `omit_function_and_modifier_bodies` is true." Useful when rendering a
+  /// whole contract tree where every other member should appear as a
+  /// signature stub but one specific member's body should be expanded
+  /// (e.g., topic views).
+  ///
+  /// **Sentinel for "no override":** when `omit_function_and_modifier_bodies`
+  /// should apply uniformly with no per-member exception, set
+  /// `target_topic` to `topic::new_node_topic(&-1)` (no real AST node has
+  /// negative `node_id`, so it never matches). Single-member render calls
+  /// that want pure signature behavior should use this sentinel —
+  /// otherwise `target_topic == member_topic` would re-expand the very
+  /// body the caller asked to strip.
+  pub target_topic: topic::Topic,
+  /// When true, function and modifier bodies are stripped. The
+  /// `target_topic` field above can override this on a per-member basis
+  /// during tree rendering.
+  pub omit_function_and_modifier_bodies: bool,
+  /// Whether source-derived (untrusted) comments — inline `//` dev
+  /// comments and NatSpec docstrings — should appear in the rendered
+  /// output. Set to `false` when the rendering feeds an agent task that
+  /// must operate only on trusted, pipeline-generated content (behavior
+  /// extraction, where only `functional_semantics` annotations are
+  /// trusted). Set to `true` when the developer's prose is useful context
+  /// (semantic linking, topic views). Auditor-authored `Info` comments
+  /// are always included regardless.
+  pub include_untrusted_comments: bool,
 }
 
 /// Render a type AST node to a plain-text string directly from its fields.
@@ -2554,23 +2572,6 @@ pub fn render_member_signature_declarations_for_semantics(
   serde_json::to_string(&declarations).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Step 4 (member-scoped batch) — render the signature source for each
-/// member (function/modifier body stripped). Used as the disambiguation
-/// payload alongside `render_member_signature_declarations_for_semantics`.
-pub fn render_member_signature_sources_for_semantics(
-  member_topics: &[topic::Topic],
-  audit_data: &AuditData,
-) -> String {
-  let mut parts = Vec::new();
-  for mt in member_topics {
-    if let Some(source) = render_member_signature_for_semantics(mt, audit_data)
-    {
-      parts.push(source);
-    }
-  }
-  parts.join("\n\n")
-}
-
 /// Step 4 (contract-scoped batch) — render non-function component-scoped
 /// declarations for the listed contracts. Includes state variables, events,
 /// errors, struct/enum definitions, struct fields, and enum members.
@@ -2612,25 +2613,6 @@ pub fn render_contract_level_declarations_for_semantics(
   serde_json::to_string(&declarations).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// Step 4 (contract-scoped batch) — render the non-function members of each
-/// contract as Solidity signatures (state-variable declarations, event
-/// signatures, struct/enum definitions). Pairs with
-/// `render_contract_level_declarations_for_semantics` as the disambiguation
-/// payload.
-pub fn render_contract_level_signatures_for_semantics(
-  contract_topics: &[topic::Topic],
-  audit_data: &AuditData,
-) -> String {
-  let mut parts = Vec::new();
-  for ct in contract_topics {
-    let sigs = render_contract_declaration_signatures(ct, audit_data);
-    if sigs != "[]" && !sigs.is_empty() {
-      parts.push(sigs);
-    }
-  }
-  parts.join("\n\n")
-}
-
 /// Step 5 — render the body-local declarations for each member. These are
 /// the items in `Scope::ContainingBlock` (locals declared inside the
 /// function/modifier body). Member signatures and parameters are *not*
@@ -2662,23 +2644,6 @@ pub fn render_member_body_local_declarations_for_semantics(
   }
 
   serde_json::to_string(&declarations).unwrap_or_else(|_| "[]".to_string())
-}
-
-/// Step 5 — render the full body source for each member (function/modifier
-/// body included). Pairs with
-/// `render_member_body_local_declarations_for_semantics` as the
-/// disambiguation payload.
-pub fn render_member_body_sources_for_semantics(
-  member_topics: &[topic::Topic],
-  audit_data: &AuditData,
-) -> String {
-  let mut parts = Vec::new();
-  for mt in member_topics {
-    if let Some(source) = render_member_source_for_semantics(mt, audit_data) {
-      parts.push(source);
-    }
-  }
-  parts.join("\n\n")
 }
 
 /// Render the prior-step semantic links relevant to the current synthesis
@@ -2866,48 +2831,23 @@ fn collect_natspec_text(
   out
 }
 
-/// Render a member's full source code as a JSON snippet for synthesis-step
-/// disambiguation context (currently used by step 5).
-pub fn render_member_source_for_semantics(
+/// Render a single member (function, modifier, event, error, state
+/// variable, struct, enum) as a JSON snippet, using `render_ctx` to
+/// control body inclusion and dev-comment visibility.
+///
+/// Returns `None` when no AST member with `member_topic`'s `node_id`
+/// exists. Used by every agent task that needs single-member source
+/// context — semantic-linking steps 4a and 5, the BM25 per-member corpus,
+/// etc.
+///
+/// **Caller note for signature-only rendering:** to actually strip
+/// function/modifier bodies, set `render_ctx.omit_function_and_modifier_bodies
+/// = true` AND `render_ctx.target_topic = topic::new_node_topic(&-1)`
+/// (the sentinel). Setting `target_topic = *member_topic` re-expands
+/// the body via the per-member override — see `ASTRenderContext::target_topic`.
+pub fn render_member_for_agent(
   member_topic: &topic::Topic,
-  audit_data: &AuditData,
-) -> Option<String> {
-  // Find the AST node for this member
-  for ast in audit_data.asts.values() {
-    let sol_ast = match ast {
-      domain::AST::Solidity(sol_ast) => sol_ast,
-      _ => continue,
-    };
-    for contract_node in &sol_ast.nodes {
-      let resolved_contract = contract_node.resolve(&audit_data.nodes);
-      if let ASTNode::ContractDefinition { .. } = resolved_contract {
-        for member_node in contract_members(resolved_contract) {
-          let resolved_member = member_node.resolve(&audit_data.nodes);
-          let node_topic = topic::new_node_topic(&resolved_member.node_id());
-          if node_topic == *member_topic {
-            let render_ctx = ASTRenderContext {
-              target_topic: *member_topic,
-              omit_function_and_modifier_bodies: false,
-              include_untrusted_comments: true,
-            };
-            let rendered = render_solidity_ast_snippet(
-              resolved_member,
-              &render_ctx,
-              audit_data,
-            );
-            return Some(serde_json::to_string(&rendered).unwrap_or_default());
-          }
-        }
-      }
-    }
-  }
-  None
-}
-
-/// Like `render_member_source_for_semantics` but with function/modifier
-/// bodies stripped — useful for BM25 corpora that want signatures only.
-pub fn render_member_signature_for_semantics(
-  member_topic: &topic::Topic,
+  render_ctx: &ASTRenderContext,
   audit_data: &AuditData,
 ) -> Option<String> {
   for ast in audit_data.asts.values() {
@@ -2922,14 +2862,9 @@ pub fn render_member_signature_for_semantics(
           let resolved_member = member_node.resolve(&audit_data.nodes);
           let node_topic = topic::new_node_topic(&resolved_member.node_id());
           if node_topic == *member_topic {
-            let render_ctx = ASTRenderContext {
-              target_topic: *member_topic,
-              omit_function_and_modifier_bodies: true,
-              include_untrusted_comments: true,
-            };
             let rendered = render_solidity_ast_snippet(
               resolved_member,
-              &render_ctx,
+              render_ctx,
               audit_data,
             );
             return Some(serde_json::to_string(&rendered).unwrap_or_default());
@@ -2941,12 +2876,18 @@ pub fn render_member_signature_for_semantics(
   None
 }
 
-/// Render contract-scoped declaration signatures as source context for the
-/// step 4 contract-scoped batch. Returns a compact JSON of state-variable
-/// declarations, event/error signatures, struct/enum definitions — i.e.,
-/// the non-function members of the contract.
-pub fn render_contract_declaration_signatures(
+/// Render a contract's non-function component-scoped members (state
+/// variables, events, errors, struct/enum definitions) as a JSON array
+/// snippet. Functions and modifiers are filtered out — those are rendered
+/// separately by `render_member_for_agent` per call.
+///
+/// Used by semantic-linking step 4b (the contract-scoped batch). Honors
+/// `render_ctx.include_untrusted_comments` so callers can opt in or out
+/// of NatSpec / inline-comment leakage; `omit_function_and_modifier_bodies`
+/// is irrelevant here since functions are filtered out anyway.
+pub fn render_contract_non_function_members_for_agent(
   contract_topic: &topic::Topic,
+  render_ctx: &ASTRenderContext,
   audit_data: &AuditData,
 ) -> String {
   for ast in audit_data.asts.values() {
@@ -2961,13 +2902,6 @@ pub fn render_contract_declaration_signatures(
         continue;
       }
       if let ASTNode::ContractDefinition { .. } = resolved {
-        let render_ctx = ASTRenderContext {
-          target_topic: *contract_topic,
-          omit_function_and_modifier_bodies: true,
-          include_untrusted_comments: true,
-        };
-        // Filter to non-function/modifier members (state vars, events, structs, etc.)
-        // Resolve each member before checking its type
         let snippets: Vec<serde_json::Value> = contract_members(resolved)
           .iter()
           .filter(|n| {
@@ -2978,7 +2912,7 @@ pub fn render_contract_declaration_signatures(
                 | ASTNode::ModifierDefinition { .. }
             )
           })
-          .map(|n| render_solidity_ast_snippet(n, &render_ctx, audit_data))
+          .map(|n| render_solidity_ast_snippet(n, render_ctx, audit_data))
           .collect();
         return serde_json::to_string(&snippets)
           .unwrap_or_else(|_| "[]".to_string());

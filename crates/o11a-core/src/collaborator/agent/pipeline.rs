@@ -816,11 +816,23 @@ pub async fn build_semantic_links(
         continue;
       }
 
-      let signatures_source =
-        context::render_member_signature_sources_for_semantics(
-          &member_topics,
-          audit_data,
-        );
+      // Step 4a wants pure signatures (bodies stripped) since step 5 will
+      // see the bodies. The sentinel target_topic ensures
+      // `omit_function_and_modifier_bodies` actually applies — using
+      // `*member_topic` as target would re-expand the body via the
+      // per-member override.
+      let signature_ctx = context::ASTRenderContext {
+        target_topic: topic::new_node_topic(&-1),
+        omit_function_and_modifier_bodies: true,
+        include_untrusted_comments: true,
+      };
+      let signatures_source: String = member_topics
+        .iter()
+        .filter_map(|mt| {
+          context::render_member_for_agent(mt, &signature_ctx, audit_data)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
 
       // Prior context: the section's matched contracts' semantics.
       let containing_contracts: Vec<topic::Topic> = section_contracts
@@ -886,11 +898,27 @@ pub async fn build_semantic_links(
       if declarations_json == "[]" {
         continue;
       }
-      let signatures_source =
-        context::render_contract_level_signatures_for_semantics(
-          &contract_topics,
-          audit_data,
-        );
+      // Step 4b renders contract-level non-function declarations only —
+      // `omit_function_and_modifier_bodies` is moot here (functions are
+      // filtered out anyway) but we still want NatSpec/inline comments
+      // visible for the LLM.
+      let contract_level_ctx = context::ASTRenderContext {
+        target_topic: topic::new_node_topic(&-1),
+        omit_function_and_modifier_bodies: true,
+        include_untrusted_comments: true,
+      };
+      let signatures_source: String = contract_topics
+        .iter()
+        .map(|ct| {
+          context::render_contract_non_function_members_for_agent(
+            ct,
+            &contract_level_ctx,
+            audit_data,
+          )
+        })
+        .filter(|s| s != "[]" && !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
       let prior_block = context::render_prior_semantics_block(
         &contract_topics,
         &all_links,
@@ -992,10 +1020,22 @@ pub async fn build_semantic_links(
         continue;
       }
 
-      let body_source = context::render_member_body_sources_for_semantics(
-        &member_topics,
-        audit_data,
-      );
+      // Step 5 needs full bodies — locals only make sense in their
+      // executing context. `target_topic = *mt` is fine here because
+      // `omit_function_and_modifier_bodies` is already false; the
+      // is_target override is moot when we're not stripping bodies.
+      let body_source: String = member_topics
+        .iter()
+        .filter_map(|mt| {
+          let body_ctx = context::ASTRenderContext {
+            target_topic: *mt,
+            omit_function_and_modifier_bodies: false,
+            include_untrusted_comments: true,
+          };
+          context::render_member_for_agent(mt, &body_ctx, audit_data)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
 
       // Prior context: every topic that lives inside any of the section's
       // matched contracts. This covers step 2's contract semantics, step
