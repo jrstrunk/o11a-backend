@@ -403,7 +403,7 @@ pub struct ASTRenderContext {
   /// comments and NatSpec docstrings — should appear in the rendered
   /// output. Set to `false` when the rendering feeds an agent task that
   /// must operate only on trusted, pipeline-generated content (behavior
-  /// extraction, where only `functional_semantics` annotations are
+  /// extraction, where only inline semantic/behavior annotations are
   /// trusted). Set to `true` when the developer's prose is useful context
   /// (semantic linking, topic views). Auditor-authored `Info` comments
   /// are always included regardless.
@@ -450,6 +450,81 @@ fn lookup_node_comments(
   lookup_topic_comments(&node_topic, audit_data, include_untrusted)
 }
 
+/// Look up functional semantics for a topic, returning (topic, description) pairs.
+fn lookup_topic_semantics(
+  node_topic: &topic::Topic,
+  audit_data: &AuditData,
+) -> Vec<serde_json::Value> {
+  let Some(sem_topics) = audit_data.declaration_semantics.get(node_topic) else {
+    return Vec::new();
+  };
+  sem_topics
+    .iter()
+    .filter_map(|sem_topic| {
+      if let Some(TopicMetadata::FunctionalSemanticTopic {
+        description,
+        topic: sem_id,
+        ..
+      }) = audit_data.topic_metadata.get(sem_topic)
+      {
+        Some(json!({
+          "topic": sem_id.id(),
+          "description": description,
+        }))
+      } else {
+        None
+      }
+    })
+    .collect()
+}
+
+/// Look up behaviors for a topic, returning (topic, description) pairs.
+/// Only member-level topics (functions/modifiers) will have behaviors.
+fn lookup_topic_behaviors(
+  node_topic: &topic::Topic,
+  audit_data: &AuditData,
+) -> Vec<serde_json::Value> {
+  let Some(beh_topics) = audit_data.member_behaviors.get(node_topic) else {
+    return Vec::new();
+  };
+  beh_topics
+    .iter()
+    .filter_map(|beh_topic| {
+      if let Some(TopicMetadata::BehaviorTopic {
+        topic: beh_id,
+        description,
+        ..
+      }) = audit_data.topic_metadata.get(beh_topic)
+      {
+        Some(json!({
+          "topic": beh_id.id(),
+          "description": description,
+        }))
+      } else {
+        None
+      }
+    })
+    .collect()
+}
+
+/// Convenience: look up semantics for a node by its node_id.
+fn lookup_node_semantics(
+  node_id: i32,
+  audit_data: &AuditData,
+) -> Vec<serde_json::Value> {
+  let node_topic = topic::new_node_topic(&node_id);
+  lookup_topic_semantics(&node_topic, audit_data)
+}
+
+/// Convenience: look up behaviors for a node by its node_id.
+fn lookup_node_behaviors(
+  node_id: i32,
+  audit_data: &AuditData,
+) -> Vec<serde_json::Value> {
+  let node_topic = topic::new_node_topic(&node_id);
+  lookup_topic_behaviors(&node_topic, audit_data)
+}
+
 fn lookup_doc_node_comments(
   node_id: i32,
   audit_data: &AuditData,
@@ -459,13 +534,22 @@ fn lookup_doc_node_comments(
   lookup_topic_comments(&doc_topic, audit_data, include_untrusted)
 }
 
-/// Build a JSON object for a node, attaching comments if present.
+/// Build a JSON object for a node, attaching comments, semantics, and
+/// behaviors if present.
 fn make_node_json(
   mut obj: serde_json::Value,
   comments: Vec<String>,
+  semantics: Vec<serde_json::Value>,
+  behaviors: Vec<serde_json::Value>,
 ) -> serde_json::Value {
   if !comments.is_empty() {
     obj["comments"] = json!(comments);
+  }
+  if !semantics.is_empty() {
+    obj["semantics"] = json!(semantics);
+  }
+  if !behaviors.is_empty() {
+    obj["behaviors"] = json!(behaviors);
   }
   obj
 }
@@ -486,6 +570,10 @@ fn render_solidity_ast_snippet(
       audit_data,
       render_ctx.include_untrusted_comments,
     );
+    // Semantics and behaviors belong to the referenced topic, not the
+    // stub itself.
+    let semantics = lookup_topic_semantics(topic, audit_data);
+    let behaviors = lookup_topic_behaviors(topic, audit_data);
     return make_node_json(
       json!({
         "type": "topic_ref",
@@ -493,6 +581,8 @@ fn render_solidity_ast_snippet(
         "name": name,
       }),
       comments,
+      semantics,
+      behaviors,
     );
   }
 
@@ -503,6 +593,8 @@ fn render_solidity_ast_snippet(
     audit_data,
     render_ctx.include_untrusted_comments,
   );
+  let semantics = lookup_node_semantics(node_id, audit_data);
+  let behaviors = lookup_node_behaviors(node_id, audit_data);
 
   // Helper closure for recursive conversion
   let recurse = |child: &ASTNode| -> serde_json::Value {
@@ -1347,7 +1439,7 @@ fn render_solidity_ast_snippet(
     }
   };
 
-  make_node_json(obj, comments)
+  make_node_json(obj, comments, semantics, behaviors)
 }
 
 // ============================================================================
@@ -1479,6 +1571,8 @@ pub fn render_documentation_ast_snippet(
     return make_node_json(
       json!({"type": "topic_ref", "id": topic.id(), "name": name}),
       comments,
+      Vec::new(),
+      Vec::new(),
     );
   }
 
@@ -1748,7 +1842,7 @@ pub fn render_documentation_ast_snippet(
     DocumentationNode::Stub { .. } => return json!(null),
   };
 
-  make_node_json(obj, comments)
+  make_node_json(obj, comments, Vec::new(), Vec::new())
 }
 
 // ============================================================================
@@ -2319,50 +2413,14 @@ pub fn render_contract_for_behavior_extraction(
   let contract_topic = topic::new_node_topic(&contract_node.node_id());
 
   // Render with bodies included. Behavior extraction runs against trusted,
-  // pipeline-generated content only — `functional_semantics` below is the
-  // trusted channel. The developer's own inline comments and NatSpec must
-  // not leak into this render.
+  // pipeline-generated content only — functional semantics are now rendered
+  // inline on each AST node. The developer's own inline comments and NatSpec
+  // must not leak into this render.
   let render_ctx = ASTRenderContext {
     target_topic: contract_topic,
     omit_function_and_modifier_bodies: false,
     include_untrusted_comments: false,
   };
-
-  // Build semantic annotations for declarations in this contract
-  let mut semantics: Vec<serde_json::Value> = Vec::new();
-  for (decl_topic, sem_topics) in &audit_data.declaration_semantics {
-    // Check if this declaration is scoped to this contract
-    let Some(metadata) = audit_data.topic_metadata.get(decl_topic) else {
-      continue;
-    };
-    let in_contract = match metadata.scope() {
-      domain::Scope::Component { component, .. } => {
-        *component == contract_topic
-      }
-      domain::Scope::Member { component, .. } => *component == contract_topic,
-      domain::Scope::ContainingBlock { component, .. } => {
-        *component == contract_topic
-      }
-      _ => false,
-    };
-    if !in_contract {
-      continue;
-    }
-    let name = metadata.name().unwrap_or("");
-    for sem_topic in sem_topics {
-      if let Some(domain::TopicMetadata::FunctionalSemanticTopic {
-        description,
-        ..
-      }) = audit_data.topic_metadata.get(sem_topic)
-      {
-        semantics.push(json!({
-          "declaration_topic": decl_topic.id(),
-          "name": name,
-          "semantic": description,
-        }));
-      }
-    }
-  }
 
   // Filter to functions and modifiers, excluding transitive members (e.g.,
   // interface functions with an in-scope implementation). Behaviors for
@@ -2391,7 +2449,6 @@ pub fn render_contract_for_behavior_extraction(
     "contract_topic": contract_topic.id(),
     "name": name,
     "members": member_snippets,
-    "functional_semantics": semantics,
   });
 
   Some(ContractForBehaviorExtraction {
@@ -2644,99 +2701,6 @@ pub fn render_member_body_local_declarations_for_semantics(
   }
 
   serde_json::to_string(&declarations).unwrap_or_else(|_| "[]".to_string())
-}
-
-/// Render the prior-step semantic links relevant to the current synthesis
-/// batch. `topics` is the set of declaration topics whose accumulated
-/// semantics should be surfaced (e.g., for step 4: the containing contracts
-/// of every member in the batch; for step 5: every topic that lives within
-/// any of those contracts — see `topics_within_contracts`). After per-step
-/// condensation, each topic has at most one link.
-///
-/// Lines are emitted in deterministic order (sorted by declaration topic)
-/// so prompt text is stable across runs. Returns an empty string when no
-/// relevant prior semantics exist, so callers can use `if !block.is_empty()`
-/// to decide whether to emit the "Previously derived semantics" prompt
-/// section.
-pub fn render_prior_semantics_block(
-  topics: &[topic::Topic],
-  links: &[domain::SemanticLink],
-  audit_data: &AuditData,
-) -> String {
-  use std::collections::HashSet;
-  let topic_set: HashSet<&topic::Topic> = topics.iter().collect();
-  let mut filtered: Vec<&domain::SemanticLink> = links
-    .iter()
-    .filter(|link| topic_set.contains(&link.declaration_topic))
-    .collect();
-  filtered.sort_by_key(|l| l.declaration_topic);
-  let mut lines: Vec<String> = Vec::with_capacity(filtered.len());
-  for link in filtered {
-    let name = audit_data
-      .topic_metadata
-      .get(&link.declaration_topic)
-      .and_then(|m| m.name())
-      .unwrap_or("");
-    lines.push(format!(
-      "- {} ({}): {}",
-      link.declaration_topic.id(),
-      name,
-      link.description
-    ));
-  }
-  lines.join("\n")
-}
-
-/// Returns every topic that "belongs to" any of the listed contracts —
-/// the contracts themselves plus everything in their `Component` /
-/// `Member` / `ContainingBlock` scope, including struct fields and enum
-/// members reached through one parent hop.
-///
-/// Used by step 5 to assemble the prior-semantics topic set: any topic
-/// step 2 or step 4 may have produced a semantic for that's reachable
-/// from a body local should appear in the step 5 prompt's prior-context
-/// block.
-pub fn topics_within_contracts(
-  contract_topics: &[topic::Topic],
-  audit_data: &AuditData,
-) -> Vec<topic::Topic> {
-  use std::collections::HashSet;
-  let contract_set: HashSet<&topic::Topic> = contract_topics.iter().collect();
-  let mut out: Vec<topic::Topic> = contract_topics.to_vec();
-  for (decl_topic, metadata) in &audit_data.topic_metadata {
-    if contract_set.contains(decl_topic) {
-      continue;
-    }
-    let component = match metadata.scope() {
-      domain::Scope::Component { component, .. }
-      | domain::Scope::Member { component, .. }
-      | domain::Scope::ContainingBlock { component, .. } => component,
-      _ => continue,
-    };
-    if contract_set.contains(component) {
-      out.push(*decl_topic);
-      continue;
-    }
-    // Struct field / enum member: walk one parent hop. The decl's scope
-    // points at the struct/enum; that struct/enum's scope points at the
-    // contract.
-    if let Some(parent_scope) = audit_data
-      .topic_metadata
-      .get(component)
-      .map(TopicMetadata::scope)
-    {
-      let grandparent = match parent_scope {
-        domain::Scope::Component { component, .. }
-        | domain::Scope::Member { component, .. }
-        | domain::Scope::ContainingBlock { component, .. } => component,
-        _ => continue,
-      };
-      if contract_set.contains(grandparent) {
-        out.push(*decl_topic);
-      }
-    }
-  }
-  out
 }
 
 fn is_public_member_kind(
@@ -3865,16 +3829,16 @@ mod tests {
       comments
     );
 
-    let semantics = value
-      .get("functional_semantics")
+    let semantics = members[0]
+      .get("semantics")
       .and_then(|s| s.as_array())
-      .expect("functional_semantics field missing");
+      .expect("semantics field missing on function member");
     assert!(
       semantics.iter().any(|s| s
-        .get("semantic")
+        .get("description")
         .and_then(|v| v.as_str())
         .is_some_and(|text| text.contains("admin role"))),
-      "expected trusted semantic annotation on function, got: {:?}",
+      "expected trusted semantic annotation on function member, got: {:?}",
       semantics
     );
   }
@@ -4564,8 +4528,8 @@ mod synthesis_render_tests {
   //! under test reads only `audit_data.topic_metadata`.
   use super::*;
   use crate::domain::{
-    self, ContractKind, FunctionKind, MatchSource, NamedTopicKind,
-    NamedTopicVisibility, Scope, SemanticLink, TopicMetadata, new_audit_data,
+    self, ContractKind, FunctionKind, NamedTopicKind,
+    NamedTopicVisibility, Scope, TopicMetadata, new_audit_data,
   };
   use std::collections::HashSet;
   use topic::Topic;
@@ -4783,124 +4747,5 @@ mod synthesis_render_tests {
     assert!(topics.contains(&balance.id().to_string()));
     assert!(topics.contains(&event_transfer.id().to_string()));
     assert!(!topics.contains(&transfer.id().to_string()));
-  }
-
-  #[test]
-  fn topics_within_contracts_walks_member_and_block_scope() {
-    let (audit, (vault, transfer, to, result, temp, balance, _, _)) =
-      build_vault_audit();
-    let topics = topics_within_contracts(&[vault], &audit);
-    let set: HashSet<Topic> = topics.into_iter().collect();
-    // Contract itself, plus everything scoped within it.
-    assert!(set.contains(&vault));
-    assert!(set.contains(&transfer));
-    assert!(set.contains(&to));
-    assert!(set.contains(&result));
-    assert!(set.contains(&temp));
-    assert!(set.contains(&balance));
-  }
-
-  #[test]
-  fn topics_within_contracts_walks_struct_field_one_hop() {
-    // Vault contract holds a struct Receipt { uint256 amount; }. The
-    // amount field's scope's component is the struct, whose component is
-    // the contract. The 1-hop walk should reach the contract.
-    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
-    let path = project_path("Vault.sol");
-    let vault = topic::new_node_topic(&100);
-    let receipt = topic::new_node_topic(&140);
-    let receipt_amount = topic::new_node_topic(&141);
-
-    insert_named(
-      &mut audit,
-      vault,
-      "Vault",
-      NamedTopicKind::Contract(ContractKind::Contract),
-      NamedTopicVisibility::Public,
-      Scope::Container {
-        container: path.clone(),
-      },
-    );
-    insert_named(
-      &mut audit,
-      receipt,
-      "Receipt",
-      NamedTopicKind::Struct,
-      NamedTopicVisibility::Public,
-      Scope::Component {
-        container: path.clone(),
-        component: vault,
-      },
-    );
-    insert_named(
-      &mut audit,
-      receipt_amount,
-      "amount",
-      NamedTopicKind::LocalVariable,
-      NamedTopicVisibility::Internal,
-      Scope::Component {
-        container: path.clone(),
-        component: receipt,
-      },
-    );
-
-    let topics = topics_within_contracts(&[vault], &audit);
-    let set: HashSet<Topic> = topics.into_iter().collect();
-    assert!(
-      set.contains(&receipt_amount),
-      "struct field should roll up to its enclosing contract"
-    );
-  }
-
-  #[test]
-  fn prior_semantics_block_filters_and_sorts_deterministically() {
-    let (audit, (vault, transfer, to, _result, _temp, _balance, _, _)) =
-      build_vault_audit();
-    // Build links in deliberately non-sorted order so we exercise sorting.
-    let links = vec![
-      SemanticLink {
-        documentation_topics: vec![],
-        declaration_topic: transfer,
-        description: "atomic balance transfer".to_string(),
-        match_source: MatchSource::Mechanical,
-      },
-      SemanticLink {
-        documentation_topics: vec![],
-        declaration_topic: vault,
-        description: "the canonical staking vault".to_string(),
-        match_source: MatchSource::Mechanical,
-      },
-      // `to` is in the audit but NOT requested in the topic filter — must
-      // be excluded.
-      SemanticLink {
-        documentation_topics: vec![],
-        declaration_topic: to,
-        description: "irrelevant".to_string(),
-        match_source: MatchSource::Bm25,
-      },
-    ];
-    let block =
-      render_prior_semantics_block(&[vault, transfer], &links, &audit);
-    let lines: Vec<&str> = block.lines().collect();
-    assert_eq!(lines.len(), 2, "the unrequested `to` link must be excluded");
-    // Deterministic sort by declaration topic — Topic ordering is by
-    // numeric_id, so vault (100) precedes transfer (110).
-    assert!(lines[0].contains("Vault"));
-    assert!(lines[0].contains("the canonical staking vault"));
-    assert!(lines[1].contains("transfer"));
-    assert!(lines[1].contains("atomic balance transfer"));
-  }
-
-  #[test]
-  fn prior_semantics_block_returns_empty_string_when_no_matches() {
-    let (audit, (vault, _, _, _, _, _, _, _)) = build_vault_audit();
-    let links = vec![SemanticLink {
-      documentation_topics: vec![],
-      declaration_topic: topic::new_node_topic(&999),
-      description: "orphan".to_string(),
-      match_source: MatchSource::Mechanical,
-    }];
-    let block = render_prior_semantics_block(&[vault], &links, &audit);
-    assert!(block.is_empty());
   }
 }

@@ -503,13 +503,14 @@ return `{\"links\": []}`.\n\
 /// `let ret = Contract.transfer(input, to)` can be interpreted with
 /// `Contract`, `transfer`, `input`, and `to` already meaningful.
 const LINK_MEMBER_BODIES_PROMPT: &str = "Below is a documentation section from a smart contract \
-project, followed by previously-derived semantics for the containing \
-contracts and their members (for context), followed by a list of body-local \
+project, followed by a list of body-local \
 declarations that need semantic meaning assigned, followed by the full \
-member source code for reference.\n\n\
+member source code for reference. Prior-derived semantics for contract and \
+member declarations appear inline on their respective AST nodes as \
+`semantics` fields.\n\n\
 The declarations are locals declared inside function/modifier bodies. Use \
-the contract and member semantics already in context to interpret each \
-local in light of the values flowing into it. For example, in a body \
+the contract and member semantics already visible in the source code to \
+interpret each local in light of the values flowing into it. For example, in a body \
 statement like `let ret = Contract.transfer(input, to)`, knowing what \
 `Contract`, `transfer`, `input`, and `to` already represent lets you give \
 `ret` a meaningful semantic.\n\n\
@@ -532,7 +533,7 @@ specific paragraphs, lists, or subsections in the documentation that this \
 semantic was derived from\n\n\
 Rules:\n\
 - Derive semantics from the documentation section in light of the prior \
-contract/member semantics, not from raw code mechanics.\n\
+contract/member semantics visible in the source code, not from raw code mechanics.\n\
 - If the documentation does not describe a local's meaning, omit it from \
 the output.\n\
 - The semantic text should be project-specific meaning, not a generic type \
@@ -655,8 +656,7 @@ impl SemanticLinkStep {
 }
 
 /// Run one synthesis-step LLM call. Steps 2, 4, and 5 share the same JSON
-/// schema and parsing path; only the prompt template and the
-/// `prior_semantics_block` (empty for step 2) differ.
+/// schema and parsing path; only the prompt template differs.
 ///
 /// `fallback_doc_topic` is used when the LLM omits `documentation_topics`
 /// from a returned link. `match_source` is the provenance tag stamped on
@@ -666,26 +666,15 @@ pub async fn link_step(
   step: SemanticLinkStep,
   section_topic: &topic::Topic,
   section_text: &str,
-  prior_semantics_block: &str,
   declarations_json: &str,
   source_code: &str,
   fallback_doc_topic: &topic::Topic,
   match_source: domain::MatchSource,
 ) -> Result<SemanticLinkResult, TaskError> {
-  let prior_block = if prior_semantics_block.trim().is_empty() {
-    String::new()
-  } else {
-    format!(
-      "Previously derived semantics (for context):\n{}\n\n",
-      prior_semantics_block
-    )
-  };
-
   let prompt = format!(
-    "{}Documentation section:\n{}\n\n{}Declarations needing semantics:\n{}\n\nSource code (for disambiguation only):\n{}",
+    "{}Documentation section:\n{}\n\nDeclarations needing semantics:\n{}\n\nSource code (for disambiguation only):\n{}",
     step.prompt_prefix(),
     section_text,
-    prior_block,
     declarations_json,
     source_code
   );

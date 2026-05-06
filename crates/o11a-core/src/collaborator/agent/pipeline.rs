@@ -639,7 +639,6 @@ pub async fn build_semantic_links(
         SemanticLinkStep::Contracts,
         &st,
         &section_text,
-        "",
         &declarations_json,
         &source_summaries,
         &fallback_dt,
@@ -834,17 +833,6 @@ pub async fn build_semantic_links(
         .collect::<Vec<_>>()
         .join("\n\n");
 
-      // Prior context: the section's matched contracts' semantics.
-      let containing_contracts: Vec<topic::Topic> = section_contracts
-        .get(section_topic)
-        .map(|pairs| pairs.iter().map(|(t, _)| *t).collect())
-        .unwrap_or_default();
-      let prior_block = context::render_prior_semantics_block(
-        &containing_contracts,
-        &all_links,
-        audit_data,
-      );
-
       let st = *section_topic;
       let fallback_dt = *section_topic;
       step4_handles.push(tokio::spawn(async move {
@@ -852,7 +840,6 @@ pub async fn build_semantic_links(
           SemanticLinkStep::MemberSignaturesFunctions,
           &st,
           &section_text,
-          &prior_block,
           &declarations_json,
           &signatures_source,
           &fallback_dt,
@@ -919,12 +906,6 @@ pub async fn build_semantic_links(
         .filter(|s| s != "[]" && !s.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
-      let prior_block = context::render_prior_semantics_block(
-        &contract_topics,
-        &all_links,
-        audit_data,
-      );
-
       let st = *section_topic;
       let fallback_dt = *section_topic;
       step4_handles.push(tokio::spawn(async move {
@@ -932,7 +913,6 @@ pub async fn build_semantic_links(
           SemanticLinkStep::MemberSignaturesContractLevel,
           &st,
           &section_text,
-          &prior_block,
           &declarations_json,
           &signatures_source,
           &fallback_dt,
@@ -1037,24 +1017,6 @@ pub async fn build_semantic_links(
         .collect::<Vec<_>>()
         .join("\n\n");
 
-      // Prior context: every topic that lives inside any of the section's
-      // matched contracts. This covers step 2's contract semantics, step
-      // 4's member-scoped output (functions/modifiers + params/returns),
-      // and step 4's contract-scoped output (state vars, events, errors,
-      // struct/enum defs + fields/members) — all of which a body local
-      // might reference.
-      let containing_contracts: Vec<topic::Topic> = section_contracts
-        .get(section_topic)
-        .map(|pairs| pairs.iter().map(|(t, _)| *t).collect())
-        .unwrap_or_default();
-      let context_topic_list =
-        context::topics_within_contracts(&containing_contracts, audit_data);
-      let prior_block = context::render_prior_semantics_block(
-        &context_topic_list,
-        &all_links,
-        audit_data,
-      );
-
       let st = *section_topic;
       let fallback_dt = *section_topic;
       step5_handles.push(tokio::spawn(async move {
@@ -1062,7 +1024,6 @@ pub async fn build_semantic_links(
           SemanticLinkStep::MemberBodies,
           &st,
           &section_text,
-          &prior_block,
           &declarations_json,
           &body_source,
           &fallback_dt,
