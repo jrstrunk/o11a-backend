@@ -33,3 +33,13 @@ Comments are also first-class citizens. They are parsed in the same way as docum
 ## AI Agent Collaboration
 
 The collaborator includes infrastructure for AI agent tasks. Agents act as additional auditors in the system: they review user comments, answer questions, add properties to topics, and check properties at convergences. They participate through the same topic and comment surfaces as human auditors, so their work is visible, reviewable, and correctable in place rather than hidden in a separate pipeline.
+
+## Property Approval
+
+Every property in the security model carries an approval state and a list of approval-comment topics. The collaborator module is responsible for surfacing properties for approval, recording approvals against them, and propagating state changes to dependent convergences and re-checks. See the o11a-core SPEC's "Property Approval" section for the design principles; this section describes the implementation surface.
+
+**Approval is bidirectional and comment-required.** Both human auditors and AI agents approve properties through the same affordance: posting a comment on the property whose role is "approval." The approval comment must contain a rationale — the system rejects empty approvals. This applies symmetrically: a human approving an AI-generated functional purpose must justify why the purpose holds, and an AI agent approving a human-authored invariant must articulate what evidence supports it. Both directions of approval rely on the same comment infrastructure that powers general discussion, so the approval workflow inherits the threading, mention, and topic-resolution features without duplicating them.
+
+**Corrections share the approval surface.** When a reviewer disagrees with a property, the same comment posting workflow records the correction and its reasoning — a correction is structurally an approval of a different property than the one originally generated. The original property is replaced and the comment thread captures both the prior reasoning (from the original generation or approval) and the correction's reasoning. This keeps disagreement diagnosable: any property with a correction in its history shows the chain that led there.
+
+**Agent participation in approval.** AI agents post approval comments through the same agent infrastructure that handles property generation. When an agent approves, the comment carries the agent's identity as author, distinguishing it from human approvals while keeping both visible on the same property. Approvals from agents and humans are independent signals; a property with both human and agent approval has the strongest verification, while a property with only one side's approval is flagged for the other side's review.

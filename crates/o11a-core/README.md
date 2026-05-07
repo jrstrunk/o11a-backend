@@ -54,6 +54,8 @@ The security model is the structured representation of what the documentation cl
 
 **Invariants live on source code subjects.** Invariants are the defensive properties the code must uphold to protect against threats. They are attached directly to the subjects where they are checked at convergences, with no indirection through abstract structures.
 
+**Every property requires approval, and approval requires a comment.** Properties in the security model — including features, requirements, behaviors, semantics, purpose, placement, conditions, threats, and invariants — transition from unverified to verified through explicit approval. Approval is bidirectional: human auditors approve AI-authored properties and AI agents approve human-authored properties. The required comment on each approval converts agreement from a frictionless click into a signal-producing act, capturing the reasoning that would otherwise stay implicit and counteracting the anchoring bias that lets well-written generated answers receive rubber-stamp acceptance. The collaborator module (in `crates/o11a-server`) implements the approval mechanism on the same comment surface used for general discussion.
+
 ### Initial Generation and On-the-Fly Generation
 
 The security model is seeded by an automated pipeline that runs against in-scope contracts: semantic linking, requirement extraction, behavior extraction, and feature synthesis via reconciliation. Out-of-scope code and library dependencies are assumed correct, so the full pipeline does not run against them, but they still receive lighter-weight semantics and behaviors so in-scope analysis has the context it needs.
