@@ -5,10 +5,10 @@ use serde_json::json;
 
 use crate::collaborator::parser as comment_parser;
 use crate::domain::{
-  self, AuditData, BlockAnnotationKind, CommentType, ContractKind,
+  self, AuditData, BlockAnnotationKind, CallKind, CommentType, ContractKind,
   ControlFlowStatementKind, FunctionKind, NamedTopicKind, NamedTopicVisibility,
-  Node, Reference, SourceChild, SourceContext, TitledTopicKind, TopicMetadata,
-  UnnamedTopicKind, VariableMutability, topic,
+  Node, Reference, SourceChild, SourceContext, SubjectPurity, TitledTopicKind,
+  TopicMetadata, UnnamedTopicKind, VariableMutability, topic,
 };
 
 use crate::documentation::ast::DocumentationNode;
@@ -340,7 +340,6 @@ fn render_condition_ast_snippet(
         target_topic: *target_topic,
         omit_function_and_modifier_bodies: false,
         include_untrusted_comments: true,
-        flag_non_pure_subjects: false,
       };
       Some(render_solidity_ast_snippet(node, &render_ctx, audit_data))
     }
@@ -413,12 +412,7 @@ pub struct ASTRenderContext {
   /// (semantic linking, topic views). Auditor-authored `Info` comments
   /// are always included regardless.
   pub include_untrusted_comments: bool,
-  /// When true, every rendered AST node whose topic resolves to a non-pure
-  /// subject gets `"is_non_pure": true` injected into its JSON. Used by the
-  /// functional purpose / placement rationale generation step (pipeline
-  /// step 5) so the LLM can see, inline in the AST, which subjects it
-  /// must produce output for. Defaults to false everywhere else.
-  pub flag_non_pure_subjects: bool,
+
 }
 
 /// Render a type AST node to a plain-text string directly from its fields.
@@ -566,19 +560,7 @@ fn make_node_json(
   obj
 }
 
-/// Returns true when the topic for `node_id` is an `UnnamedTopic` whose
-/// kind classifies as `NonPure` per `UnnamedTopicKind::purity()`. Used by
-/// the renderer when `ASTRenderContext::flag_non_pure_subjects` is set, to
-/// inject `is_non_pure: true` on each non-pure subject's JSON.
-fn node_is_non_pure(node_id: i32, audit_data: &AuditData) -> bool {
-  let topic = topic::new_node_topic(&node_id);
-  match audit_data.topic_metadata.get(&topic) {
-    Some(TopicMetadata::UnnamedTopic { kind, .. }) => {
-      matches!(kind.purity(), crate::domain::SubjectPurity::NonPure)
-    }
-    _ => false,
-  }
-}
+
 
 /// Render an ASTNode as a structured AST snippet (JSON value).
 fn render_solidity_ast_snippet(
@@ -1034,7 +1016,6 @@ fn render_solidity_ast_snippet(
         target_topic: render_ctx.target_topic,
         omit_function_and_modifier_bodies: true,
         include_untrusted_comments: render_ctx.include_untrusted_comments,
-        flag_non_pure_subjects: render_ctx.flag_non_pure_subjects,
       };
       let members: Vec<serde_json::Value> = nodes
         .iter()
@@ -1467,9 +1448,26 @@ fn render_solidity_ast_snippet(
   };
 
   let mut obj = make_node_json(obj, comments, semantics, behaviors);
-  if render_ctx.flag_non_pure_subjects && node_is_non_pure(node_id, audit_data)
+
+  // Emit purity on FunctionCall nodes (always) and on other non-pure nodes
+  // (VariableMutation, InlineAssembly, NewExpression). Pure nodes that are
+  // not function calls omit the field to avoid noise.
+  let topic = topic::new_node_topic(&node_id);
+  if let Some(TopicMetadata::UnnamedTopic { kind, .. }) =
+    audit_data.topic_metadata.get(&topic)
   {
-    obj["is_non_pure"] = json!(true);
+    match kind {
+      UnnamedTopicKind::FunctionCall(CallKind::Pure) => {
+        obj["purity"] = json!("pure");
+      }
+      UnnamedTopicKind::FunctionCall(CallKind::NonPure) => {
+        obj["purity"] = json!("non_pure");
+      }
+      other if matches!(other.purity(), SubjectPurity::NonPure) => {
+        obj["purity"] = json!("non_pure");
+      }
+      _ => {}
+    }
   }
   obj
 }
@@ -1991,7 +1989,6 @@ fn convert_reference(
         target_topic: *target_topic,
         omit_function_and_modifier_bodies: false,
         include_untrusted_comments: true,
-        flag_non_pure_subjects: false,
       };
       render_solidity_ast_snippet(solidity_node, &render_ctx, audit_data)
     }
@@ -2215,7 +2212,6 @@ pub fn build_agent_topic_context(
             target_topic: topic,
             omit_function_and_modifier_bodies: false,
             include_untrusted_comments: true,
-            flag_non_pure_subjects: false,
           };
           Some(render_solidity_ast_snippet(node, &render_ctx, audit_data))
         }
@@ -2369,7 +2365,6 @@ pub fn render_contract_members_for_semantic_linking(
     target_topic: topic::new_node_topic(&-1),
     omit_function_and_modifier_bodies: true,
     include_untrusted_comments: true,
-    flag_non_pure_subjects: false,
   };
 
   let nodes = match contract_node {
@@ -2437,7 +2432,6 @@ pub fn render_batch_for_behavior_extraction(
     target_topic: topic::new_node_topic(&-1),
     omit_function_and_modifier_bodies: false,
     include_untrusted_comments: false,
-    flag_non_pure_subjects: false,
   };
 
   let mut member_objs: Vec<serde_json::Value> = Vec::new();
@@ -2466,10 +2460,10 @@ pub fn render_batch_for_behavior_extraction(
 /// Render one batch member as a JSON object with its definition,
 /// scoped semantics, and called-function behaviors. Shared between the
 /// behavior-extraction batch render (step 3) and the functional-
-/// property batch render (step 5); the only difference is whether the
-/// renderer flags non-pure subjects (`flag_non_pure_subjects` on
-/// `render_ctx`). Returns `None` if the member's AST node cannot be
-/// resolved or the topic is not a function/modifier.
+/// property batch render (step 5). Non-pure purity is always emitted
+/// as a node property on FunctionCall and non-pure AST nodes. Returns
+/// `None` if the member's AST node cannot be resolved or the topic is
+/// not a function/modifier.
 fn render_member_for_batch(
   member: &topic::Topic,
   render_ctx: &ASTRenderContext,
@@ -2670,8 +2664,8 @@ fn batch_label(members: &[topic::Topic], audit_data: &AuditData) -> String {
 /// - `feature` per member: the linked feature's description and
 ///   requirements (or `null` when no feature link exists; callers should
 ///   filter out featureless members before rendering).
-/// - `is_non_pure: true` injected on each non-pure node in the rendered
-///   AST (via `flag_non_pure_subjects: true`).
+/// - `purity` field on each FunctionCall and non-pure AST node in the
+///   rendered AST (always emitted, not gated on a context flag).
 ///
 /// Returns `None` if no member has any non-pure subjects (no work to do
 /// for this batch).
@@ -2683,7 +2677,6 @@ pub fn render_batch_for_functional_properties(
     target_topic: topic::new_node_topic(&-1),
     omit_function_and_modifier_bodies: false,
     include_untrusted_comments: false,
-    flag_non_pure_subjects: true,
   };
 
   let mut member_objs: Vec<serde_json::Value> = Vec::new();
@@ -5135,10 +5128,10 @@ mod synthesis_render_tests {
 #[cfg(test)]
 mod functional_property_render_tests {
   //! Tests for the helpers used by `render_batch_for_functional_properties`
-  //! and the rest of pipeline step 5: `node_is_non_pure`,
-  //! `walk_for_non_pure`, `lookup_member_feature`, `first_semantic`. These
-  //! exercise behavior at the topic-metadata layer without requiring full
-  //! AST construction where possible.
+  //! and the rest of pipeline step 5: `walk_for_non_pure`,
+  //! `lookup_member_feature`, `first_semantic`. These exercise behavior at
+  //! the topic-metadata layer without requiring full AST construction where
+  //! possible.
   use super::*;
   use crate::domain::{
     self, CallKind, FunctionModProperties, NamedTopicKind,
@@ -5167,42 +5160,6 @@ mod functional_property_render_tests {
       },
     );
     t
-  }
-
-  #[test]
-  fn node_is_non_pure_recognizes_state_write() {
-    let mut audit = empty_audit();
-    let t =
-      add_unnamed_topic(&mut audit, 10, UnnamedTopicKind::VariableMutation);
-    assert!(node_is_non_pure(t.numeric_id(), &audit));
-  }
-
-  #[test]
-  fn node_is_non_pure_recognizes_non_pure_call() {
-    let mut audit = empty_audit();
-    let t = add_unnamed_topic(
-      &mut audit,
-      10,
-      UnnamedTopicKind::FunctionCall(CallKind::NonPure),
-    );
-    assert!(node_is_non_pure(t.numeric_id(), &audit));
-  }
-
-  #[test]
-  fn node_is_non_pure_rejects_pure_call() {
-    let mut audit = empty_audit();
-    let t = add_unnamed_topic(
-      &mut audit,
-      10,
-      UnnamedTopicKind::FunctionCall(CallKind::Pure),
-    );
-    assert!(!node_is_non_pure(t.numeric_id(), &audit));
-  }
-
-  #[test]
-  fn node_is_non_pure_rejects_unknown_node_id() {
-    let audit = empty_audit();
-    assert!(!node_is_non_pure(999, &audit));
   }
 
   #[test]
@@ -5675,7 +5632,7 @@ mod batch_render_integration_tests {
   //! Higher-level tests that drive `render_batch_for_behavior_extraction`
   //! and `render_batch_for_functional_properties` end-to-end. These check
   //! the JSON shapes that downstream LLM tasks actually consume — the
-  //! `non_pure_subjects` list, the `is_non_pure: true` injection, the
+  //! `non_pure_subjects` list, the `purity` field on non-pure nodes, the
   //! featureless-member skip, and the None-when-empty contract.
   use super::*;
   use crate::domain::{
@@ -5798,7 +5755,7 @@ mod batch_render_integration_tests {
     // must:
     //   - emit the state-write topic in the top-level non_pure_subjects
     //     list,
-    //   - inject `is_non_pure: true` on that node in the rendered AST,
+    //   - include `purity: "non_pure"` on that node in the rendered AST,
     //   - skip when the function has no feature link (we install one
     //     below to exercise the happy path).
     let mut audit = empty_audit();
@@ -5917,33 +5874,38 @@ mod batch_render_integration_tests {
       .expect("behaviors field present on member");
     assert_eq!(behaviors[0], "writes x");
 
-    // The is_non_pure flag must be set on the assignment node somewhere
-    // in the rendered definition AST.
+    // The purity field must be set to "non_pure" on the assignment node
+    // somewhere in the rendered definition AST.
     let definition = batch[0]
       .get("definition")
       .expect("definition field present");
     assert!(
-      contains_is_non_pure(definition, &assignment_topic.id()),
-      "expected `is_non_pure: true` on node with id {} in definition",
+      contains_purity(definition, &assignment_topic.id(), "non_pure"),
+      "expected `purity: \"non_pure\"` on node with id {} in definition",
       assignment_topic.id()
     );
   }
 
   /// Recursively search a JSON value for any object whose `id` matches
-  /// `target_id` and that has `is_non_pure: true`. Used to assert the
-  /// renderer's flag injection without depending on AST shape.
-  fn contains_is_non_pure(value: &serde_json::Value, target_id: &str) -> bool {
+  /// `target_id` and that has `purity: expected_purity`. Used to assert
+  /// the renderer's purity field without depending on AST shape.
+  fn contains_purity(
+    value: &serde_json::Value,
+    target_id: &str,
+    expected_purity: &str,
+  ) -> bool {
     match value {
       serde_json::Value::Object(map) => {
         if map.get("id").and_then(|v| v.as_str()) == Some(target_id)
-          && map.get("is_non_pure").and_then(|v| v.as_bool()) == Some(true)
+          && map.get("purity").and_then(|v| v.as_str())
+            == Some(expected_purity)
         {
           return true;
         }
-        map.values().any(|v| contains_is_non_pure(v, target_id))
+        map.values().any(|v| contains_purity(v, target_id, expected_purity))
       }
       serde_json::Value::Array(arr) => {
-        arr.iter().any(|v| contains_is_non_pure(v, target_id))
+        arr.iter().any(|v| contains_purity(v, target_id, expected_purity))
       }
       _ => false,
     }

@@ -1337,7 +1337,8 @@ pub async fn extract_behaviors_from_batch(
 const EXTRACT_FUNCTIONAL_PROPERTIES_PROMPT: &str = "Below are one or more in-scope \
 functions/modifiers from a smart contract project. For each function:\n\
 - `definition` is the function's signature and body as an AST. **Non-pure \
-subjects in the body are flagged with `is_non_pure: true`.**\n\
+subjects in the body have `purity: \"non_pure\"`. Function calls include
+`purity: \"pure\"` or `purity: \"non_pure\"`.**\n\
 - `feature` is the linked feature: name, description, and requirements.\n\
 - `behaviors` lists what the function as a whole does (already extracted).\n\
 - `semantics` maps each declaration topic to its name and project-specific \

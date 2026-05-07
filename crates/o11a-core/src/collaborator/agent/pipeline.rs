@@ -891,7 +891,6 @@ pub async fn build_semantic_links(
         target_topic: topic::new_node_topic(&-1),
         omit_function_and_modifier_bodies: true,
         include_untrusted_comments: true,
-        flag_non_pure_subjects: false,
       };
       let signatures_source: String = member_topics
         .iter()
@@ -961,7 +960,6 @@ pub async fn build_semantic_links(
         target_topic: topic::new_node_topic(&-1),
         omit_function_and_modifier_bodies: true,
         include_untrusted_comments: true,
-        flag_non_pure_subjects: false,
       };
       let signatures_source: String = contract_topics
         .iter()
@@ -1080,7 +1078,6 @@ pub async fn build_semantic_links(
             target_topic: *mt,
             omit_function_and_modifier_bodies: false,
             include_untrusted_comments: true,
-            flag_non_pure_subjects: false,
           };
           context::render_member_for_agent(mt, &body_ctx, audit_data)
         })
@@ -1364,9 +1361,7 @@ pub async fn build_functional_properties(
   }
 
   // Reuse the DAG batches from behavior extraction. Same callee context
-  // is available; the only difference is that we render with
-  // `flag_non_pure_subjects: true` and inject feature + behaviors per
-  // member.
+  // is available; we inject feature + behaviors per member.
   let batches = {
     let ctx = state
       .data_context
