@@ -11,10 +11,10 @@
 //! implementation references without needing a separate reference transfer phase.
 
 use crate::solidity::parser::generate_node_id;
-use o11a_core::domain::{ContractKind, ProjectPath};
+use o11a_core::domain::{CallKind, ContractKind, ProjectPath};
 use o11a_core::solidity::ast::{
-  ASTNode, SolidityAST, VariableVisibility, contract_members,
-  get_definition_parameters, get_function_return_parameters,
+  ASTNode, FunctionStateMutability, SolidityAST, VariableVisibility,
+  contract_members, get_definition_parameters, get_function_return_parameters,
   get_referenced_function_id,
 };
 use std::collections::{BTreeMap, HashSet};
@@ -31,6 +31,12 @@ pub struct CallableDefinition {
   /// The return parameters of this callable (VariableDeclaration nodes)
   /// Only applicable to functions; empty for events, errors, and modifiers.
   pub return_parameters: Vec<ASTNode>,
+  /// The state mutability of the function, from the compiler's AST.
+  /// `None` for modifiers, events, errors (not applicable).
+  pub state_mutability: Option<FunctionStateMutability>,
+  /// Whether this callable is a modifier. Modifiers are unconditionally
+  /// `NonPure` since they execute in the caller's context.
+  pub is_modifier: bool,
 }
 
 /// Information about a struct definition.
@@ -196,7 +202,14 @@ fn collect_definitions_from_node(
       }
     }
 
-    ASTNode::FunctionDefinition { node_id, .. } => {
+    ASTNode::FunctionDefinition { node_id, signature, .. } => {
+      let state_mutability = match signature.as_ref() {
+        ASTNode::FunctionSignature {
+          state_mutability,
+          ..
+        } => Some(*state_mutability),
+        _ => None,
+      };
       if let Some(params) = get_definition_parameters(node) {
         let return_params = get_function_return_parameters(node)
           .cloned()
@@ -206,6 +219,8 @@ fn collect_definitions_from_node(
           CallableDefinition {
             parameters: params.clone(),
             return_parameters: return_params,
+            state_mutability,
+            is_modifier: false,
           },
         );
       }
@@ -224,6 +239,8 @@ fn collect_definitions_from_node(
           CallableDefinition {
             parameters: params.clone(),
             return_parameters: Vec::new(),
+            state_mutability: None,
+            is_modifier: true,
           },
         );
       }
@@ -243,6 +260,8 @@ fn collect_definitions_from_node(
           CallableDefinition {
             parameters: params.clone(),
             return_parameters: Vec::new(),
+            state_mutability: None,
+            is_modifier: false,
           },
         );
       }
@@ -262,6 +281,8 @@ fn collect_definitions_from_node(
           CallableDefinition {
             parameters: params.clone(),
             return_parameters: Vec::new(),
+            state_mutability: None,
+            is_modifier: false,
           },
         );
       }
@@ -581,6 +602,7 @@ fn transform_node(node: &mut ASTNode, context: &TransformContext) {
       arguments,
       expression,
       referenced_return_declarations,
+      call_purity,
       ..
     } => {
       // Check if this is a library method-style call (e.g., x.mulDiv(a, b))
@@ -615,6 +637,12 @@ fn transform_node(node: &mut ASTNode, context: &TransformContext) {
       // Populate referenced_return_declarations with return parameter node IDs
       *referenced_return_declarations =
         get_return_declaration_ids(expression, context);
+
+      // Populate call_purity from the callee's stateMutability.
+      // Modifiers are unconditionally NonPure. Functions are Pure when the
+      // compiler marks them pure or view. Unresolvable callees retain the
+      // conservative NonPure default set during parsing.
+      *call_purity = resolve_call_purity(expression, context);
 
       // Recurse into expression and wrapped arguments
       transform_node(expression.as_mut(), context);
@@ -885,4 +913,38 @@ fn extract_attached_type(type_identifier: &str) -> Option<String> {
 
   // For elementary types like "uint256", "address", etc., return as-is
   Some(type_str.to_string())
+}
+
+/// Resolves the purity of a function call by looking up the callee's
+/// `stateMutability` from the compiler AST. Modifiers are unconditionally
+/// `NonPure`. Unresolvable callees default to `NonPure` (conservative).
+fn resolve_call_purity(
+  expression: &ASTNode,
+  context: &TransformContext,
+) -> CallKind {
+  let effective_def = get_referenced_function_id(expression).and_then(
+    |def_id| {
+      let effective_id = context
+        .interface_to_implementation
+        .get(&def_id)
+        .copied()
+        .unwrap_or(def_id);
+      context.callables.get(&effective_id)
+    },
+  );
+
+  let Some(def) = effective_def else {
+    return CallKind::NonPure;
+  };
+
+  if def.is_modifier {
+    return CallKind::NonPure;
+  }
+
+  match def.state_mutability {
+    Some(
+      FunctionStateMutability::Pure | FunctionStateMutability::View,
+    ) => CallKind::Pure,
+    _ => CallKind::NonPure,
+  }
 }

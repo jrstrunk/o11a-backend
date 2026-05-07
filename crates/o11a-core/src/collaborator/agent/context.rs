@@ -5339,6 +5339,7 @@ mod functional_property_render_tests {
         type_string: String::new(),
       },
       referenced_return_declarations: vec![],
+      call_purity: crate::domain::CallKind::NonPure,
     }
   }
 

@@ -1,7 +1,7 @@
 use crate::domain;
 use crate::domain::topic;
 use crate::domain::{
-  ContractKind, FunctionKind, ProjectPath, VariableMutability,
+  CallKind, ContractKind, FunctionKind, ProjectPath, VariableMutability,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -559,6 +559,10 @@ pub enum ASTNode {
     /// Node IDs of the return parameter VariableDeclarations from the called function.
     /// Populated during the transform phase; empty when initially parsed.
     referenced_return_declarations: Vec<i32>,
+    /// Purity classification derived from the callee's `stateMutability`.
+    /// Populated during the transform phase; `NonPure` when initially parsed
+    /// (conservative default for unresolvable callees).
+    call_purity: CallKind,
   },
   /// Wrapper node for function call arguments that links the argument to its
   /// corresponding parameter declaration. Generated during post-processing,

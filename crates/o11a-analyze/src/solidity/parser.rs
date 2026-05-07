@@ -286,6 +286,7 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       try_call,
       type_descriptions,
       referenced_return_declarations,
+      call_purity,
     } => ASTNode::FunctionCall {
       node_id,
       src_location,
@@ -296,6 +297,7 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       try_call,
       type_descriptions,
       referenced_return_declarations,
+      call_purity,
     },
     ASTNode::TypeConversion {
       node_id,
@@ -2053,6 +2055,7 @@ fn node_from_json(
             try_call,
             type_descriptions,
             referenced_return_declarations: Vec::new(),
+            call_purity: domain::CallKind::NonPure,
           })
         }
         "typeConversion" => {
