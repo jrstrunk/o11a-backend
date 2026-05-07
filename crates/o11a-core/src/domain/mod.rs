@@ -444,6 +444,16 @@ pub struct AuditData {
   /// Reverse index: N-prefixed declaration topic → P-prefixed semantic topics.
   /// Derived from FunctionalSemanticTopic.declaration_topic, rebuilt with rebuild_feature_context.
   pub declaration_semantics: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Reverse index: non-pure subject topic → P-prefixed functional purpose
+  /// topic. At most one purpose per subject; later writes replace the entry.
+  /// Derived from `FunctionalPurposeTopic.subject_topic`, rebuilt with
+  /// `rebuild_feature_context`.
+  pub subject_purposes: BTreeMap<topic::Topic, topic::Topic>,
+  /// Reverse index: non-pure subject topic → P-prefixed placement rationale
+  /// topic. At most one placement per subject; later writes replace the entry.
+  /// Derived from `PlacementRationaleTopic.subject_topic`, rebuilt with
+  /// `rebuild_feature_context`.
+  pub subject_placements: BTreeMap<topic::Topic, topic::Topic>,
   /// Impact analysis links between threats and features.
   pub threat_feature_links: Vec<ThreatFeatureLink>,
   /// Conditions keyed by their database ID. Each belongs to a non-pure subject
@@ -1113,7 +1123,7 @@ pub enum UnnamedTopicKind {
   Logical,
   Bitwise,
   Conditional,
-  FunctionCall,
+  FunctionCall(CallKind),
   TypeConversion,
   StructConstruction,
   NewExpression,
@@ -1168,6 +1178,16 @@ pub enum NonPureSubjectType {
   Create,
 }
 
+/// Purity classification for a function call site. Determined by the callee's
+/// observable side effects, not by whether the callee is external — an
+/// external view function with no state effects is still `Pure`. Populated by
+/// the analyzer's call-purity post-pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallKind {
+  Pure,
+  NonPure,
+}
+
 impl UnnamedTopicKind {
   /// Returns the purity classification for this unnamed topic kind.
   pub fn purity(&self) -> SubjectPurity {
@@ -1175,8 +1195,10 @@ impl UnnamedTopicKind {
       UnnamedTopicKind::VariableMutation => SubjectPurity::NonPure,
       UnnamedTopicKind::InlineAssembly => SubjectPurity::NonPure,
       UnnamedTopicKind::NewExpression => SubjectPurity::NonPure,
-      // FunctionCall purity depends on whether it's external — caller must check
-      UnnamedTopicKind::FunctionCall => SubjectPurity::Pure,
+      UnnamedTopicKind::FunctionCall(CallKind::NonPure) => {
+        SubjectPurity::NonPure
+      }
+      UnnamedTopicKind::FunctionCall(CallKind::Pure) => SubjectPurity::Pure,
       _ => SubjectPurity::Pure,
     }
   }
@@ -1891,6 +1913,33 @@ pub enum TopicMetadata {
     #[serde(default)]
     match_source: Option<MatchSource>,
   },
+  /// A functional purpose — the business-logic reason a non-pure subject
+  /// exists, derived from the feature it belongs to. Sibling of
+  /// `PlacementRationaleTopic`; both are generated together in pipeline
+  /// step 5 and persist independently for granular review.
+  FunctionalPurposeTopic {
+    topic: topic::Topic,
+    /// Why this subject exists in business terms.
+    description: String,
+    /// The non-pure subject this purpose is on.
+    subject_topic: topic::Topic,
+    author: crate::collaborator::models::Author,
+    /// `None` for pipeline-produced entities — see FeatureTopic for rationale.
+    created_at: Option<String>,
+  },
+  /// A placement rationale — the ordering reason a non-pure subject is at
+  /// this point in its containing function rather than earlier or later.
+  /// Sibling of `FunctionalPurposeTopic`.
+  PlacementRationaleTopic {
+    topic: topic::Topic,
+    /// Why this subject is here, in terms of neighboring operations.
+    description: String,
+    /// The non-pure subject this placement rationale is on.
+    subject_topic: topic::Topic,
+    author: crate::collaborator::models::Author,
+    /// `None` for pipeline-produced entities — see FeatureTopic for rationale.
+    created_at: Option<String>,
+  },
   /// A threat on a non-pure source code subject
   ThreatTopic {
     topic: topic::Topic,
@@ -1933,6 +1982,8 @@ impl TopicMetadata {
       | TopicMetadata::RequirementTopic { .. }
       | TopicMetadata::BehaviorTopic { .. }
       | TopicMetadata::FunctionalSemanticTopic { .. }
+      | TopicMetadata::FunctionalPurposeTopic { .. }
+      | TopicMetadata::PlacementRationaleTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. } => &Scope::Global,
     }
@@ -1949,6 +2000,8 @@ impl TopicMetadata {
       | TopicMetadata::RequirementTopic { .. }
       | TopicMetadata::BehaviorTopic { .. }
       | TopicMetadata::FunctionalSemanticTopic { .. }
+      | TopicMetadata::FunctionalPurposeTopic { .. }
+      | TopicMetadata::PlacementRationaleTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. }
       | TopicMetadata::DocumentationTopic { .. } => None,
@@ -1966,6 +2019,8 @@ impl TopicMetadata {
       | TopicMetadata::RequirementTopic { topic, .. }
       | TopicMetadata::BehaviorTopic { topic, .. }
       | TopicMetadata::FunctionalSemanticTopic { topic, .. }
+      | TopicMetadata::FunctionalPurposeTopic { topic, .. }
+      | TopicMetadata::PlacementRationaleTopic { topic, .. }
       | TopicMetadata::ThreatTopic { topic, .. }
       | TopicMetadata::InvariantTopic { topic, .. }
       | TopicMetadata::DocumentationTopic { topic, .. } => topic,
@@ -2027,6 +2082,12 @@ impl TopicMetadata {
     match self {
       TopicMetadata::CommentTopic { target_topic, .. } => Some(target_topic),
       TopicMetadata::ThreatTopic { subject_topic, .. } => Some(subject_topic),
+      TopicMetadata::FunctionalPurposeTopic { subject_topic, .. } => {
+        Some(subject_topic)
+      }
+      TopicMetadata::PlacementRationaleTopic { subject_topic, .. } => {
+        Some(subject_topic)
+      }
       TopicMetadata::InvariantTopic { threat_topic, .. } => Some(threat_topic),
       _ => None,
     }
@@ -2039,6 +2100,8 @@ impl TopicMetadata {
       | TopicMetadata::RequirementTopic { author, .. }
       | TopicMetadata::BehaviorTopic { author, .. }
       | TopicMetadata::FunctionalSemanticTopic { author, .. }
+      | TopicMetadata::FunctionalPurposeTopic { author, .. }
+      | TopicMetadata::PlacementRationaleTopic { author, .. }
       | TopicMetadata::ThreatTopic { author, .. }
       | TopicMetadata::InvariantTopic { author, .. } => Some(*author),
       _ => None,
@@ -2058,6 +2121,8 @@ impl TopicMetadata {
       | TopicMetadata::RequirementTopic { description, .. }
       | TopicMetadata::BehaviorTopic { description, .. }
       | TopicMetadata::FunctionalSemanticTopic { description, .. }
+      | TopicMetadata::FunctionalPurposeTopic { description, .. }
+      | TopicMetadata::PlacementRationaleTopic { description, .. }
       | TopicMetadata::ThreatTopic { description, .. }
       | TopicMetadata::InvariantTopic { description, .. } => {
         Some(description.as_str())
@@ -2083,7 +2148,9 @@ impl TopicMetadata {
       TopicMetadata::FeatureTopic { created_at, .. }
       | TopicMetadata::RequirementTopic { created_at, .. }
       | TopicMetadata::BehaviorTopic { created_at, .. }
-      | TopicMetadata::FunctionalSemanticTopic { created_at, .. } => {
+      | TopicMetadata::FunctionalSemanticTopic { created_at, .. }
+      | TopicMetadata::FunctionalPurposeTopic { created_at, .. }
+      | TopicMetadata::PlacementRationaleTopic { created_at, .. } => {
         created_at.as_deref()
       }
       _ => None,
@@ -2536,6 +2603,26 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         .entry(*decl_topic)
         .or_default()
         .push(*sem_topic);
+    }
+  }
+
+  // Rebuild subject_purposes: non-pure subject → P-topic
+  // and subject_placements: non-pure subject → P-topic
+  audit_data.subject_purposes.clear();
+  audit_data.subject_placements.clear();
+  for (prop_topic, metadata) in &audit_data.topic_metadata {
+    match metadata {
+      TopicMetadata::FunctionalPurposeTopic { subject_topic, .. } => {
+        audit_data
+          .subject_purposes
+          .insert(*subject_topic, *prop_topic);
+      }
+      TopicMetadata::PlacementRationaleTopic { subject_topic, .. } => {
+        audit_data
+          .subject_placements
+          .insert(*subject_topic, *prop_topic);
+      }
+      _ => {}
     }
   }
 
@@ -2992,6 +3079,8 @@ pub fn new_audit_data(
     section_requirements: BTreeMap::new(),
     member_behaviors: BTreeMap::new(),
     declaration_semantics: BTreeMap::new(),
+    subject_purposes: BTreeMap::new(),
+    subject_placements: BTreeMap::new(),
     threat_feature_links: Vec::new(),
     conditions: Vec::new(),
     threats: BTreeMap::new(),

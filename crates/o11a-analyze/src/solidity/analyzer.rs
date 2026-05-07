@@ -89,6 +89,12 @@ pub fn analyze(
     &mut audit_data.variable_types,
   )?;
 
+  // Reclassify FunctionCall topics as Pure or NonPure now that
+  // function_properties and node lookups are populated. Heuristic C: a call
+  // is non-pure if the callee mutates state, emits events, calls anything
+  // out-of-scope, or cannot be resolved.
+  classify_call_purity(audit_data);
+
   // Insert ASTs with stubbed nodes
   for (path, ast_list) in ast_map {
     for ast in ast_list {
@@ -1693,7 +1699,14 @@ fn process_second_pass_nodes(
             ast::BinaryOperator::RightShift => UnnamedTopicKind::Bitwise,
           },
           ASTNode::Conditional { .. } => UnnamedTopicKind::Conditional,
-          ASTNode::FunctionCall { .. } => UnnamedTopicKind::FunctionCall,
+          // Initial classification is conservative: every call starts as
+          // Pure and the call-purity post-pass reclassifies based on the
+          // callee's FunctionModProperties. Done as a post-pass because the
+          // callee's properties may not be built when this expression is
+          // visited.
+          ASTNode::FunctionCall { .. } => {
+            UnnamedTopicKind::FunctionCall(domain::CallKind::Pure)
+          }
           ASTNode::TypeConversion { .. } => UnnamedTopicKind::TypeConversion,
           ASTNode::StructConstructor { .. } => {
             UnnamedTopicKind::StructConstruction
@@ -3728,6 +3741,8 @@ fn populate_context(
       | TopicMetadata::RequirementTopic { .. }
       | TopicMetadata::BehaviorTopic { .. }
       | TopicMetadata::FunctionalSemanticTopic { .. }
+      | TopicMetadata::FunctionalPurposeTopic { .. }
+      | TopicMetadata::PlacementRationaleTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. }
       | TopicMetadata::DocumentationTopic { .. } => {}
@@ -4339,6 +4354,149 @@ fn resolve_return_target<'a>(
 
   // Multiple unnamed returns, no name match — can't resolve
   None
+}
+
+// ============================================================================
+// Call Purity Post-Pass
+// ============================================================================
+
+/// Reclassify every `UnnamedTopicKind::FunctionCall(_)` topic to either
+/// `Pure` or `NonPure` based on its callee. Heuristic C from
+/// `crates/o11a-analyze/docs/build-plans/pipeline-dag.md`: a call is
+/// `NonPure` if the callee mutates state, emits events, calls anything
+/// out-of-scope, or its callee cannot be resolved (defensive default).
+/// Otherwise `Pure`. The initial classification at AST traversal time
+/// is conservatively `Pure`; this pass flips entries to `NonPure` where
+/// the heuristic indicates side effects.
+///
+/// Inline assembly inside callees is not currently detectable from
+/// `FunctionModProperties` and is therefore not part of the heuristic;
+/// in practice such callees usually also mutate state or emit events,
+/// so the over-Pure rate stays small.
+fn classify_call_purity(audit_data: &mut AuditData) {
+  let mut to_mark_non_pure: Vec<topic::Topic> = Vec::new();
+
+  for (call_topic, metadata) in &audit_data.topic_metadata {
+    let TopicMetadata::UnnamedTopic {
+      kind: UnnamedTopicKind::FunctionCall(_),
+      ..
+    } = metadata
+    else {
+      continue;
+    };
+
+    let kind = classify_one_call(call_topic, audit_data);
+    if matches!(kind, domain::CallKind::NonPure) {
+      to_mark_non_pure.push(*call_topic);
+    }
+  }
+
+  for call_topic in to_mark_non_pure {
+    if let Some(TopicMetadata::UnnamedTopic { kind, .. }) =
+      audit_data.topic_metadata.get_mut(&call_topic)
+    {
+      *kind = UnnamedTopicKind::FunctionCall(domain::CallKind::NonPure);
+    }
+  }
+}
+
+/// Classify one FunctionCall topic by looking up its callee and applying
+/// heuristic C. Returns `NonPure` for unresolvable callees so that
+/// uncertainty defaults to surfacing the subject for purpose generation
+/// rather than silently skipping it.
+fn classify_one_call(
+  call_topic: &topic::Topic,
+  audit_data: &AuditData,
+) -> domain::CallKind {
+  let Some(Node::Solidity(node)) = audit_data.nodes.get(call_topic) else {
+    return domain::CallKind::NonPure;
+  };
+  let ASTNode::FunctionCall { expression, .. } = node else {
+    return domain::CallKind::NonPure;
+  };
+
+  let Some(callee_topic) = resolve_callee_topic(expression, &audit_data.nodes)
+  else {
+    return domain::CallKind::NonPure;
+  };
+
+  callee_purity(&callee_topic, audit_data)
+}
+
+/// Walk the call's expression to find the callee declaration's topic.
+/// Handles direct identifier calls (`foo()`), member access calls
+/// (`obj.method()`), and identifier paths. Returns `None` for indirect
+/// calls (function pointers, variables holding function values), which
+/// are treated as `NonPure` by the caller.
+fn resolve_callee_topic(
+  expression: &ASTNode,
+  nodes: &BTreeMap<topic::Topic, Node>,
+) -> Option<topic::Topic> {
+  let resolved = expression.resolve(nodes);
+  let decl = match resolved {
+    ASTNode::Identifier {
+      referenced_declaration,
+      ..
+    }
+    | ASTNode::IdentifierPath {
+      referenced_declaration,
+      ..
+    } => *referenced_declaration,
+    ASTNode::MemberAccess {
+      referenced_declaration: Some(decl),
+      ..
+    } => *decl,
+    _ => return None,
+  };
+  Some(topic::new_node_topic(&decl))
+}
+
+/// Apply heuristic C to a resolved callee. In-scope callees are inspected
+/// via their `FunctionModProperties`; out-of-scope callees default to
+/// `NonPure` because we cannot verify their absence of side effects.
+fn callee_purity(
+  callee_topic: &topic::Topic,
+  audit_data: &AuditData,
+) -> domain::CallKind {
+  let Some(props) = audit_data.function_properties.get(callee_topic) else {
+    return domain::CallKind::NonPure;
+  };
+
+  let (mutations, calls, events_emitted) = match props {
+    FunctionModProperties::FunctionProperties {
+      mutations,
+      calls,
+      events_emitted,
+      ..
+    }
+    | FunctionModProperties::ModifierProperties {
+      mutations,
+      calls,
+      events_emitted,
+      ..
+    } => (mutations, calls, events_emitted),
+  };
+
+  if !mutations.is_empty() || !events_emitted.is_empty() {
+    return domain::CallKind::NonPure;
+  }
+
+  // Any call to an out-of-scope function is treated as a side effect.
+  // This catches the common "wrapper around external call" case where a
+  // helper has no direct mutations or events but invokes a dependency.
+  for callee in calls {
+    let target = audit_data
+      .topic_metadata
+      .get(callee)
+      .and_then(|m| m.transitive_topic())
+      .copied()
+      .unwrap_or(*callee);
+    if !audit_data.function_properties.contains_key(&target) {
+      return domain::CallKind::NonPure;
+    }
+  }
+
+  domain::CallKind::Pure
 }
 
 #[cfg(test)]
@@ -5685,6 +5843,160 @@ mod tests {
     assert!(
       !audit_data.comment_index.contains_key(&member_b_topic),
       "member B should not receive a duplicate of the group comment"
+    );
+  }
+
+  // =========================================================================
+  // Call Purity Classifier Tests (heuristic C)
+  // =========================================================================
+
+  fn empty_audit_for_purity() -> AuditData {
+    domain::new_audit_data("test".to_string(), HashSet::new(), None)
+  }
+
+  fn install_callee(
+    audit_data: &mut AuditData,
+    callee: topic::Topic,
+    mutations: Vec<topic::Topic>,
+    calls: Vec<topic::Topic>,
+    events: Vec<topic::Topic>,
+  ) {
+    audit_data.function_properties.insert(
+      callee,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![],
+        calls,
+        mutations,
+        events_emitted: events,
+      },
+    );
+  }
+
+  #[test]
+  fn callee_purity_pure_view_no_side_effects() {
+    let mut audit = empty_audit_for_purity();
+    let callee = topic::new_node_topic(&100);
+    install_callee(&mut audit, callee, vec![], vec![], vec![]);
+    assert!(matches!(
+      callee_purity(&callee, &audit),
+      domain::CallKind::Pure
+    ));
+  }
+
+  #[test]
+  fn callee_purity_state_writer_is_non_pure() {
+    let mut audit = empty_audit_for_purity();
+    let callee = topic::new_node_topic(&100);
+    let state_var = topic::new_node_topic(&200);
+    install_callee(&mut audit, callee, vec![state_var], vec![], vec![]);
+    assert!(matches!(
+      callee_purity(&callee, &audit),
+      domain::CallKind::NonPure
+    ));
+  }
+
+  #[test]
+  fn callee_purity_event_emitter_is_non_pure() {
+    let mut audit = empty_audit_for_purity();
+    let callee = topic::new_node_topic(&100);
+    let event = topic::new_node_topic(&300);
+    install_callee(&mut audit, callee, vec![], vec![], vec![event]);
+    assert!(matches!(
+      callee_purity(&callee, &audit),
+      domain::CallKind::NonPure
+    ));
+  }
+
+  #[test]
+  fn callee_purity_out_of_scope_callee_defaults_non_pure() {
+    let audit = empty_audit_for_purity();
+    let callee = topic::new_node_topic(&100); // not installed
+    assert!(matches!(
+      callee_purity(&callee, &audit),
+      domain::CallKind::NonPure
+    ));
+  }
+
+  #[test]
+  fn callee_purity_call_to_out_of_scope_propagates_non_pure() {
+    let mut audit = empty_audit_for_purity();
+    let callee = topic::new_node_topic(&100);
+    // Out-of-scope sub-callee — has no entry in function_properties.
+    let oos = topic::new_node_topic(&999);
+    install_callee(&mut audit, callee, vec![], vec![oos], vec![]);
+    assert!(matches!(
+      callee_purity(&callee, &audit),
+      domain::CallKind::NonPure
+    ));
+  }
+
+  #[test]
+  fn callee_purity_call_only_to_in_scope_pure_stays_pure() {
+    let mut audit = empty_audit_for_purity();
+    let callee = topic::new_node_topic(&100);
+    let helper = topic::new_node_topic(&200);
+    install_callee(&mut audit, helper, vec![], vec![], vec![]);
+    install_callee(&mut audit, callee, vec![], vec![helper], vec![]);
+    assert!(matches!(
+      callee_purity(&callee, &audit),
+      domain::CallKind::Pure
+    ));
+  }
+
+  #[test]
+  fn classify_call_purity_marks_non_pure_calls() {
+    // End-to-end: an UnnamedTopic FunctionCall whose AST resolves to a
+    // state-mutating callee should be flipped to FunctionCall(NonPure).
+    let mut audit = empty_audit_for_purity();
+    let callee = topic::new_node_topic(&100);
+    let state_var = topic::new_node_topic(&200);
+    install_callee(&mut audit, callee, vec![state_var], vec![], vec![]);
+
+    let call_topic = topic::new_node_topic(&300);
+    audit.topic_metadata.insert(
+      call_topic,
+      TopicMetadata::UnnamedTopic {
+        topic: call_topic,
+        scope: Scope::Global,
+        kind: UnnamedTopicKind::FunctionCall(domain::CallKind::Pure),
+        transitive_topic: None,
+      },
+    );
+    let call_node = ASTNode::FunctionCall {
+      node_id: 300,
+      src_location: dummy_src_location(),
+      arguments: vec![],
+      expression: Box::new(ASTNode::Identifier {
+        node_id: 301,
+        src_location: dummy_src_location(),
+        name: "callee".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 100,
+      }),
+      name_locations: vec![],
+      names: vec![],
+      try_call: false,
+      type_descriptions: o11a_core::solidity::ast::TypeDescriptions {
+        type_identifier: String::new(),
+        type_string: String::new(),
+      },
+      referenced_return_declarations: vec![],
+    };
+    audit.nodes.insert(call_topic, Node::Solidity(call_node));
+
+    classify_call_purity(&mut audit);
+
+    let updated = audit.topic_metadata.get(&call_topic).unwrap();
+    let TopicMetadata::UnnamedTopic { kind, .. } = updated else {
+      panic!("expected UnnamedTopic");
+    };
+    assert!(
+      matches!(
+        kind,
+        UnnamedTopicKind::FunctionCall(domain::CallKind::NonPure)
+      ),
+      "expected FunctionCall(NonPure), got {:?}",
+      kind
     );
   }
 }

@@ -259,7 +259,7 @@ pub fn highlighted_name(metadata: &TopicMetadata) -> String {
       UnnamedTopicKind::Conditional => {
         "<span class=\"keyword\">ConditionalStatement</span>".to_string()
       }
-      UnnamedTopicKind::FunctionCall => {
+      UnnamedTopicKind::FunctionCall(_) => {
         "<span class=\"function\">FunctionCall</span>".to_string()
       }
       UnnamedTopicKind::TypeConversion => {
@@ -377,6 +377,14 @@ pub fn highlighted_name(metadata: &TopicMetadata) -> String {
     ),
     TopicMetadata::FunctionalSemanticTopic { description, .. } => format!(
       "<span class=\"semantic\">{}</span>",
+      html_escape(description)
+    ),
+    TopicMetadata::FunctionalPurposeTopic { description, .. } => format!(
+      "<span class=\"purpose\">{}</span>",
+      html_escape(description)
+    ),
+    TopicMetadata::PlacementRationaleTopic { description, .. } => format!(
+      "<span class=\"placement\">{}</span>",
       html_escape(description)
     ),
     TopicMetadata::ThreatTopic { description, .. } => {
@@ -613,6 +621,12 @@ fn authored_topic_label(
     }
     TopicMetadata::FunctionalSemanticTopic { .. } => {
       Some(("semantics".to_string(), "semantic"))
+    }
+    TopicMetadata::FunctionalPurposeTopic { .. } => {
+      Some(("purpose".to_string(), "purpose"))
+    }
+    TopicMetadata::PlacementRationaleTopic { .. } => {
+      Some(("placement".to_string(), "placement"))
     }
     TopicMetadata::ThreatTopic { severity, .. } => {
       let sev = severity.map(|s| s.as_str()).unwrap_or("pending");

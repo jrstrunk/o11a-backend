@@ -250,11 +250,13 @@ pub fn build_contract_summary_corpus(
           target_topic: topic::new_node_topic(&-1),
           omit_function_and_modifier_bodies: true,
           include_untrusted_comments: true,
+          flag_non_pure_subjects: false,
         },
         SummaryCorpusVariant::Body => context::ASTRenderContext {
           target_topic: *mt,
           omit_function_and_modifier_bodies: false,
           include_untrusted_comments: true,
+          flag_non_pure_subjects: false,
         },
       };
       if let Some(s) =

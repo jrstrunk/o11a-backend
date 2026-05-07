@@ -29,8 +29,8 @@
 //!    synthesis steps that build on each other (`link_contracts` →
 //!    `link_member_signatures` → `link_member_bodies`), producing functional
 //!    semantics with provenance.
-//! 4. **Extract behaviors** (`extract_behaviors_from_contract`): Per-contract
-//!    extraction with functional semantics in context.
+//! 4. **Extract behaviors** (`extract_behaviors_from_batch`): DAG-batched
+//!    extraction with semantics + callee behaviors in context.
 //! 5. **Synthesize features** (`synthesize_features`): Single-pass LLM
 //!    reconciliation of all requirements and behaviors into features.
 
@@ -1188,37 +1188,40 @@ pub async fn synthesize_features(
 // Behavior Extraction LLM Tasks
 // ============================================================================
 
-/// Prompt for extracting behaviors from a contract's source code.
-const EXTRACT_BEHAVIORS_PROMPT: &str = "Below is a smart contract with its functions and \
-modifiers (state variables are excluded) and functional semantics \
-(project-specific meanings for declarations).\n\n\
-Your task is to extract **behaviors** — what each function/modifier in this \
-contract actually does, described in business-level terms using the \
-functional semantics provided.\n\n\
-For each function or modifier, produce one or more behaviors that describe \
-what it does. Use the functional semantics to describe behaviors at a \
-business level rather than mechanically. For example, if `propFactor` has \
-the semantic \"proportional reward multiplier\" and `stakerBalance` has \
-\"user's staked token balance\", describe the behavior as \"calculates \
-proportional reward share for the staker\" rather than \"multiplies \
-propFactor by stakerBalance.\"\n\n\
-Each behavior belongs to exactly one function or modifier. \
-Each function/modifier may have multiple behaviors.\n\n\
+/// Prompt for extracting behaviors from a batch of dependency-ordered
+/// functions/modifiers. The batch JSON is the output of
+/// `render_batch_for_behavior_extraction`. See pipeline-dag.md.
+const EXTRACT_BEHAVIORS_BATCH_PROMPT: &str = "Below are one or more functions/modifiers from \
+an in-scope smart contract project. Each function includes:\n\
+- Its `definition` AST (signature and body).\n\
+- A `semantics` map keyed by declaration topic — the project-specific \
+meaning of each parameter, return value, local, and mutated state variable.\n\
+- A `called_function_behaviors` map keyed by callee topic — the behaviors \
+of every internal function this one calls (already extracted in earlier \
+batches). Out-of-scope callees appear with an empty `behaviors` array.\n\n\
+Your task is to extract **behaviors** for each function — what it actually \
+does, described in business-level terms.\n\n\
+- Use the semantics to describe behaviors at a business level rather than \
+mechanically. For example, if `propFactor` has the semantic \"proportional \
+reward multiplier\" and `stakerBalance` has \"user's staked token balance\", \
+describe the behavior as \"calculates proportional reward share for the \
+staker\" rather than \"multiplies propFactor by stakerBalance\".\n\
+- Use the called_function_behaviors to understand what internal calls do \
+without re-describing them. Describe the composite effect of this function \
+in terms of what its callees do, not how they do it.\n\
+- Preserve the developer's specific terminology from the semantics — \
+subtle naming differences often reflect important design distinctions.\n\
+- Include both normal execution paths and edge case behaviors (reverts, \
+access control checks, state mutations).\n\
+- Do not use identifer names, rely on the semantics to describe subjects and behavior.
+- Do not describe implementation details like \"calls _transfer internally\" — \
+describe the observable effect.\n\n\
 Return a JSON object with a `members` key whose value is an array of member \
 groups. Each group has:\n\
 - `member_topic`: the N-prefixed topic ID of the function/modifier\n\
 - `behaviors`: an array of behavior description strings\n\n\
-Rules:\n\
-- Every function and modifier must have at least one behavior.\n\
-- Each behavior should be a concise, specific description of what the code does.\n\
-- Use functional semantics to give business-level meaning when available. \
-Preserve the developer's specific terminology from the functional semantics — \
-subtle differences in naming often reflect important design distinctions.\n\
-- Include both normal execution paths and edge case behaviors (reverts, \
-access control checks, state mutations).\n\
-- Do not describe implementation details like \"calls _transfer internally\" — \
-describe the observable effect: \"transfers tokens from sender to recipient.\"\n\
-- If the contract has no functions or modifiers, return `{\"members\": []}`.\n\n";
+Every function and modifier in the batch must appear in the output with at \
+least one behavior. If the batch is empty, return `{\"members\": []}`.\n\n";
 
 /// Raw member behavior group from LLM.
 #[derive(Deserialize)]
@@ -1264,20 +1267,24 @@ pub struct ParsedBehaviors {
   pub behaviors: Vec<(topic::Topic, String)>, // (member_topic, description)
 }
 
-/// Extract behaviors from a contract's source code via LLM.
-pub async fn extract_behaviors_from_contract(
-  contract_json: &str,
-  contract_name: &str,
+/// Extract behaviors from a DAG-ordered batch of in-scope functions and
+/// modifiers via LLM. `batch_json` is the output of
+/// `context::render_batch_for_behavior_extraction`. `label` identifies
+/// the batch for logs and LLM-call telemetry (use the
+/// `BatchForExtraction.label` field).
+pub async fn extract_behaviors_from_batch(
+  batch_json: &str,
+  label: &str,
 ) -> Result<ParsedBehaviors, TaskError> {
   let prompt =
-    format!("{}Contract:\n{}", EXTRACT_BEHAVIORS_PROMPT, contract_json);
+    format!("{}Batch:\n{}", EXTRACT_BEHAVIORS_BATCH_PROMPT, batch_json);
 
-  let label = format!("behaviors_{}", contract_name);
+  let log_label = format!("behaviors_{}", label);
   let response = router::chat_completion(
     TaskSize::Large,
     router::SYSTEM_MESSAGE_CODE,
     &prompt,
-    Some(&label),
+    Some(&log_label),
     Some(&BEHAVIORS_SCHEMA),
   )
   .await?;
@@ -1287,13 +1294,296 @@ pub async fn extract_behaviors_from_contract(
 
   let mut behaviors = Vec::new();
   for group in wrapper.members {
-    let member_topic = topic::new_topic(&group.member_topic);
+    let member_topic = match topic::parse_topic(&group.member_topic) {
+      Ok(t @ topic::Topic::Node(_)) => t,
+      Ok(other) => {
+        tracing::warn!(
+          batch = %label,
+          "behavior extraction: member_topic {:?} is not an N-prefixed topic; \
+           skipping {} behavior(s)",
+          other,
+          group.behaviors.len()
+        );
+        continue;
+      }
+      Err(e) => {
+        tracing::warn!(
+          batch = %label,
+          "behavior extraction: failed to parse member_topic {:?}: {}; \
+           skipping {} behavior(s)",
+          group.member_topic,
+          e,
+          group.behaviors.len()
+        );
+        continue;
+      }
+    };
     for desc in group.behaviors {
       behaviors.push((member_topic, desc));
     }
   }
 
   Ok(ParsedBehaviors { behaviors })
+}
+
+// ============================================================================
+// Functional Purpose & Placement Rationale (Pipeline Step 5)
+// ============================================================================
+
+/// Prompt for generating functional purpose and placement rationale for
+/// every non-pure subject in a batch of in-scope functions/modifiers.
+/// The batch JSON is the output of
+/// `render_batch_for_functional_properties`. See pipeline-dag.md step 5.
+const EXTRACT_FUNCTIONAL_PROPERTIES_PROMPT: &str = "Below are one or more in-scope \
+functions/modifiers from a smart contract project. For each function:\n\
+- `definition` is the function's signature and body as an AST. **Non-pure \
+subjects in the body are flagged with `is_non_pure: true`.**\n\
+- `feature` is the linked feature: name, description, and requirements.\n\
+- `behaviors` lists what the function as a whole does (already extracted).\n\
+- `semantics` maps each declaration topic to its name and project-specific \
+meaning.\n\
+- `called_function_behaviors` maps each callee topic to what that callee does.\n\n\
+The top-level **`non_pure_subjects`** array lists every non-pure subject \
+across all functions in this batch. For **each** topic in that list, \
+produce two properties:\n\n\
+- **`functional_purpose`** — the business-logic reason this subject exists, \
+expressed in terms of the function's feature and the value the subject \
+contributes to that feature. Avoid restating what the operation \
+mechanically does; explain the impact on users or the system if it \
+were absent.\n\
+- **`placement_rationale`** — the ordering reason this subject is at this \
+point in its function rather than earlier or later. Refer to specific \
+neighboring operations in the function body when relevant: what state \
+must already exist before this subject runs, what state this subject \
+must commit before subsequent operations, what would change if this \
+subject moved.\n\n\
+Use the function's behaviors and feature context to ground both answers. \
+Use called_function_behaviors to understand what internal calls do without \
+re-describing them. Use semantics to describe values at a business level \
+rather than mechanically.\n\n\
+Return a JSON object with a `subjects` key whose value is an array. Each \
+entry has:\n\
+- `subject_topic`: the topic ID from the `non_pure_subjects` list\n\
+- `functional_purpose`: one or two sentences\n\
+- `placement_rationale`: one or two sentences\n\n\
+Every topic in `non_pure_subjects` must appear exactly once in the output. \
+If the batch contains no subjects, return `{\"subjects\": []}`.\n\n";
+
+#[derive(Deserialize)]
+struct LLMSubjectFunctionalProperties {
+  subject_topic: String,
+  functional_purpose: String,
+  placement_rationale: String,
+}
+
+#[derive(Deserialize)]
+struct LLMFunctionalPropertiesResponse {
+  subjects: Vec<LLMSubjectFunctionalProperties>,
+}
+
+static FUNCTIONAL_PROPERTIES_SCHEMA: LazyLock<JsonSchema> =
+  LazyLock::new(|| JsonSchema {
+    name: "extract_functional_properties",
+    schema: json!({
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subjects"],
+      "properties": {
+        "subjects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "subject_topic",
+              "functional_purpose",
+              "placement_rationale"
+            ],
+            "properties": {
+              "subject_topic": { "type": "string" },
+              "functional_purpose": { "type": "string" },
+              "placement_rationale": { "type": "string" }
+            }
+          }
+        }
+      }
+    }),
+    empty_response: r#"{"subjects":[]}"#,
+  });
+
+/// Result of functional-purpose / placement-rationale extraction for one
+/// batch. Each entry pairs a non-pure subject topic with its two
+/// generated properties.
+pub struct ParsedFunctionalProperties {
+  pub entries: Vec<ParsedSubjectFunctionalProperties>,
+}
+
+pub struct ParsedSubjectFunctionalProperties {
+  pub subject_topic: topic::Topic,
+  pub functional_purpose: String,
+  pub placement_rationale: String,
+}
+
+/// Run the functional-purpose / placement-rationale LLM task against a
+/// rendered batch. `batch_json` is the output of
+/// `context::render_batch_for_functional_properties`. `label` identifies
+/// the batch for logs. Validates that every topic in the batch's
+/// `non_pure_subjects` list appears exactly once in the LLM's response;
+/// missing or extra topics surface as `tracing::warn` events but do not
+/// fail the task — the auditor sees the partial result and can prompt
+/// for missing entries during review.
+pub async fn extract_functional_properties_from_batch(
+  batch_json: &str,
+  label: &str,
+) -> Result<ParsedFunctionalProperties, TaskError> {
+  let prompt = format!(
+    "{}Batch:\n{}",
+    EXTRACT_FUNCTIONAL_PROPERTIES_PROMPT, batch_json
+  );
+
+  let log_label = format!("functional_properties_{}", label);
+  let response = router::chat_completion(
+    TaskSize::Large,
+    router::SYSTEM_MESSAGE_CODE,
+    &prompt,
+    Some(&log_label),
+    Some(&FUNCTIONAL_PROPERTIES_SCHEMA),
+  )
+  .await?;
+
+  let wrapper: LLMFunctionalPropertiesResponse =
+    router::parse_response(&response, "functional_properties", &prompt)?;
+
+  let expected = parse_non_pure_subjects(batch_json);
+  validate_functional_property_coverage(&expected, &wrapper.subjects, label);
+
+  // Parse each subject_topic safely, dedupe, and reject any topic that
+  // wasn't in the batch's `non_pure_subjects` list. Both guards prevent
+  // metadata pollution: dedup avoids orphan entries (the reverse index
+  // would keep only the last write while topic_metadata accumulates),
+  // and the strict filter prevents the LLM from inserting properties
+  // for hallucinated or out-of-batch subjects.
+  let mut entries = Vec::with_capacity(wrapper.subjects.len());
+  let mut seen_subjects: std::collections::HashSet<topic::Topic> =
+    std::collections::HashSet::new();
+  let mut duplicates: Vec<String> = Vec::new();
+  let mut rejected_unexpected: Vec<String> = Vec::new();
+  for s in wrapper.subjects {
+    let subject_topic = match topic::parse_topic(&s.subject_topic) {
+      Ok(t @ topic::Topic::Node(_)) => t,
+      Ok(other) => {
+        tracing::warn!(
+          batch = %label,
+          "functional properties: subject_topic {:?} is not an N-prefixed \
+           topic; skipping",
+          other
+        );
+        continue;
+      }
+      Err(e) => {
+        tracing::warn!(
+          batch = %label,
+          "functional properties: failed to parse subject_topic {:?}: {}; \
+           skipping",
+          s.subject_topic,
+          e
+        );
+        continue;
+      }
+    };
+    // Strict membership check: only accept subjects that were in the
+    // input list. The validate step already warned about extras; this
+    // guard prevents them from being persisted. When the input list is
+    // empty (parse failure or absent field), accept all valid topics
+    // so legacy callers without a `non_pure_subjects` field still work.
+    if !expected.is_empty() && !expected.contains(&s.subject_topic) {
+      rejected_unexpected.push(s.subject_topic);
+      continue;
+    }
+    if !seen_subjects.insert(subject_topic) {
+      duplicates.push(s.subject_topic);
+      continue;
+    }
+    entries.push(ParsedSubjectFunctionalProperties {
+      subject_topic,
+      functional_purpose: s.functional_purpose,
+      placement_rationale: s.placement_rationale,
+    });
+  }
+  if !duplicates.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "functional properties: LLM returned {} duplicate subject_topic(s) \
+       (kept first, dropped subsequent): {:?}",
+      duplicates.len(),
+      duplicates
+    );
+  }
+  if !rejected_unexpected.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "functional properties: rejected {} subject_topic(s) outside the \
+       batch's non_pure_subjects list: {:?}",
+      rejected_unexpected.len(),
+      rejected_unexpected
+    );
+  }
+
+  Ok(ParsedFunctionalProperties { entries })
+}
+
+/// Extract the `non_pure_subjects` array from a batch JSON payload as a
+/// set of topic-id strings. Returns an empty set if the field is absent
+/// or malformed — coverage validation just becomes a no-op in that case.
+fn parse_non_pure_subjects(
+  batch_json: &str,
+) -> std::collections::HashSet<String> {
+  let Ok(value) = serde_json::from_str::<serde_json::Value>(batch_json) else {
+    return std::collections::HashSet::new();
+  };
+  value
+    .get("non_pure_subjects")
+    .and_then(|v| v.as_array())
+    .map(|arr| {
+      arr
+        .iter()
+        .filter_map(|item| item.as_str().map(String::from))
+        .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Log warnings for any input topic missing from the LLM output and for
+/// any output topic not in the input list. Both are ambiguity signals the
+/// auditor should see during review.
+fn validate_functional_property_coverage(
+  expected: &std::collections::HashSet<String>,
+  got: &[LLMSubjectFunctionalProperties],
+  label: &str,
+) {
+  if expected.is_empty() {
+    return;
+  }
+  let received: std::collections::HashSet<String> =
+    got.iter().map(|s| s.subject_topic.clone()).collect();
+  let missing: Vec<&String> = expected.difference(&received).collect();
+  let extra: Vec<&String> = received.difference(expected).collect();
+  if !missing.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "functional properties: {} subject(s) in batch were not addressed by the LLM: {:?}",
+      missing.len(),
+      missing
+    );
+  }
+  if !extra.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "functional properties: {} subject(s) in LLM output were not in the batch's non_pure_subjects list: {:?}",
+      extra.len(),
+      extra
+    );
+  }
 }
 
 /// Prompt for normalizing a documentation file for plain text readability.
@@ -1425,4 +1715,218 @@ pub async fn normalize_documentation(
   }
 
   Ok(NormalizedDocumentation { files })
+}
+
+#[cfg(test)]
+mod functional_properties_tests {
+  use super::*;
+
+  fn subject(
+    id: &str,
+    purpose: &str,
+    placement: &str,
+  ) -> LLMSubjectFunctionalProperties {
+    LLMSubjectFunctionalProperties {
+      subject_topic: id.to_string(),
+      functional_purpose: purpose.to_string(),
+      placement_rationale: placement.to_string(),
+    }
+  }
+
+  fn expected_set(items: &[&str]) -> std::collections::HashSet<String> {
+    items.iter().map(|s| s.to_string()).collect()
+  }
+
+  #[test]
+  fn parse_non_pure_subjects_extracts_array() {
+    let json = r#"{"non_pure_subjects":["N10","N20","N30"],"batch":[]}"#;
+    let got = parse_non_pure_subjects(json);
+    assert_eq!(got, expected_set(&["N10", "N20", "N30"]));
+  }
+
+  #[test]
+  fn parse_non_pure_subjects_handles_missing_field() {
+    let json = r#"{"batch":[]}"#;
+    let got = parse_non_pure_subjects(json);
+    assert!(got.is_empty());
+  }
+
+  #[test]
+  fn parse_non_pure_subjects_handles_malformed_json() {
+    let got = parse_non_pure_subjects("not json");
+    assert!(got.is_empty());
+  }
+
+  #[test]
+  fn validate_coverage_no_op_when_expected_empty() {
+    // Should not panic and should not warn (we can't easily assert no-warn,
+    // but we can at least confirm the path runs).
+    let expected = expected_set(&[]);
+    let got = vec![subject("N10", "p", "r")];
+    validate_functional_property_coverage(&expected, &got, "test");
+  }
+
+  #[test]
+  fn validate_coverage_full_match_passes() {
+    let expected = expected_set(&["N10", "N20"]);
+    let got = vec![subject("N10", "p1", "r1"), subject("N20", "p2", "r2")];
+    validate_functional_property_coverage(&expected, &got, "test");
+  }
+
+  #[test]
+  fn validate_coverage_handles_missing_and_extra() {
+    // Just exercises the warn paths — the function never panics or
+    // returns an error.
+    let expected = expected_set(&["N10", "N20", "N30"]);
+    let got = vec![subject("N10", "p1", "r1"), subject("N99", "p99", "r99")];
+    validate_functional_property_coverage(&expected, &got, "test");
+  }
+
+  // --------- end-to-end response parsing ---------
+
+  /// Mirror of the parse + dedupe + strict-filter block from
+  /// `extract_functional_properties_from_batch` — runs without an LLM
+  /// call so the parsing logic can be unit-tested deterministically.
+  /// `expected` matches the batch's `non_pure_subjects` list; an empty
+  /// set means "accept all" (legacy behavior).
+  fn run_parse_with_expected(
+    json_response: &str,
+    expected: std::collections::HashSet<String>,
+  ) -> Vec<ParsedSubjectFunctionalProperties> {
+    let wrapper: LLMFunctionalPropertiesResponse =
+      serde_json::from_str(json_response).expect("malformed test JSON");
+    let mut entries = Vec::new();
+    let mut seen: std::collections::HashSet<topic::Topic> =
+      std::collections::HashSet::new();
+    for s in wrapper.subjects {
+      let Ok(t @ topic::Topic::Node(_)) = topic::parse_topic(&s.subject_topic)
+      else {
+        continue;
+      };
+      if !expected.is_empty() && !expected.contains(&s.subject_topic) {
+        continue;
+      }
+      if !seen.insert(t) {
+        continue;
+      }
+      entries.push(ParsedSubjectFunctionalProperties {
+        subject_topic: t,
+        functional_purpose: s.functional_purpose,
+        placement_rationale: s.placement_rationale,
+      });
+    }
+    entries
+  }
+
+  fn run_parse(json_response: &str) -> Vec<ParsedSubjectFunctionalProperties> {
+    run_parse_with_expected(json_response, std::collections::HashSet::new())
+  }
+
+  #[test]
+  fn extract_response_parser_rejects_malformed_topic() {
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","functional_purpose":"p","placement_rationale":"r"},
+      {"subject_topic":"NOT_A_TOPIC","functional_purpose":"p2","placement_rationale":"r2"}
+    ]}"#;
+    let entries = run_parse(json);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].subject_topic, topic::new_node_topic(&10));
+  }
+
+  #[test]
+  fn extract_response_parser_rejects_non_node_topic() {
+    let json = r#"{"subjects":[
+      {"subject_topic":"F5","functional_purpose":"p","placement_rationale":"r"}
+    ]}"#;
+    let entries = run_parse(json);
+    assert!(entries.is_empty(), "F-prefixed topic must not be accepted");
+  }
+
+  #[test]
+  fn extract_response_parser_dedupes_repeated_subject() {
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","functional_purpose":"first","placement_rationale":"first"},
+      {"subject_topic":"N10","functional_purpose":"second","placement_rationale":"second"}
+    ]}"#;
+    let entries = run_parse(json);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].functional_purpose, "first");
+  }
+
+  #[test]
+  fn extract_response_parser_rejects_unexpected_subject() {
+    // The LLM returned a topic that wasn't in the batch's
+    // non_pure_subjects list. Must be dropped, not persisted.
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","functional_purpose":"ok","placement_rationale":"ok"},
+      {"subject_topic":"N999","functional_purpose":"hallucinated","placement_rationale":"!"}
+    ]}"#;
+    let expected = expected_set(&["N10"]);
+    let entries = run_parse_with_expected(json, expected);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].subject_topic, topic::new_node_topic(&10));
+  }
+
+  #[test]
+  fn extract_response_parser_accepts_all_when_expected_empty() {
+    // No expected list means "accept all valid topics" — preserves the
+    // legacy behavior so callers without a non_pure_subjects field
+    // (currently none, defensive) continue to work.
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","functional_purpose":"a","placement_rationale":"b"},
+      {"subject_topic":"N20","functional_purpose":"c","placement_rationale":"d"}
+    ]}"#;
+    let entries =
+      run_parse_with_expected(json, std::collections::HashSet::new());
+    assert_eq!(entries.len(), 2);
+  }
+
+  #[test]
+  fn extract_response_parser_handles_empty_subjects() {
+    let json = r#"{"subjects":[]}"#;
+    let entries = run_parse(json);
+    assert!(entries.is_empty());
+  }
+}
+
+#[cfg(test)]
+mod behaviors_parser_tests {
+  use super::*;
+
+  fn run_parse(json_response: &str) -> Vec<(topic::Topic, String)> {
+    let wrapper: LLMBehaviorsResponse =
+      serde_json::from_str(json_response).expect("malformed test JSON");
+    let mut behaviors = Vec::new();
+    for group in wrapper.members {
+      let Ok(member_topic @ topic::Topic::Node(_)) =
+        topic::parse_topic(&group.member_topic)
+      else {
+        continue;
+      };
+      for desc in group.behaviors {
+        behaviors.push((member_topic, desc));
+      }
+    }
+    behaviors
+  }
+
+  #[test]
+  fn behaviors_parser_skips_malformed_topic() {
+    let json = r#"{"members":[
+      {"member_topic":"N10","behaviors":["does X"]},
+      {"member_topic":"BAD","behaviors":["does Y"]}
+    ]}"#;
+    let got = run_parse(json);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].1, "does X");
+  }
+
+  #[test]
+  fn behaviors_parser_skips_non_node_topic() {
+    let json = r#"{"members":[
+      {"member_topic":"B5","behaviors":["does X"]}
+    ]}"#;
+    let got = run_parse(json);
+    assert!(got.is_empty());
+  }
 }

@@ -368,6 +368,8 @@ pub async fn get_contracts(
       | o11a_core::domain::TopicMetadata::RequirementTopic { .. }
       | o11a_core::domain::TopicMetadata::BehaviorTopic { .. }
       | o11a_core::domain::TopicMetadata::FunctionalSemanticTopic { .. }
+      | o11a_core::domain::TopicMetadata::FunctionalPurposeTopic { .. }
+      | o11a_core::domain::TopicMetadata::PlacementRationaleTopic { .. }
       | o11a_core::domain::TopicMetadata::ThreatTopic { .. }
       | o11a_core::domain::TopicMetadata::InvariantTopic { .. }
       | o11a_core::domain::TopicMetadata::DocumentationTopic { .. } => false,
@@ -572,6 +574,30 @@ pub struct SemanticTopicResponse {
   pub created_at: Option<String>,
 }
 
+/// Response for FunctionalPurposeTopic metadata
+#[derive(Debug, Serialize)]
+pub struct FunctionalPurposeTopicResponse {
+  pub topic_id: String,
+  pub description: String,
+  pub subject_topic: String,
+  #[serde(rename = "author_id")]
+  pub author: Author,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<String>,
+}
+
+/// Response for PlacementRationaleTopic metadata
+#[derive(Debug, Serialize)]
+pub struct PlacementRationaleTopicResponse {
+  pub topic_id: String,
+  pub description: String,
+  pub subject_topic: String,
+  #[serde(rename = "author_id")]
+  pub author: Author,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<String>,
+}
+
 /// Response for ThreatTopic metadata
 #[derive(Debug, Serialize)]
 pub struct ThreatTopicResponse {
@@ -618,6 +644,10 @@ pub enum TopicMetadataResponse {
   Behavior(BehaviorTopicResponse),
   #[serde(rename = "semantic")]
   Semantic(SemanticTopicResponse),
+  #[serde(rename = "purpose")]
+  Purpose(FunctionalPurposeTopicResponse),
+  #[serde(rename = "placement")]
+  Placement(PlacementRationaleTopicResponse),
   #[serde(rename = "threat")]
   Threat(ThreatTopicResponse),
   #[serde(rename = "invariant")]
@@ -784,6 +814,34 @@ fn topic_metadata_to_response(
         .iter()
         .map(|t| t.id())
         .collect(),
+      author: *author_id,
+      created_at: created_at.clone(),
+    }),
+
+    o11a_core::domain::TopicMetadata::FunctionalPurposeTopic {
+      description,
+      subject_topic,
+      author: author_id,
+      created_at,
+      ..
+    } => TopicMetadataResponse::Purpose(FunctionalPurposeTopicResponse {
+      topic_id: topic.id(),
+      description: description.clone(),
+      subject_topic: subject_topic.id(),
+      author: *author_id,
+      created_at: created_at.clone(),
+    }),
+
+    o11a_core::domain::TopicMetadata::PlacementRationaleTopic {
+      description,
+      subject_topic,
+      author: author_id,
+      created_at,
+      ..
+    } => TopicMetadataResponse::Placement(PlacementRationaleTopicResponse {
+      topic_id: topic.id(),
+      description: description.clone(),
+      subject_topic: subject_topic.id(),
       author: *author_id,
       created_at: created_at.clone(),
     }),
@@ -2884,7 +2942,7 @@ pub async fn create_user_functional_semantic(
 ) -> Result<Json<CreatedResponse>, StatusCode> {
   tracing::debug!("POST /api/v1/audits/{}/functional_semantics", audit_id);
 
-  let id = o11a_core::ids::allocate_functional_semantic_id();
+  let id = o11a_core::ids::allocate_functional_property_id();
   let created_at = o11a_core::ids::now_iso8601();
 
   db::user_entities::create_user_functional_semantic(

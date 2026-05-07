@@ -63,14 +63,23 @@ impl PipelineState {
 // Full-audit pipeline steps (used by the `analyze` endpoint)
 // ---------------------------------------------------------------------------
 
-/// Run the full analysis pipeline:
-/// build_semantic_links → build_requirements → build_behaviors → synthesize_features
+/// Run the full analysis pipeline in five steps:
 ///
-/// Semantic linking runs first so that functional semantics are available
-/// when rendering documentation for requirement extraction. This means
-/// inline code references like `pID` are annotated with their project-specific
-/// meaning (e.g., "participation identifier"), giving the LLM proper context
-/// to produce behavioral requirements without using declaration names.
+/// 1. **Semantic Linking** — establish functional semantics on declarations.
+/// 2. **Requirement Extraction** — pull documentation requirements with
+///    semantics in context.
+/// 3. **Behavior Extraction** — DAG-batched per-function behavior generation
+///    with callee context.
+/// 4. **Feature Synthesis** — reconcile requirements and behaviors.
+/// 5. **Functional Purpose & Placement** — for every non-pure subject in
+///    every in-scope function with a feature link, generate purpose and
+///    placement rationale (DAG-batched alongside behaviors).
+///
+/// Semantic linking runs first so functional semantics are available when
+/// rendering documentation for requirement extraction — inline code
+/// references like `pID` get annotated with their project-specific meaning.
+/// Functional properties run last so they can use both feature context
+/// (from step 4) and prior callee behaviors (from step 3).
 #[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
 pub async fn run_full_pipeline(
   state: &PipelineState,
@@ -78,17 +87,20 @@ pub async fn run_full_pipeline(
 ) -> Result<(), PipelineError> {
   tracing::info!("Starting full analysis pipeline for audit {}", audit_id);
 
-  tracing::info!("[1/4] Semantic Linking");
+  tracing::info!("[1/5] Semantic Linking");
   build_semantic_links(state, audit_id).await?;
 
-  tracing::info!("[2/4] Requirement Extraction");
+  tracing::info!("[2/5] Requirement Extraction");
   build_requirements(state, audit_id).await?;
 
-  tracing::info!("[3/4] Behavior Extraction");
+  tracing::info!("[3/5] Behavior Extraction");
   build_behaviors(state, audit_id).await?;
 
-  tracing::info!("[4/4] Feature Synthesis");
+  tracing::info!("[4/5] Feature Synthesis");
   synthesize_features(state, audit_id).await?;
+
+  tracing::info!("[5/5] Functional Purpose & Placement Generation");
+  build_functional_properties(state, audit_id).await?;
 
   tracing::info!("Pipeline complete for audit {}", audit_id);
   Ok(())
@@ -349,15 +361,40 @@ pub async fn synthesize_features(
   Ok(())
 }
 
-/// Extract behaviors from source code with functional semantics in context.
+/// Extract behaviors from source code, batched along the project-wide
+/// call DAG. Earlier batches contain callees; their behaviors are
+/// stored in `DataContext` before the next layer runs, so each batch
+/// can render `called_function_behaviors` from prior layers' output.
+/// See `crates/o11a-analyze/docs/build-plans/pipeline-dag.md`.
 #[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
 pub async fn build_behaviors(
   state: &PipelineState,
   audit_id: &str,
 ) -> Result<(), PipelineError> {
-  use crate::collaborator::agent::context;
+  use crate::collaborator::agent::{context, function_dag};
 
-  let contracts = {
+  // Clear any prior behaviors before re-running. We do this up front so
+  // re-runs don't accidentally feed last run's behaviors as callee
+  // context for this run's earliest batches.
+  {
+    let mut ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data = ctx.get_audit_mut(audit_id).ok_or_else(|| {
+      PipelineError::AuditNotFound {
+        audit_id: audit_id.to_string(),
+      }
+    })?;
+    audit_data
+      .topic_metadata
+      .retain(|_, m| !matches!(m, domain::TopicMetadata::BehaviorTopic { .. }));
+    domain::rebuild_feature_context(audit_data);
+  }
+
+  // Build batches once. The DAG is a function of analyzer state, which
+  // doesn't change during this step.
+  let batches = {
     let ctx = state
       .data_context
       .lock()
@@ -368,80 +405,110 @@ pub async fn build_behaviors(
         .ok_or_else(|| PipelineError::AuditNotFound {
           audit_id: audit_id.to_string(),
         })?;
-    context::collect_contracts_for_behavior_extraction(audit_data)
+    function_dag::build_batches(audit_data)
   };
 
-  if contracts.is_empty() {
-    tracing::info!("No contracts found, skipping behavior extraction");
+  if batches.is_empty() {
+    tracing::info!("No in-scope functions found, skipping behavior extraction");
     return Ok(());
   }
 
-  tracing::info!("Extracting behaviors from {} contracts", contracts.len());
-
-  let mut handles = Vec::new();
-  for contract in &contracts {
-    let json = contract.json.clone();
-    let name = contract.contract_name.clone();
-    handles.push(tokio::spawn(async move {
-      task::extract_behaviors_from_contract(&json, &name).await
-    }));
-  }
-
-  let mut all_behaviors: Vec<(topic::Topic, String)> = Vec::new(); // (member_topic, description)
-  for handle in handles {
-    match handle.await {
-      Ok(Ok(parsed)) => all_behaviors.extend(parsed.behaviors),
-      Ok(Err(e)) => tracing::error!("extract_behaviors failed: {}", e),
-      Err(e) => tracing::error!("extract_behaviors panicked: {}", e),
-    }
-  }
-
+  // Group batches into DAG layers so callees finish before callers.
+  // Within a layer, batches run concurrently; layers run sequentially.
+  // Layer assignment is implicit: `build_batches` already orders batches
+  // such that any prefix is a valid completion order. We accumulate
+  // results in DAG order by running batches in the order returned and
+  // committing after each batch — simpler than reconstructing layers.
+  let total_batches = batches.len();
   tracing::info!(
-    "Extracted {} behaviors from {} contracts",
-    all_behaviors.len(),
-    contracts.len()
+    "Extracting behaviors from {} batches (DAG-ordered)",
+    total_batches
   );
 
-  // Build in-memory metadata with allocated B ids.
-  let mut new_metadata = std::collections::BTreeMap::new();
+  let mut total_behaviors: usize = 0;
+  for (idx, batch) in batches.into_iter().enumerate() {
+    // Render the batch with current callee behaviors (already committed).
+    let rendered = {
+      let ctx = state
+        .data_context
+        .lock()
+        .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+      let audit_data = ctx.get_audit(audit_id).ok_or_else(|| {
+        PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        }
+      })?;
+      context::render_batch_for_behavior_extraction(&batch.members, audit_data)
+    };
 
-  for (member_topic, description) in &all_behaviors {
-    let beh_topic = topic::new_behavior_topic(ids::allocate_behavior_id());
+    let Some(rendered) = rendered else {
+      tracing::debug!(
+        "Batch {}/{} has no renderable members, skipping",
+        idx + 1,
+        total_batches
+      );
+      continue;
+    };
 
-    new_metadata.insert(
-      beh_topic,
-      domain::TopicMetadata::BehaviorTopic {
-        topic: beh_topic,
-        description: description.clone(),
-        member_topic: *member_topic,
-        author: Author::System,
-        created_at: None,
-      },
+    let parsed =
+      match task::extract_behaviors_from_batch(&rendered.json, &rendered.label)
+        .await
+      {
+        Ok(p) => p,
+        Err(e) => {
+          tracing::error!(
+            "extract_behaviors_from_batch failed for batch {}/{} ({}): {}",
+            idx + 1,
+            total_batches,
+            rendered.label,
+            e
+          );
+          continue;
+        }
+      };
+
+    // Commit this batch's behaviors before rendering the next batch so
+    // downstream batches see them in `called_function_behaviors`.
+    let added = parsed.behaviors.len();
+    {
+      let mut ctx = state
+        .data_context
+        .lock()
+        .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+      let audit_data = ctx.get_audit_mut(audit_id).ok_or_else(|| {
+        PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        }
+      })?;
+      for (member_topic, description) in parsed.behaviors {
+        let beh_topic = topic::new_behavior_topic(ids::allocate_behavior_id());
+        audit_data.topic_metadata.insert(
+          beh_topic,
+          domain::TopicMetadata::BehaviorTopic {
+            topic: beh_topic,
+            description,
+            member_topic,
+            author: Author::System,
+            created_at: None,
+          },
+        );
+      }
+      domain::rebuild_feature_context(audit_data);
+    }
+    total_behaviors += added;
+    tracing::debug!(
+      "Batch {}/{} ({}): {} behaviors",
+      idx + 1,
+      total_batches,
+      rendered.label,
+      added
     );
   }
 
-  // Update in-memory state
-  let mut ctx = state
-    .data_context
-    .lock()
-    .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
-  let audit_data = ctx.get_audit_mut(audit_id).ok_or_else(|| {
-    PipelineError::AuditNotFound {
-      audit_id: audit_id.to_string(),
-    }
-  })?;
-
-  // Clear old behaviors
-  audit_data
-    .topic_metadata
-    .retain(|_, m| !matches!(m, domain::TopicMetadata::BehaviorTopic { .. }));
-
-  audit_data.topic_metadata.extend(new_metadata);
-  domain::rebuild_feature_context(audit_data);
-
   tracing::info!(
-    "Completed behavior extraction: {} behaviors",
-    all_behaviors.len()
+    "Completed behavior extraction: {} behaviors across {} batches",
+    total_behaviors,
+    total_batches
   );
 
   Ok(())
@@ -824,6 +891,7 @@ pub async fn build_semantic_links(
         target_topic: topic::new_node_topic(&-1),
         omit_function_and_modifier_bodies: true,
         include_untrusted_comments: true,
+        flag_non_pure_subjects: false,
       };
       let signatures_source: String = member_topics
         .iter()
@@ -893,6 +961,7 @@ pub async fn build_semantic_links(
         target_topic: topic::new_node_topic(&-1),
         omit_function_and_modifier_bodies: true,
         include_untrusted_comments: true,
+        flag_non_pure_subjects: false,
       };
       let signatures_source: String = contract_topics
         .iter()
@@ -1011,6 +1080,7 @@ pub async fn build_semantic_links(
             target_topic: *mt,
             omit_function_and_modifier_bodies: false,
             include_untrusted_comments: true,
+            flag_non_pure_subjects: false,
           };
           context::render_member_for_agent(mt, &body_ctx, audit_data)
         })
@@ -1076,7 +1146,7 @@ pub async fn build_semantic_links(
     let link_count = all_links.len();
     for link in all_links {
       let sem_topic = topic::new_functional_property_topic(
-        ids::allocate_functional_semantic_id(),
+        ids::allocate_functional_property_id(),
       );
       audit_data.topic_metadata.insert(
         sem_topic,
@@ -1256,6 +1326,213 @@ fn merge_condensed_entry(
   }
 }
 
+/// Generate functional purpose and placement rationale for every non-pure
+/// subject in every in-scope function/modifier with a feature link. Reuses
+/// the same DAG batches as behavior extraction so callee context (already-
+/// extracted behaviors) is available to the LLM. Members without a feature
+/// link or without any non-pure subjects are skipped — featureless members
+/// are logged as a reconciliation gap. See pipeline-dag.md step 5.
+#[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
+pub async fn build_functional_properties(
+  state: &PipelineState,
+  audit_id: &str,
+) -> Result<(), PipelineError> {
+  use crate::collaborator::agent::{context, function_dag};
+
+  // Clear any prior FunctionalPurposeTopic / PlacementRationaleTopic
+  // entries so re-runs don't accumulate stale generations. Sibling
+  // FunctionalSemanticTopic entries are preserved — they're outputs of a
+  // different pipeline step.
+  {
+    let mut ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data = ctx.get_audit_mut(audit_id).ok_or_else(|| {
+      PipelineError::AuditNotFound {
+        audit_id: audit_id.to_string(),
+      }
+    })?;
+    audit_data.topic_metadata.retain(|_, m| {
+      !matches!(
+        m,
+        domain::TopicMetadata::FunctionalPurposeTopic { .. }
+          | domain::TopicMetadata::PlacementRationaleTopic { .. }
+      )
+    });
+    domain::rebuild_feature_context(audit_data);
+  }
+
+  // Reuse the DAG batches from behavior extraction. Same callee context
+  // is available; the only difference is that we render with
+  // `flag_non_pure_subjects: true` and inject feature + behaviors per
+  // member.
+  let batches = {
+    let ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data =
+      ctx
+        .get_audit(audit_id)
+        .ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
+    function_dag::build_batches(audit_data)
+  };
+
+  if batches.is_empty() {
+    tracing::info!(
+      "No in-scope functions found, skipping functional property generation"
+    );
+    return Ok(());
+  }
+
+  let total_batches = batches.len();
+  tracing::info!(
+    "Generating functional properties across {} batches (in parallel)",
+    total_batches
+  );
+
+  // Render every eligible batch up front under a single lock acquisition,
+  // counting featureless members for the reconciliation-gap report.
+  // Batches without eligible subjects are dropped here so they don't take
+  // a parallelism slot.
+  let mut rendered_batches: Vec<context::BatchForExtraction> = Vec::new();
+  let mut total_skipped_no_feature: usize = 0;
+  {
+    let ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data =
+      ctx
+        .get_audit(audit_id)
+        .ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
+    for batch in &batches {
+      total_skipped_no_feature += batch
+        .members
+        .iter()
+        .filter(|m| !member_has_feature_link(m, audit_data))
+        .count();
+      if let Some(rendered) = context::render_batch_for_functional_properties(
+        &batch.members,
+        audit_data,
+      ) {
+        rendered_batches.push(rendered);
+      }
+    }
+  }
+
+  // Functional-property batches have no inter-batch dependencies — each
+  // generates its own subjects from already-committed feature and
+  // behavior context. Spawn all LLM calls concurrently.
+  let mut handles = Vec::new();
+  for rendered in rendered_batches {
+    handles.push(tokio::spawn(async move {
+      let result = task::extract_functional_properties_from_batch(
+        &rendered.json,
+        &rendered.label,
+      )
+      .await;
+      (rendered.label, result)
+    }));
+  }
+
+  let mut all_entries: Vec<task::ParsedSubjectFunctionalProperties> =
+    Vec::new();
+  for handle in handles {
+    match handle.await {
+      Ok((_label, Ok(parsed))) => all_entries.extend(parsed.entries),
+      Ok((label, Err(e))) => tracing::error!(
+        "extract_functional_properties_from_batch failed for {}: {}",
+        label,
+        e
+      ),
+      Err(e) => tracing::error!(
+        "extract_functional_properties_from_batch panicked: {}",
+        e
+      ),
+    }
+  }
+
+  let total_subjects = all_entries.len();
+  {
+    let mut ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data = ctx.get_audit_mut(audit_id).ok_or_else(|| {
+      PipelineError::AuditNotFound {
+        audit_id: audit_id.to_string(),
+      }
+    })?;
+    for entry in all_entries {
+      let purpose_topic = topic::new_functional_property_topic(
+        ids::allocate_functional_property_id(),
+      );
+      audit_data.topic_metadata.insert(
+        purpose_topic,
+        domain::TopicMetadata::FunctionalPurposeTopic {
+          topic: purpose_topic,
+          description: entry.functional_purpose,
+          subject_topic: entry.subject_topic,
+          author: Author::System,
+          created_at: None,
+        },
+      );
+      let placement_topic = topic::new_functional_property_topic(
+        ids::allocate_functional_property_id(),
+      );
+      audit_data.topic_metadata.insert(
+        placement_topic,
+        domain::TopicMetadata::PlacementRationaleTopic {
+          topic: placement_topic,
+          description: entry.placement_rationale,
+          subject_topic: entry.subject_topic,
+          author: Author::System,
+          created_at: None,
+        },
+      );
+    }
+    domain::rebuild_feature_context(audit_data);
+  }
+
+  if total_skipped_no_feature > 0 {
+    tracing::warn!(
+      "Skipped {} member(s) with no feature link \u{2014} reconciliation gap",
+      total_skipped_no_feature
+    );
+  }
+  tracing::info!(
+    "Completed functional property generation: {} subjects across {} batches",
+    total_subjects,
+    total_batches
+  );
+
+  Ok(())
+}
+
+/// Returns true when `member` has at least one behavior linked to some
+/// feature. Mirrors the eligibility check inside
+/// `context::render_batch_for_functional_properties` so the skip metric
+/// reported by `build_functional_properties` matches what the renderer
+/// actually drops.
+fn member_has_feature_link(
+  member: &topic::Topic,
+  audit_data: &domain::AuditData,
+) -> bool {
+  let Some(beh_topics) = audit_data.member_behaviors.get(member) else {
+    return false;
+  };
+  audit_data
+    .feature_behavior_links
+    .values()
+    .any(|feat_behs| beh_topics.iter().any(|bt| feat_behs.contains(bt)))
+}
+
 #[cfg(test)]
 mod merge_condensed_entry_tests {
   use super::*;
@@ -1351,5 +1628,78 @@ mod merge_condensed_entry_tests {
     // sort is applied because we didn't compute the merged set.
     assert_eq!(ids, vec!["D42", "D7"]);
     assert_eq!(merged.match_source, MatchSource::Mechanical);
+  }
+}
+
+#[cfg(test)]
+mod member_has_feature_link_tests {
+  //! Tests for the helper that decides whether a function member is
+  //! eligible for functional-purpose / placement-rationale generation.
+  //! Mirrors the eligibility check inside
+  //! `context::render_batch_for_functional_properties`.
+  use super::*;
+  use crate::collaborator::models::Author;
+  use crate::domain::{TopicMetadata, new_audit_data};
+  use std::collections::HashSet;
+
+  fn empty_audit() -> domain::AuditData {
+    new_audit_data("test".to_string(), HashSet::new(), None)
+  }
+
+  fn install_behavior_for_member(
+    audit: &mut domain::AuditData,
+    member: topic::Topic,
+    beh: topic::Topic,
+  ) {
+    audit.topic_metadata.insert(
+      beh,
+      TopicMetadata::BehaviorTopic {
+        topic: beh,
+        description: "does X".to_string(),
+        member_topic: member,
+        author: Author::System,
+        created_at: None,
+      },
+    );
+    audit.member_behaviors.entry(member).or_default().push(beh);
+  }
+
+  #[test]
+  fn no_behaviors_means_no_link() {
+    let audit = empty_audit();
+    let member = topic::new_node_topic(&5);
+    assert!(!member_has_feature_link(&member, &audit));
+  }
+
+  #[test]
+  fn behaviors_without_feature_link_means_no_link() {
+    let mut audit = empty_audit();
+    let member = topic::new_node_topic(&5);
+    let beh = topic::new_behavior_topic(1);
+    install_behavior_for_member(&mut audit, member, beh);
+    assert!(!member_has_feature_link(&member, &audit));
+  }
+
+  #[test]
+  fn behavior_in_a_feature_link_is_recognized() {
+    let mut audit = empty_audit();
+    let member = topic::new_node_topic(&5);
+    let beh = topic::new_behavior_topic(1);
+    let feat = topic::new_feature_topic(1);
+    install_behavior_for_member(&mut audit, member, beh);
+    audit.feature_behavior_links.insert(feat, vec![beh]);
+    assert!(member_has_feature_link(&member, &audit));
+  }
+
+  #[test]
+  fn behavior_in_unrelated_feature_link_is_not_a_match() {
+    let mut audit = empty_audit();
+    let member = topic::new_node_topic(&5);
+    let beh = topic::new_behavior_topic(1);
+    let feat = topic::new_feature_topic(1);
+    let other_beh = topic::new_behavior_topic(2);
+    install_behavior_for_member(&mut audit, member, beh);
+    audit.feature_behavior_links.insert(feat, vec![other_beh]);
+    assert!(!member_has_feature_link(&member, &audit));
   }
 }

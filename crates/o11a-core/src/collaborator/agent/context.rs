@@ -83,6 +83,8 @@ fn resolve_topic_name(topic: &topic::Topic, audit_data: &AuditData) -> String {
     Some(TopicMetadata::RequirementTopic { description, .. })
     | Some(TopicMetadata::BehaviorTopic { description, .. })
     | Some(TopicMetadata::FunctionalSemanticTopic { description, .. })
+    | Some(TopicMetadata::FunctionalPurposeTopic { description, .. })
+    | Some(TopicMetadata::PlacementRationaleTopic { description, .. })
     | Some(TopicMetadata::ThreatTopic { description, .. })
     | Some(TopicMetadata::InvariantTopic { description, .. }) => {
       description.clone()
@@ -199,6 +201,8 @@ fn plaintext_name_from_metadata(metadata: &TopicMetadata) -> String {
     TopicMetadata::RequirementTopic { description, .. }
     | TopicMetadata::BehaviorTopic { description, .. }
     | TopicMetadata::FunctionalSemanticTopic { description, .. }
+    | TopicMetadata::FunctionalPurposeTopic { description, .. }
+    | TopicMetadata::PlacementRationaleTopic { description, .. }
     | TopicMetadata::ThreatTopic { description, .. }
     | TopicMetadata::InvariantTopic { description, .. } => description.clone(),
     TopicMetadata::DocumentationTopic { .. } => {
@@ -336,6 +340,7 @@ fn render_condition_ast_snippet(
         target_topic: *target_topic,
         omit_function_and_modifier_bodies: false,
         include_untrusted_comments: true,
+        flag_non_pure_subjects: false,
       };
       Some(render_solidity_ast_snippet(node, &render_ctx, audit_data))
     }
@@ -408,6 +413,12 @@ pub struct ASTRenderContext {
   /// (semantic linking, topic views). Auditor-authored `Info` comments
   /// are always included regardless.
   pub include_untrusted_comments: bool,
+  /// When true, every rendered AST node whose topic resolves to a non-pure
+  /// subject gets `"is_non_pure": true` injected into its JSON. Used by the
+  /// functional purpose / placement rationale generation step (pipeline
+  /// step 5) so the LLM can see, inline in the AST, which subjects it
+  /// must produce output for. Defaults to false everywhere else.
+  pub flag_non_pure_subjects: bool,
 }
 
 /// Render a type AST node to a plain-text string directly from its fields.
@@ -455,7 +466,8 @@ fn lookup_topic_semantics(
   node_topic: &topic::Topic,
   audit_data: &AuditData,
 ) -> Vec<serde_json::Value> {
-  let Some(sem_topics) = audit_data.declaration_semantics.get(node_topic) else {
+  let Some(sem_topics) = audit_data.declaration_semantics.get(node_topic)
+  else {
     return Vec::new();
   };
   sem_topics
@@ -552,6 +564,20 @@ fn make_node_json(
     obj["behaviors"] = json!(behaviors);
   }
   obj
+}
+
+/// Returns true when the topic for `node_id` is an `UnnamedTopic` whose
+/// kind classifies as `NonPure` per `UnnamedTopicKind::purity()`. Used by
+/// the renderer when `ASTRenderContext::flag_non_pure_subjects` is set, to
+/// inject `is_non_pure: true` on each non-pure subject's JSON.
+fn node_is_non_pure(node_id: i32, audit_data: &AuditData) -> bool {
+  let topic = topic::new_node_topic(&node_id);
+  match audit_data.topic_metadata.get(&topic) {
+    Some(TopicMetadata::UnnamedTopic { kind, .. }) => {
+      matches!(kind.purity(), crate::domain::SubjectPurity::NonPure)
+    }
+    _ => false,
+  }
 }
 
 /// Render an ASTNode as a structured AST snippet (JSON value).
@@ -1008,6 +1034,7 @@ fn render_solidity_ast_snippet(
         target_topic: render_ctx.target_topic,
         omit_function_and_modifier_bodies: true,
         include_untrusted_comments: render_ctx.include_untrusted_comments,
+        flag_non_pure_subjects: render_ctx.flag_non_pure_subjects,
       };
       let members: Vec<serde_json::Value> = nodes
         .iter()
@@ -1439,7 +1466,12 @@ fn render_solidity_ast_snippet(
     }
   };
 
-  make_node_json(obj, comments, semantics, behaviors)
+  let mut obj = make_node_json(obj, comments, semantics, behaviors);
+  if render_ctx.flag_non_pure_subjects && node_is_non_pure(node_id, audit_data)
+  {
+    obj["is_non_pure"] = json!(true);
+  }
+  obj
 }
 
 // ============================================================================
@@ -1959,6 +1991,7 @@ fn convert_reference(
         target_topic: *target_topic,
         omit_function_and_modifier_bodies: false,
         include_untrusted_comments: true,
+        flag_non_pure_subjects: false,
       };
       render_solidity_ast_snippet(solidity_node, &render_ctx, audit_data)
     }
@@ -2182,6 +2215,7 @@ pub fn build_agent_topic_context(
             target_topic: topic,
             omit_function_and_modifier_bodies: false,
             include_untrusted_comments: true,
+            flag_non_pure_subjects: false,
           };
           Some(render_solidity_ast_snippet(node, &render_ctx, audit_data))
         }
@@ -2243,6 +2277,8 @@ pub fn build_agent_topic_context(
     | TopicMetadata::RequirementTopic { .. }
     | TopicMetadata::BehaviorTopic { .. }
     | TopicMetadata::FunctionalSemanticTopic { .. }
+    | TopicMetadata::FunctionalPurposeTopic { .. }
+    | TopicMetadata::PlacementRationaleTopic { .. }
     | TopicMetadata::ThreatTopic { .. }
     | TopicMetadata::InvariantTopic { .. } => {
       let kind = match metadata {
@@ -2250,6 +2286,8 @@ pub fn build_agent_topic_context(
         TopicMetadata::RequirementTopic { .. } => "Requirement",
         TopicMetadata::BehaviorTopic { .. } => "Behavior",
         TopicMetadata::FunctionalSemanticTopic { .. } => "Semantic",
+        TopicMetadata::FunctionalPurposeTopic { .. } => "Purpose",
+        TopicMetadata::PlacementRationaleTopic { .. } => "Placement",
         TopicMetadata::ThreatTopic { .. } => "Threat",
         TopicMetadata::InvariantTopic { .. } => "Invariant",
         _ => unreachable!(),
@@ -2331,6 +2369,7 @@ pub fn render_contract_members_for_semantic_linking(
     target_topic: topic::new_node_topic(&-1),
     omit_function_and_modifier_bodies: true,
     include_untrusted_comments: true,
+    flag_non_pure_subjects: false,
   };
 
   let nodes = match contract_node {
@@ -2372,122 +2411,430 @@ pub fn render_contract_members_for_semantic_linking(
 }
 
 // ============================================================================
-// Behavior Extraction: Contract rendering with semantics
+// Behavior Extraction: Batch rendering (DAG-driven)
 // ============================================================================
 
-/// A pre-rendered contract with full member bodies and functional semantics
-/// for behavior extraction.
-pub struct ContractForBehaviorExtraction {
-  pub contract_topic: topic::Topic,
-  pub contract_name: String,
+/// One batch's pre-rendered JSON, ready to send to the LLM. Members are
+/// dependency-ordered: every callee that has behaviors already had them
+/// extracted in an earlier batch and appears in `called_function_behaviors`.
+pub struct BatchForExtraction {
+  pub members: Vec<topic::Topic>,
+  pub label: String,
   pub json: String,
 }
 
-/// Render a contract's members with full bodies and functional semantics
-/// annotated on declarations, for the behavior extraction LLM task.
-pub fn render_contract_for_behavior_extraction(
-  contract_node: &ASTNode,
+/// Render a batch of in-scope function/modifier topics for the
+/// behavior-extraction LLM call. Each member object carries: its
+/// rendered AST (signature + body), a flat `semantics` map for its
+/// scoped declarations, and a `called_function_behaviors` map of every
+/// callee's prior-extracted behaviors. See
+/// `crates/o11a-analyze/docs/build-plans/pipeline-dag.md` step 4.
+pub fn render_batch_for_behavior_extraction(
+  members: &[topic::Topic],
   audit_data: &AuditData,
-) -> Option<ContractForBehaviorExtraction> {
-  let name = match contract_node {
-    ASTNode::ContractDefinition { signature, .. } => {
-      let resolved_sig = signature.resolve(&audit_data.nodes);
-      match resolved_sig {
-        ASTNode::ContractSignature { name, .. } => name.clone(),
-        _ => {
-          let ct = topic::new_node_topic(&contract_node.node_id());
-          audit_data
-            .topic_metadata
-            .get(&ct)
-            .and_then(|m| m.name())
-            .unwrap_or("unknown")
-            .to_string()
-        }
-      }
-    }
-    _ => return None,
-  };
-
-  let members = contract_members(contract_node);
-
-  let contract_topic = topic::new_node_topic(&contract_node.node_id());
-
-  // Render with bodies included. Behavior extraction runs against trusted,
-  // pipeline-generated content only — functional semantics are now rendered
-  // inline on each AST node. The developer's own inline comments and NatSpec
-  // must not leak into this render.
+) -> Option<BatchForExtraction> {
   let render_ctx = ASTRenderContext {
-    target_topic: contract_topic,
+    target_topic: topic::new_node_topic(&-1),
     omit_function_and_modifier_bodies: false,
     include_untrusted_comments: false,
+    flag_non_pure_subjects: false,
   };
 
-  // Filter to functions and modifiers, excluding transitive members (e.g.,
-  // interface functions with an in-scope implementation). Behaviors for
-  // those will be extracted from the implementation contract instead.
-  let member_snippets: Vec<serde_json::Value> = members
-    .iter()
-    .filter(|m| {
-      let resolved = m.resolve(&audit_data.nodes);
-      if !matches!(
-        resolved,
-        ASTNode::FunctionDefinition { .. } | ASTNode::ModifierDefinition { .. }
-      ) {
-        return false;
-      }
-      let member_topic = topic::new_node_topic(&resolved.node_id());
-      audit_data
-        .topic_metadata
-        .get(&member_topic)
-        .and_then(|m| m.transitive_topic())
-        .is_none()
-    })
-    .map(|m| render_solidity_ast_snippet(m, &render_ctx, audit_data))
-    .collect();
+  let mut member_objs: Vec<serde_json::Value> = Vec::new();
+  for member in members {
+    let Some(obj) =
+      render_member_for_batch(member, &render_ctx, audit_data, false)
+    else {
+      continue;
+    };
+    member_objs.push(obj);
+  }
 
-  let obj = json!({
-    "contract_topic": contract_topic.id(),
-    "name": name,
-    "members": member_snippets,
-  });
+  if member_objs.is_empty() {
+    return None;
+  }
 
-  Some(ContractForBehaviorExtraction {
-    contract_topic,
-    contract_name: name,
+  let label = batch_label(members, audit_data);
+  let obj = json!({ "batch": member_objs });
+  Some(BatchForExtraction {
+    members: members.to_vec(),
+    label,
     json: serde_json::to_string(&obj).unwrap_or_default(),
   })
 }
 
-/// Collect all contracts rendered for behavior extraction.
-pub fn collect_contracts_for_behavior_extraction(
+/// Render one batch member as a JSON object with its definition,
+/// scoped semantics, and called-function behaviors. Shared between the
+/// behavior-extraction batch render (step 3) and the functional-
+/// property batch render (step 5); the only difference is whether the
+/// renderer flags non-pure subjects (`flag_non_pure_subjects` on
+/// `render_ctx`). Returns `None` if the member's AST node cannot be
+/// resolved or the topic is not a function/modifier.
+fn render_member_for_batch(
+  member: &topic::Topic,
+  render_ctx: &ASTRenderContext,
   audit_data: &AuditData,
-) -> Vec<ContractForBehaviorExtraction> {
-  let mut results = Vec::new();
-  for (path, ast) in &audit_data.asts {
-    // Only include contracts from in-scope files
-    if !audit_data.in_scope_files.contains(path) {
+  include_behaviors: bool,
+) -> Option<serde_json::Value> {
+  let Some(crate::domain::Node::Solidity(node)) = audit_data.nodes.get(member)
+  else {
+    return None;
+  };
+  let kind = match node {
+    ASTNode::FunctionDefinition { .. } => "function",
+    ASTNode::ModifierDefinition { .. } => "modifier",
+    _ => return None,
+  };
+  let name =
+    crate::collaborator::agent::function_dag::callable_name(member, audit_data);
+
+  let definition = render_solidity_ast_snippet(node, render_ctx, audit_data);
+  let semantics = collect_member_semantics(member, audit_data);
+  let called_behaviors = collect_called_function_behaviors(member, audit_data);
+
+  let mut obj = json!({
+    "topic": member.id(),
+    "name": name,
+    "kind": kind,
+    "definition": definition,
+    "semantics": semantics,
+    "called_function_behaviors": called_behaviors,
+  });
+  if include_behaviors {
+    let prior = crate::collaborator::agent::function_dag::behaviors_of(
+      member, audit_data,
+    );
+    obj["behaviors"] = json!(prior);
+  }
+  Some(obj)
+}
+
+/// Collect a flat map of declaration topic → {name, semantic} for every
+/// declaration scoped inside `member` (parameters, returns, body locals)
+/// plus every state variable mutated by the member. Declarations
+/// without a functional semantic are still listed (with `semantic: null`)
+/// so the LLM has a complete inventory of in-scope identifiers.
+fn collect_member_semantics(
+  member: &topic::Topic,
+  audit_data: &AuditData,
+) -> serde_json::Value {
+  use crate::domain::Scope;
+  let mut entries = serde_json::Map::new();
+
+  for (decl_topic, metadata) in &audit_data.topic_metadata {
+    let TopicMetadata::NamedTopic { name, scope, .. } = metadata else {
+      continue;
+    };
+    let in_member = match scope {
+      Scope::Member { member: m, .. }
+      | Scope::ContainingBlock { member: m, .. } => m == member,
+      _ => false,
+    };
+    if !in_member {
       continue;
     }
-    let sol_ast = match ast {
-      domain::AST::Solidity(sol_ast) => sol_ast,
-      _ => continue,
-    };
-    for node in &sol_ast.nodes {
-      let resolved = node.resolve(&audit_data.nodes);
-      if let ASTNode::ContractDefinition { .. } = resolved {
-        if !audit_data.in_scope_files.contains(path) {
-          continue;
-        }
+    let semantic = first_semantic(decl_topic, audit_data);
+    entries.insert(
+      decl_topic.id(),
+      json!({
+        "name": name,
+        "semantic": semantic,
+      }),
+    );
+  }
 
-        if let Some(rendered) =
-          render_contract_for_behavior_extraction(resolved, audit_data)
-        {
-          results.push(rendered);
-        }
+  // State variable mutations: pull the names + semantics for any state
+  // variable this member writes. Reads-only state vars surface inline
+  // through the renderer's per-node semantics.
+  if let Some(props) = audit_data.function_properties.get(member) {
+    let mutations = match props {
+      crate::domain::FunctionModProperties::FunctionProperties {
+        mutations,
+        ..
       }
+      | crate::domain::FunctionModProperties::ModifierProperties {
+        mutations,
+        ..
+      } => mutations,
+    };
+    for state_var in mutations {
+      if entries.contains_key(&state_var.id()) {
+        continue;
+      }
+      let Some(TopicMetadata::NamedTopic { name, .. }) =
+        audit_data.topic_metadata.get(state_var)
+      else {
+        continue;
+      };
+      let semantic = first_semantic(state_var, audit_data);
+      entries.insert(
+        state_var.id(),
+        json!({
+          "name": name,
+          "semantic": semantic,
+        }),
+      );
     }
   }
-  results
+
+  serde_json::Value::Object(entries)
+}
+
+/// Collect a flat map of callee topic → {name, behaviors} for every
+/// in-scope or out-of-scope function this member calls. Out-of-scope
+/// callees appear with an empty `behaviors` array, signalling "no
+/// behaviors available" to the LLM rather than leaving the callee
+/// implicit (see pipeline-dag pivotal decision #7).
+fn collect_called_function_behaviors(
+  member: &topic::Topic,
+  audit_data: &AuditData,
+) -> serde_json::Value {
+  let callees =
+    crate::collaborator::agent::function_dag::callees_of(member, audit_data);
+  let mut entries = serde_json::Map::new();
+  for callee in callees {
+    let name = crate::collaborator::agent::function_dag::callable_name(
+      &callee, audit_data,
+    );
+    let behaviors = crate::collaborator::agent::function_dag::behaviors_of(
+      &callee, audit_data,
+    );
+    entries.insert(
+      callee.id(),
+      json!({
+        "name": name,
+        "behaviors": behaviors,
+      }),
+    );
+  }
+  serde_json::Value::Object(entries)
+}
+
+/// Best-effort lookup of a single semantic description for a declaration.
+/// Returns `None` if no semantic exists; if multiple are present
+/// (condensation should have collapsed to one but the data shape allows
+/// many), returns the first by topic ID and warns so the divergence is
+/// surfaced rather than silently swallowed.
+fn first_semantic(
+  decl_topic: &topic::Topic,
+  audit_data: &AuditData,
+) -> Option<String> {
+  let sem_topics = audit_data.declaration_semantics.get(decl_topic)?;
+  if sem_topics.len() > 1 {
+    tracing::warn!(
+      declaration = %decl_topic.id(),
+      count = sem_topics.len(),
+      "declaration has multiple functional semantics; using the first \u{2014} \
+       condensation may have failed"
+    );
+  }
+  for sem_topic in sem_topics {
+    if let Some(TopicMetadata::FunctionalSemanticTopic {
+      description, ..
+    }) = audit_data.topic_metadata.get(sem_topic)
+    {
+      return Some(description.clone());
+    }
+  }
+  None
+}
+
+/// A short batch label suitable for log lines and LLM-call labels.
+/// Uses the first member's qualified name plus the member count.
+fn batch_label(members: &[topic::Topic], audit_data: &AuditData) -> String {
+  let first = members
+    .first()
+    .map(|m| {
+      audit_data
+        .topic_metadata
+        .get(m)
+        .and_then(|md| md.name())
+        .unwrap_or("unknown")
+        .to_string()
+    })
+    .unwrap_or_else(|| "empty".to_string());
+  if members.len() == 1 {
+    first
+  } else {
+    format!("{}+{}", first, members.len() - 1)
+  }
+}
+
+/// Render a batch for the functional-purpose / placement-rationale LLM
+/// call (pipeline step 5). Same per-member structure as the behavior
+/// batch (definition + semantics + called_function_behaviors), plus:
+///
+/// - `non_pure_subjects` at the top level: the canonical list of
+///   non-pure subject topics the LLM must produce output for.
+/// - `behaviors` per member: the function's already-extracted behaviors.
+/// - `feature` per member: the linked feature's description and
+///   requirements (or `null` when no feature link exists; callers should
+///   filter out featureless members before rendering).
+/// - `is_non_pure: true` injected on each non-pure node in the rendered
+///   AST (via `flag_non_pure_subjects: true`).
+///
+/// Returns `None` if no member has any non-pure subjects (no work to do
+/// for this batch).
+pub fn render_batch_for_functional_properties(
+  members: &[topic::Topic],
+  audit_data: &AuditData,
+) -> Option<BatchForExtraction> {
+  let render_ctx = ASTRenderContext {
+    target_topic: topic::new_node_topic(&-1),
+    omit_function_and_modifier_bodies: false,
+    include_untrusted_comments: false,
+    flag_non_pure_subjects: true,
+  };
+
+  let mut member_objs: Vec<serde_json::Value> = Vec::new();
+  let mut all_non_pure_subjects: Vec<String> = Vec::new();
+
+  for member in members {
+    let Some(mut obj) =
+      render_member_for_batch(member, &render_ctx, audit_data, true)
+    else {
+      continue;
+    };
+    let feature = lookup_member_feature(member, audit_data);
+    if feature.is_null() {
+      // No feature link — skip this member entirely. The caller has
+      // already been warned about the reconciliation gap.
+      continue;
+    }
+    obj["feature"] = feature;
+
+    let mut subjects = collect_non_pure_subjects_in_member(member, audit_data);
+    if subjects.is_empty() {
+      // Pure-only function: nothing to ask the LLM about.
+      continue;
+    }
+    all_non_pure_subjects.append(&mut subjects);
+
+    member_objs.push(obj);
+  }
+
+  if member_objs.is_empty() || all_non_pure_subjects.is_empty() {
+    return None;
+  }
+
+  let label = batch_label(members, audit_data);
+  let obj = json!({
+    "non_pure_subjects": all_non_pure_subjects,
+    "batch": member_objs,
+  });
+  Some(BatchForExtraction {
+    members: members.to_vec(),
+    label,
+    json: serde_json::to_string(&obj).unwrap_or_default(),
+  })
+}
+
+/// Look up the feature linked to a member via reconciliation behaviors.
+/// Returns a JSON object with name/description/requirements, or
+/// `Value::Null` when no feature link exists (the caller treats this as
+/// a skip signal for the member). Warns when more than one feature
+/// matches so the auditor sees the ambiguity and reconciliation can be
+/// reviewed.
+fn lookup_member_feature(
+  member: &topic::Topic,
+  audit_data: &AuditData,
+) -> serde_json::Value {
+  let Some(beh_topics) = audit_data.member_behaviors.get(member) else {
+    return serde_json::Value::Null;
+  };
+  let matches: Vec<&topic::Topic> = audit_data
+    .feature_behavior_links
+    .iter()
+    .filter_map(|(feat_topic, feat_behs)| {
+      if beh_topics.iter().any(|bt| feat_behs.contains(bt)) {
+        Some(feat_topic)
+      } else {
+        None
+      }
+    })
+    .collect();
+  if matches.len() > 1 {
+    let ids: Vec<String> = matches.iter().map(|t| t.id()).collect();
+    tracing::warn!(
+      member = %member.id(),
+      "member is linked to {} features ({:?}); using the first \u{2014} \
+       reconciliation may need review",
+      matches.len(),
+      ids
+    );
+  }
+  for feat_topic in matches {
+    let Some(TopicMetadata::FeatureTopic {
+      name, description, ..
+    }) = audit_data.topic_metadata.get(feat_topic)
+    else {
+      continue;
+    };
+    let requirements = audit_data
+      .feature_requirement_links
+      .get(feat_topic)
+      .map(|reqs| {
+        reqs
+          .iter()
+          .filter_map(|r| {
+            if let Some(TopicMetadata::RequirementTopic {
+              description, ..
+            }) = audit_data.topic_metadata.get(r)
+            {
+              Some(description.clone())
+            } else {
+              None
+            }
+          })
+          .collect::<Vec<_>>()
+      })
+      .unwrap_or_default();
+    return json!({
+      "topic": feat_topic.id(),
+      "name": name,
+      "description": description,
+      "requirements": requirements,
+    });
+  }
+  serde_json::Value::Null
+}
+
+/// Walk a member's body and collect the topic IDs of every non-pure
+/// subject within it. Order is source-order via the AST, matching how
+/// the renderer emits them. Used to populate the top-level
+/// `non_pure_subjects` list in the functional-property batch JSON.
+fn collect_non_pure_subjects_in_member(
+  member: &topic::Topic,
+  audit_data: &AuditData,
+) -> Vec<String> {
+  let Some(crate::domain::Node::Solidity(node)) = audit_data.nodes.get(member)
+  else {
+    return Vec::new();
+  };
+  let mut out: Vec<String> = Vec::new();
+  let mut seen: HashSet<topic::Topic> = HashSet::new();
+  walk_for_non_pure(node, audit_data, &mut out, &mut seen);
+  out
+}
+
+fn walk_for_non_pure(
+  node: &ASTNode,
+  audit_data: &AuditData,
+  out: &mut Vec<String>,
+  seen: &mut HashSet<topic::Topic>,
+) {
+  let resolved = node.resolve(&audit_data.nodes);
+  let node_topic = topic::new_node_topic(&resolved.node_id());
+  if let Some(TopicMetadata::UnnamedTopic { kind, .. }) =
+    audit_data.topic_metadata.get(&node_topic)
+    && matches!(kind.purity(), crate::domain::SubjectPurity::NonPure)
+    && seen.insert(node_topic)
+  {
+    out.push(node_topic.id());
+  }
+  for child in resolved.nodes() {
+    walk_for_non_pure(child, audit_data, out, seen);
+  }
 }
 
 // ============================================================================
@@ -3728,7 +4075,20 @@ mod tests {
 
     audit_data
       .nodes
-      .insert(group_topic.clone(), Node::Solidity(group_node));
+      .insert(group_topic.clone(), Node::Solidity(group_node.clone()));
+
+    // The batch renderer looks up the function node by its member topic
+    // (audit_data.nodes), so the function definition needs to live there
+    // too. In a real audit this is populated by the analyzer's
+    // populate_nodes_pass.
+    let function_node_for_lookup = match &group_node {
+      ASTNode::ContractMemberGroup { members, .. } => members[0].clone(),
+      _ => unreachable!(),
+    };
+    audit_data.nodes.insert(
+      event_topic.clone(),
+      Node::Solidity(function_node_for_lookup),
+    );
 
     audit_data.topic_metadata.insert(
       group_topic.clone(),
@@ -3800,19 +4160,29 @@ mod tests {
       .or_default()
       .push(semantic_topic);
 
+    // contract_node is unused under the batch renderer (which keys off
+    // member topics directly). Reference it once to suppress the
+    // unused-variable lint without changing the rest of the test setup.
+    let _ = &contract_node;
+
     let rendered =
-      render_contract_for_behavior_extraction(&contract_node, &audit_data)
+      render_batch_for_behavior_extraction(&[event_topic.clone()], &audit_data)
         .expect("behavior extraction returned None");
 
     let value: serde_json::Value = serde_json::from_str(&rendered.json)
       .expect("behavior extraction produced invalid JSON");
     let members = value
-      .get("members")
+      .get("batch")
       .and_then(|m| m.as_array())
-      .expect("members field missing");
+      .expect("batch field missing");
     assert_eq!(members.len(), 1, "expected one rendered function member");
 
-    let comments: Vec<&str> = members[0]
+    // The function's own comments live on its definition (the inner
+    // FunctionDefinition AST node).
+    let definition = members[0]
+      .get("definition")
+      .expect("definition field missing on batch member");
+    let comments: Vec<&str> = definition
       .get("comments")
       .and_then(|c| c.as_array())
       .map(|arr| arr.iter().filter_map(|c| c.as_str()).collect())
@@ -3829,17 +4199,29 @@ mod tests {
       comments
     );
 
-    let semantics = members[0]
+    // The batch render emits semantics as a flat per-function map keyed
+    // by declaration topic. The per-node inline semantics still live on
+    // the definition's AST nodes; either is acceptable evidence that the
+    // trusted annotation surfaced.
+    let inline_semantics = definition
       .get("semantics")
       .and_then(|s| s.as_array())
-      .expect("semantics field missing on function member");
+      .map(|arr| {
+        arr
+          .iter()
+          .filter_map(|s| {
+            s.get("description")
+              .and_then(|v| v.as_str())
+              .map(String::from)
+          })
+          .collect::<Vec<_>>()
+      })
+      .unwrap_or_default();
     assert!(
-      semantics.iter().any(|s| s
-        .get("description")
-        .and_then(|v| v.as_str())
-        .is_some_and(|text| text.contains("admin role"))),
-      "expected trusted semantic annotation on function member, got: {:?}",
-      semantics
+      inline_semantics.iter().any(|t| t.contains("admin role")),
+      "expected trusted inline semantic annotation on function definition, \
+       got: {:?}",
+      inline_semantics
     );
   }
 
@@ -4528,8 +4910,8 @@ mod synthesis_render_tests {
   //! under test reads only `audit_data.topic_metadata`.
   use super::*;
   use crate::domain::{
-    self, ContractKind, FunctionKind, NamedTopicKind,
-    NamedTopicVisibility, Scope, TopicMetadata, new_audit_data,
+    self, ContractKind, FunctionKind, NamedTopicKind, NamedTopicVisibility,
+    Scope, TopicMetadata, new_audit_data,
   };
   use std::collections::HashSet;
   use topic::Topic;
@@ -4747,5 +5129,960 @@ mod synthesis_render_tests {
     assert!(topics.contains(&balance.id().to_string()));
     assert!(topics.contains(&event_transfer.id().to_string()));
     assert!(!topics.contains(&transfer.id().to_string()));
+  }
+}
+
+#[cfg(test)]
+mod functional_property_render_tests {
+  //! Tests for the helpers used by `render_batch_for_functional_properties`
+  //! and the rest of pipeline step 5: `node_is_non_pure`,
+  //! `walk_for_non_pure`, `lookup_member_feature`, `first_semantic`. These
+  //! exercise behavior at the topic-metadata layer without requiring full
+  //! AST construction where possible.
+  use super::*;
+  use crate::domain::{
+    self, CallKind, FunctionModProperties, NamedTopicKind,
+    NamedTopicVisibility, Scope, TopicMetadata, UnnamedTopicKind,
+    new_audit_data,
+  };
+  use std::collections::HashSet;
+
+  fn empty_audit() -> domain::AuditData {
+    new_audit_data("test".to_string(), HashSet::new(), None)
+  }
+
+  fn add_unnamed_topic(
+    audit: &mut domain::AuditData,
+    id: i32,
+    kind: UnnamedTopicKind,
+  ) -> topic::Topic {
+    let t = topic::new_node_topic(&id);
+    audit.topic_metadata.insert(
+      t,
+      TopicMetadata::UnnamedTopic {
+        topic: t,
+        scope: Scope::Global,
+        kind,
+        transitive_topic: None,
+      },
+    );
+    t
+  }
+
+  #[test]
+  fn node_is_non_pure_recognizes_state_write() {
+    let mut audit = empty_audit();
+    let t =
+      add_unnamed_topic(&mut audit, 10, UnnamedTopicKind::VariableMutation);
+    assert!(node_is_non_pure(t.numeric_id(), &audit));
+  }
+
+  #[test]
+  fn node_is_non_pure_recognizes_non_pure_call() {
+    let mut audit = empty_audit();
+    let t = add_unnamed_topic(
+      &mut audit,
+      10,
+      UnnamedTopicKind::FunctionCall(CallKind::NonPure),
+    );
+    assert!(node_is_non_pure(t.numeric_id(), &audit));
+  }
+
+  #[test]
+  fn node_is_non_pure_rejects_pure_call() {
+    let mut audit = empty_audit();
+    let t = add_unnamed_topic(
+      &mut audit,
+      10,
+      UnnamedTopicKind::FunctionCall(CallKind::Pure),
+    );
+    assert!(!node_is_non_pure(t.numeric_id(), &audit));
+  }
+
+  #[test]
+  fn node_is_non_pure_rejects_unknown_node_id() {
+    let audit = empty_audit();
+    assert!(!node_is_non_pure(999, &audit));
+  }
+
+  #[test]
+  fn first_semantic_returns_only_present_description() {
+    let mut audit = empty_audit();
+    let decl = topic::new_node_topic(&5);
+    let sem = topic::new_functional_property_topic(1);
+    audit.topic_metadata.insert(
+      sem,
+      TopicMetadata::FunctionalSemanticTopic {
+        topic: sem,
+        description: "a balance".to_string(),
+        declaration_topic: decl,
+        documentation_topics: vec![],
+        author: crate::collaborator::models::Author::System,
+        created_at: None,
+        match_source: None,
+      },
+    );
+    audit.declaration_semantics.insert(decl, vec![sem]);
+
+    assert_eq!(first_semantic(&decl, &audit), Some("a balance".to_string()));
+  }
+
+  #[test]
+  fn first_semantic_returns_none_when_absent() {
+    let audit = empty_audit();
+    let decl = topic::new_node_topic(&5);
+    assert_eq!(first_semantic(&decl, &audit), None);
+  }
+
+  #[test]
+  fn first_semantic_warns_and_returns_first_when_multiple() {
+    let mut audit = empty_audit();
+    let decl = topic::new_node_topic(&5);
+    let sem1 = topic::new_functional_property_topic(1);
+    let sem2 = topic::new_functional_property_topic(2);
+    for (sem, desc) in [(sem1, "first"), (sem2, "second")] {
+      audit.topic_metadata.insert(
+        sem,
+        TopicMetadata::FunctionalSemanticTopic {
+          topic: sem,
+          description: desc.to_string(),
+          declaration_topic: decl,
+          documentation_topics: vec![],
+          author: crate::collaborator::models::Author::System,
+          created_at: None,
+          match_source: None,
+        },
+      );
+    }
+    audit.declaration_semantics.insert(decl, vec![sem1, sem2]);
+
+    // The function picks the first by iteration order — that's `sem1`.
+    assert_eq!(first_semantic(&decl, &audit), Some("first".to_string()));
+  }
+
+  #[test]
+  fn lookup_member_feature_returns_null_when_no_behaviors() {
+    let audit = empty_audit();
+    let member = topic::new_node_topic(&5);
+    assert!(lookup_member_feature(&member, &audit).is_null());
+  }
+
+  #[test]
+  fn lookup_member_feature_returns_null_when_no_link() {
+    let mut audit = empty_audit();
+    let member = topic::new_node_topic(&5);
+    let beh = topic::new_behavior_topic(1);
+    audit.topic_metadata.insert(
+      beh,
+      TopicMetadata::BehaviorTopic {
+        topic: beh,
+        description: "does X".to_string(),
+        member_topic: member,
+        author: crate::collaborator::models::Author::System,
+        created_at: None,
+      },
+    );
+    audit.member_behaviors.insert(member, vec![beh]);
+    assert!(lookup_member_feature(&member, &audit).is_null());
+  }
+
+  #[test]
+  fn lookup_member_feature_returns_feature_object_on_match() {
+    let mut audit = empty_audit();
+    let member = topic::new_node_topic(&5);
+    let beh = topic::new_behavior_topic(1);
+    let feat = topic::new_feature_topic(1);
+    let req = topic::new_requirement_topic(1);
+    audit.topic_metadata.insert(
+      beh,
+      TopicMetadata::BehaviorTopic {
+        topic: beh,
+        description: "does X".to_string(),
+        member_topic: member,
+        author: crate::collaborator::models::Author::System,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      feat,
+      TopicMetadata::FeatureTopic {
+        topic: feat,
+        name: "Vault".to_string(),
+        description: "Vault feature".to_string(),
+        author: crate::collaborator::models::Author::System,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      req,
+      TopicMetadata::RequirementTopic {
+        topic: req,
+        description: "must vault".to_string(),
+        section_topic: topic::new_documentation_topic(1),
+        author: crate::collaborator::models::Author::System,
+        created_at: None,
+      },
+    );
+    audit.member_behaviors.insert(member, vec![beh]);
+    audit.feature_behavior_links.insert(feat, vec![beh]);
+    audit.feature_requirement_links.insert(feat, vec![req]);
+
+    let value = lookup_member_feature(&member, &audit);
+    assert_eq!(value["topic"], feat.id());
+    assert_eq!(value["name"], "Vault");
+    assert_eq!(value["description"], "Vault feature");
+    assert_eq!(value["requirements"][0], "must vault");
+  }
+
+  // ----- AST-driven walks -----
+
+  fn dummy_loc() -> crate::solidity::ast::SourceLocation {
+    crate::solidity::ast::SourceLocation {
+      start: None,
+      length: None,
+      index: None,
+    }
+  }
+
+  fn make_literal(node_id: i32) -> ASTNode {
+    ASTNode::Literal {
+      node_id,
+      src_location: dummy_loc(),
+      hex_value: String::new(),
+      kind: crate::solidity::ast::LiteralKind::Number,
+      type_descriptions: crate::solidity::ast::TypeDescriptions {
+        type_identifier: String::new(),
+        type_string: String::new(),
+      },
+      value: Some("1".to_string()),
+    }
+  }
+
+  fn make_identifier(node_id: i32, name: &str, ref_decl: i32) -> ASTNode {
+    ASTNode::Identifier {
+      node_id,
+      src_location: dummy_loc(),
+      name: name.to_string(),
+      overloaded_declarations: vec![],
+      referenced_declaration: ref_decl,
+    }
+  }
+
+  fn make_call(node_id: i32, callee_id: i32) -> ASTNode {
+    ASTNode::FunctionCall {
+      node_id,
+      src_location: dummy_loc(),
+      arguments: vec![],
+      expression: Box::new(make_identifier(node_id + 1, "callee", callee_id)),
+      name_locations: vec![],
+      names: vec![],
+      try_call: false,
+      type_descriptions: crate::solidity::ast::TypeDescriptions {
+        type_identifier: String::new(),
+        type_string: String::new(),
+      },
+      referenced_return_declarations: vec![],
+    }
+  }
+
+  fn make_assignment(node_id: i32, lhs: ASTNode, rhs: ASTNode) -> ASTNode {
+    ASTNode::Assignment {
+      node_id,
+      src_location: dummy_loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(rhs),
+      left_hand_side: Box::new(lhs),
+    }
+  }
+
+  #[test]
+  fn walk_for_non_pure_collects_top_level_state_write() {
+    let mut audit = empty_audit();
+    let assignment =
+      make_assignment(10, make_identifier(11, "x", 99), make_literal(12));
+    add_unnamed_topic(&mut audit, 10, UnnamedTopicKind::VariableMutation);
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    walk_for_non_pure(&assignment, &audit, &mut out, &mut seen);
+    assert_eq!(out, vec!["N10".to_string()]);
+  }
+
+  #[test]
+  fn walk_for_non_pure_collects_nested_call_inside_state_write() {
+    // `x = nonPureCall()` should yield BOTH the assignment (state write)
+    // AND the function call topic in source order, deduped.
+    let mut audit = empty_audit();
+    let assignment =
+      make_assignment(10, make_identifier(11, "x", 99), make_call(20, 100));
+    add_unnamed_topic(&mut audit, 10, UnnamedTopicKind::VariableMutation);
+    add_unnamed_topic(
+      &mut audit,
+      20,
+      UnnamedTopicKind::FunctionCall(CallKind::NonPure),
+    );
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    walk_for_non_pure(&assignment, &audit, &mut out, &mut seen);
+    assert_eq!(out, vec!["N10".to_string(), "N20".to_string()]);
+  }
+
+  #[test]
+  fn walk_for_non_pure_dedupes_repeated_topic() {
+    // Walk the same subtree twice with a shared `seen` set — the second
+    // walk must add no new entries even though the topic resolves
+    // non-pure on each visit.
+    let mut audit = empty_audit();
+    let inner = ASTNode::ExpressionStatement {
+      node_id: 20,
+      src_location: dummy_loc(),
+      expression: Box::new(make_identifier(21, "n", 0)),
+    };
+    add_unnamed_topic(
+      &mut audit,
+      20,
+      UnnamedTopicKind::FunctionCall(CallKind::NonPure),
+    );
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    walk_for_non_pure(&inner, &audit, &mut out, &mut seen);
+    walk_for_non_pure(&inner, &audit, &mut out, &mut seen);
+    assert_eq!(
+      out,
+      vec!["N20".to_string()],
+      "second walk shares the same `seen` set and adds no new entries"
+    );
+  }
+
+  #[test]
+  fn collect_member_semantics_includes_scoped_locals_and_state_mutations() {
+    let mut audit = empty_audit();
+    let member = topic::new_node_topic(&100);
+    let param = topic::new_node_topic(&101);
+    let local = topic::new_node_topic(&102);
+    let state_var = topic::new_node_topic(&103);
+    let unrelated = topic::new_node_topic(&999);
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&50);
+
+    // Parameter: Scope::Member { member }
+    audit.topic_metadata.insert(
+      param,
+      TopicMetadata::NamedTopic {
+        topic: param,
+        scope: Scope::Member {
+          container: container.clone(),
+          component,
+          member,
+          signature_container: None,
+        },
+        kind: NamedTopicKind::LocalVariable,
+        name: "amount".to_string(),
+        visibility: NamedTopicVisibility::Public,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+    // Local: Scope::ContainingBlock { member }
+    audit.topic_metadata.insert(
+      local,
+      TopicMetadata::NamedTopic {
+        topic: local,
+        scope: Scope::ContainingBlock {
+          container: container.clone(),
+          component,
+          member,
+          containing_blocks: vec![],
+        },
+        kind: NamedTopicKind::LocalVariable,
+        name: "tmp".to_string(),
+        visibility: NamedTopicVisibility::Public,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+    // Mutated state variable: lives at Component scope, not Member —
+    // included via mutations list, not the scope walk.
+    audit.topic_metadata.insert(
+      state_var,
+      TopicMetadata::NamedTopic {
+        topic: state_var,
+        scope: Scope::Component {
+          container: container.clone(),
+          component,
+        },
+        kind: NamedTopicKind::StateVariable(
+          domain::VariableMutability::Mutable,
+        ),
+        name: "balance".to_string(),
+        visibility: NamedTopicVisibility::Public,
+        is_mutable: true,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+    // Unrelated: scoped to a different member entirely — must not appear.
+    let other_member = topic::new_node_topic(&200);
+    audit.topic_metadata.insert(
+      unrelated,
+      TopicMetadata::NamedTopic {
+        topic: unrelated,
+        scope: Scope::Member {
+          container,
+          component,
+          member: other_member,
+          signature_container: None,
+        },
+        kind: NamedTopicKind::LocalVariable,
+        name: "other".to_string(),
+        visibility: NamedTopicVisibility::Public,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+
+    audit.function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![],
+        calls: vec![],
+        mutations: vec![state_var],
+        events_emitted: vec![],
+      },
+    );
+
+    let value = collect_member_semantics(&member, &audit);
+    let map = value.as_object().expect("semantics is a JSON object");
+    assert!(map.contains_key(&param.id()), "parameter must appear");
+    assert!(map.contains_key(&local.id()), "local must appear");
+    assert!(
+      map.contains_key(&state_var.id()),
+      "mutated state var must appear"
+    );
+    assert!(
+      !map.contains_key(&unrelated.id()),
+      "members from a different function must be excluded"
+    );
+  }
+
+  #[test]
+  fn collect_called_function_behaviors_emits_empty_for_out_of_scope() {
+    let mut audit = empty_audit();
+    let member = topic::new_node_topic(&100);
+    let in_scope_callee = topic::new_node_topic(&200);
+    let out_of_scope_callee = topic::new_node_topic(&300);
+    audit.topic_metadata.insert(
+      in_scope_callee,
+      TopicMetadata::NamedTopic {
+        topic: in_scope_callee,
+        scope: Scope::Global,
+        kind: NamedTopicKind::Function(crate::domain::FunctionKind::Function),
+        name: "_update".to_string(),
+        visibility: NamedTopicVisibility::Internal,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+    audit.topic_metadata.insert(
+      out_of_scope_callee,
+      TopicMetadata::NamedTopic {
+        topic: out_of_scope_callee,
+        scope: Scope::Global,
+        kind: NamedTopicKind::Function(crate::domain::FunctionKind::Function),
+        name: "transfer".to_string(),
+        visibility: NamedTopicVisibility::External,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+    let beh = topic::new_behavior_topic(1);
+    audit.topic_metadata.insert(
+      beh,
+      TopicMetadata::BehaviorTopic {
+        topic: beh,
+        description: "updates reserves".to_string(),
+        member_topic: in_scope_callee,
+        author: crate::collaborator::models::Author::System,
+        created_at: None,
+      },
+    );
+    audit.member_behaviors.insert(in_scope_callee, vec![beh]);
+
+    audit.function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![],
+        calls: vec![in_scope_callee, out_of_scope_callee],
+        mutations: vec![],
+        events_emitted: vec![],
+      },
+    );
+
+    let value = collect_called_function_behaviors(&member, &audit);
+    let map = value
+      .as_object()
+      .expect("called_function_behaviors is an object");
+    assert_eq!(
+      map[&in_scope_callee.id()]["behaviors"][0],
+      "updates reserves"
+    );
+    assert_eq!(
+      map[&out_of_scope_callee.id()]["behaviors"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(99),
+      0,
+      "out-of-scope callee gets an empty behaviors array, not omission"
+    );
+  }
+}
+
+#[cfg(test)]
+mod batch_render_integration_tests {
+  //! Higher-level tests that drive `render_batch_for_behavior_extraction`
+  //! and `render_batch_for_functional_properties` end-to-end. These check
+  //! the JSON shapes that downstream LLM tasks actually consume — the
+  //! `non_pure_subjects` list, the `is_non_pure: true` injection, the
+  //! featureless-member skip, and the None-when-empty contract.
+  use super::*;
+  use crate::domain::{
+    self, FunctionKind, FunctionModProperties, NamedTopicKind,
+    NamedTopicVisibility, Scope, TopicMetadata, UnnamedTopicKind,
+    new_audit_data,
+  };
+  use std::collections::HashSet;
+
+  fn loc() -> crate::solidity::ast::SourceLocation {
+    crate::solidity::ast::SourceLocation {
+      start: None,
+      length: None,
+      index: None,
+    }
+  }
+
+  fn empty_audit() -> domain::AuditData {
+    new_audit_data("test".to_string(), HashSet::new(), None)
+  }
+
+  fn install_function(
+    audit: &mut domain::AuditData,
+    member: topic::Topic,
+    name: &str,
+    container: domain::ProjectPath,
+    component: topic::Topic,
+    body_node_id: i32,
+    body_statements: Vec<ASTNode>,
+  ) -> ASTNode {
+    let function_node = ASTNode::FunctionDefinition {
+      node_id: member.numeric_id(),
+      src_location: loc(),
+      implemented: true,
+      signature: Box::new(ASTNode::FunctionSignature {
+        node_id: member.numeric_id() + 100,
+        src_location: loc(),
+        documentation: None,
+        kind: FunctionKind::Function,
+        modifiers: Box::new(ASTNode::ModifierList {
+          node_id: member.numeric_id() + 101,
+          src_location: loc(),
+          modifiers: vec![],
+        }),
+        name: name.to_string(),
+        name_location: loc(),
+        declaration_id: member.numeric_id(),
+        parameters: Box::new(ASTNode::ParameterList {
+          node_id: member.numeric_id() + 102,
+          src_location: loc(),
+          parameters: vec![],
+          is_return_parameters: false,
+        }),
+        return_parameters: Box::new(ASTNode::ParameterList {
+          node_id: member.numeric_id() + 103,
+          src_location: loc(),
+          parameters: vec![],
+          is_return_parameters: true,
+        }),
+        scope: component.numeric_id(),
+        state_mutability:
+          crate::solidity::ast::FunctionStateMutability::NonPayable,
+        virtual_: false,
+        visibility: crate::solidity::ast::FunctionVisibility::External,
+        implementation_declaration: None,
+      }),
+      body: Some(Box::new(ASTNode::Block {
+        node_id: body_node_id,
+        src_location: loc(),
+        statements: body_statements,
+      })),
+    };
+    audit
+      .nodes
+      .insert(member, domain::Node::Solidity(function_node.clone()));
+    audit.topic_metadata.insert(
+      member,
+      TopicMetadata::NamedTopic {
+        topic: member,
+        scope: Scope::Component {
+          container,
+          component,
+        },
+        kind: NamedTopicKind::Function(FunctionKind::Function),
+        name: name.to_string(),
+        visibility: NamedTopicVisibility::External,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+    function_node
+  }
+
+  fn add_unnamed(
+    audit: &mut domain::AuditData,
+    id: i32,
+    kind: UnnamedTopicKind,
+  ) -> topic::Topic {
+    let t = topic::new_node_topic(&id);
+    audit.topic_metadata.insert(
+      t,
+      TopicMetadata::UnnamedTopic {
+        topic: t,
+        scope: Scope::Global,
+        kind,
+        transitive_topic: None,
+      },
+    );
+    t
+  }
+
+  #[test]
+  fn functional_property_render_emits_non_pure_subjects_and_flags() {
+    // One in-scope function with a state write in its body. The render
+    // must:
+    //   - emit the state-write topic in the top-level non_pure_subjects
+    //     list,
+    //   - inject `is_non_pure: true` on that node in the rendered AST,
+    //   - skip when the function has no feature link (we install one
+    //     below to exercise the happy path).
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+
+    let member = topic::new_node_topic(&100);
+    install_function(
+      &mut audit, member, "doThing", container, component, 200, body,
+    );
+    audit.function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![],
+        calls: vec![],
+        mutations: vec![],
+        events_emitted: vec![],
+      },
+    );
+
+    // Set up the feature link so the renderer doesn't skip the member.
+    let beh = topic::new_behavior_topic(1);
+    let feat = topic::new_feature_topic(1);
+    audit.topic_metadata.insert(
+      beh,
+      TopicMetadata::BehaviorTopic {
+        topic: beh,
+        description: "writes x".to_string(),
+        member_topic: member,
+        author: crate::collaborator::models::Author::System,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      feat,
+      TopicMetadata::FeatureTopic {
+        topic: feat,
+        name: "X".to_string(),
+        description: "the X feature".to_string(),
+        author: crate::collaborator::models::Author::System,
+        created_at: None,
+      },
+    );
+    audit.member_behaviors.insert(member, vec![beh]);
+    audit.feature_behavior_links.insert(feat, vec![beh]);
+
+    let rendered = render_batch_for_functional_properties(&[member], &audit)
+      .expect("expected at least one renderable subject");
+
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    // non_pure_subjects must list the assignment topic.
+    let subjects = value
+      .get("non_pure_subjects")
+      .and_then(|v| v.as_array())
+      .expect("non_pure_subjects array present");
+    let subject_ids: Vec<&str> =
+      subjects.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+      subject_ids.contains(&assignment_topic.id().as_str()),
+      "expected non_pure_subjects to contain {}, got {:?}",
+      assignment_topic.id(),
+      subject_ids
+    );
+
+    // The feature must appear on the member object.
+    let batch = value
+      .get("batch")
+      .and_then(|v| v.as_array())
+      .expect("batch array present");
+    assert_eq!(batch.len(), 1);
+    let feat_obj = batch[0]
+      .get("feature")
+      .expect("feature field present on member");
+    assert_eq!(feat_obj["name"], "X");
+
+    // Behaviors are injected on the member.
+    let behaviors = batch[0]
+      .get("behaviors")
+      .and_then(|v| v.as_array())
+      .expect("behaviors field present on member");
+    assert_eq!(behaviors[0], "writes x");
+
+    // The is_non_pure flag must be set on the assignment node somewhere
+    // in the rendered definition AST.
+    let definition = batch[0]
+      .get("definition")
+      .expect("definition field present");
+    assert!(
+      contains_is_non_pure(definition, &assignment_topic.id()),
+      "expected `is_non_pure: true` on node with id {} in definition",
+      assignment_topic.id()
+    );
+  }
+
+  /// Recursively search a JSON value for any object whose `id` matches
+  /// `target_id` and that has `is_non_pure: true`. Used to assert the
+  /// renderer's flag injection without depending on AST shape.
+  fn contains_is_non_pure(value: &serde_json::Value, target_id: &str) -> bool {
+    match value {
+      serde_json::Value::Object(map) => {
+        if map.get("id").and_then(|v| v.as_str()) == Some(target_id)
+          && map.get("is_non_pure").and_then(|v| v.as_bool()) == Some(true)
+        {
+          return true;
+        }
+        map.values().any(|v| contains_is_non_pure(v, target_id))
+      }
+      serde_json::Value::Array(arr) => {
+        arr.iter().any(|v| contains_is_non_pure(v, target_id))
+      }
+      _ => false,
+    }
+  }
+
+  #[test]
+  fn functional_property_render_returns_none_for_pure_only_member() {
+    // A function with no non-pure subjects in its body should produce
+    // None — the LLM has nothing to ask about.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let member = topic::new_node_topic(&100);
+    install_function(
+      &mut audit,
+      member,
+      "purely",
+      container,
+      component,
+      200,
+      vec![],
+    );
+    audit.function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![],
+        calls: vec![],
+        mutations: vec![],
+        events_emitted: vec![],
+      },
+    );
+
+    // Set up a feature link so the skip is purity-driven, not feature-
+    // driven.
+    let beh = topic::new_behavior_topic(1);
+    let feat = topic::new_feature_topic(1);
+    audit.topic_metadata.insert(
+      beh,
+      TopicMetadata::BehaviorTopic {
+        topic: beh,
+        description: "does nothing".to_string(),
+        member_topic: member,
+        author: crate::collaborator::models::Author::System,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      feat,
+      TopicMetadata::FeatureTopic {
+        topic: feat,
+        name: "F".to_string(),
+        description: "f".to_string(),
+        author: crate::collaborator::models::Author::System,
+        created_at: None,
+      },
+    );
+    audit.member_behaviors.insert(member, vec![beh]);
+    audit.feature_behavior_links.insert(feat, vec![beh]);
+
+    let rendered = render_batch_for_functional_properties(&[member], &audit);
+    assert!(
+      rendered.is_none(),
+      "pure-only batch must produce no rendered work"
+    );
+  }
+
+  #[test]
+  fn functional_property_render_returns_none_when_no_feature_link() {
+    // A function with non-pure subjects but no feature link — renderer
+    // skips the member, leaving no eligible work in the batch.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let member = topic::new_node_topic(&100);
+    let assignment_node_id = 50;
+    add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    install_function(
+      &mut audit, member, "doThing", container, component, 200, body,
+    );
+    audit.function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![],
+        calls: vec![],
+        mutations: vec![],
+        events_emitted: vec![],
+      },
+    );
+    // Note: no behavior, no feature link.
+
+    let rendered = render_batch_for_functional_properties(&[member], &audit);
+    assert!(
+      rendered.is_none(),
+      "featureless member must skip and produce no batch"
+    );
+  }
+
+  #[test]
+  fn behavior_render_returns_none_when_all_members_unresolvable() {
+    // Members not in audit_data.nodes can't be rendered. The batch
+    // render must return None rather than emitting an empty batch.
+    let audit = empty_audit();
+    let phantom = topic::new_node_topic(&999);
+    let rendered = render_batch_for_behavior_extraction(&[phantom], &audit);
+    assert!(rendered.is_none());
   }
 }

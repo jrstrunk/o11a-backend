@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 static NEXT_FEATURE_ID: AtomicI32 = AtomicI32::new(1);
 static NEXT_REQUIREMENT_ID: AtomicI32 = AtomicI32::new(1);
 static NEXT_BEHAVIOR_ID: AtomicI32 = AtomicI32::new(1);
-static NEXT_FUNCTIONAL_SEMANTIC_ID: AtomicI32 = AtomicI32::new(1);
+static NEXT_FUNCTIONAL_PROPERTY_ID: AtomicI32 = AtomicI32::new(1);
 
 pub fn allocate_feature_id() -> i32 {
   NEXT_FEATURE_ID.fetch_add(1, Ordering::Relaxed)
@@ -30,12 +30,15 @@ pub fn reseed_behavior_id(max_loaded: i32) {
   NEXT_BEHAVIOR_ID.store(max_loaded + 1, Ordering::Relaxed);
 }
 
-pub fn allocate_functional_semantic_id() -> i32 {
-  NEXT_FUNCTIONAL_SEMANTIC_ID.fetch_add(1, Ordering::Relaxed)
+/// Allocate a `P`-prefixed topic ID. Shared across `FunctionalSemanticTopic`,
+/// `FunctionalPurposeTopic`, and `PlacementRationaleTopic` — all three are
+/// "functional properties" in the security model.
+pub fn allocate_functional_property_id() -> i32 {
+  NEXT_FUNCTIONAL_PROPERTY_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-pub fn reseed_functional_semantic_id(max_loaded: i32) {
-  NEXT_FUNCTIONAL_SEMANTIC_ID.store(max_loaded + 1, Ordering::Relaxed);
+pub fn reseed_functional_property_id(max_loaded: i32) {
+  NEXT_FUNCTIONAL_PROPERTY_ID.store(max_loaded + 1, Ordering::Relaxed);
 }
 
 /// UTC ISO-8601 timestamp with seconds precision (`YYYY-MM-DDTHH:MM:SSZ`).
@@ -75,7 +78,7 @@ mod tests {
   static FEATURE_LOCK: Mutex<()> = Mutex::new(());
   static REQUIREMENT_LOCK: Mutex<()> = Mutex::new(());
   static BEHAVIOR_LOCK: Mutex<()> = Mutex::new(());
-  static FUNCTIONAL_SEMANTIC_LOCK: Mutex<()> = Mutex::new(());
+  static FUNCTIONAL_PROPERTY_LOCK: Mutex<()> = Mutex::new(());
 
   #[test]
   fn feature_allocation_is_monotonic() {
@@ -153,25 +156,25 @@ mod tests {
   }
 
   #[test]
-  fn functional_semantic_allocation_is_monotonic() {
-    let _guard = FUNCTIONAL_SEMANTIC_LOCK.lock().unwrap();
-    reseed_functional_semantic_id(0);
-    assert_eq!(allocate_functional_semantic_id(), 1);
-    assert_eq!(allocate_functional_semantic_id(), 2);
+  fn functional_property_allocation_is_monotonic() {
+    let _guard = FUNCTIONAL_PROPERTY_LOCK.lock().unwrap();
+    reseed_functional_property_id(0);
+    assert_eq!(allocate_functional_property_id(), 1);
+    assert_eq!(allocate_functional_property_id(), 2);
   }
 
   #[test]
-  fn functional_semantic_reseed_advances_past_max() {
-    let _guard = FUNCTIONAL_SEMANTIC_LOCK.lock().unwrap();
-    reseed_functional_semantic_id(20);
-    assert_eq!(allocate_functional_semantic_id(), 21);
+  fn functional_property_reseed_advances_past_max() {
+    let _guard = FUNCTIONAL_PROPERTY_LOCK.lock().unwrap();
+    reseed_functional_property_id(20);
+    assert_eq!(allocate_functional_property_id(), 21);
   }
 
   #[test]
-  fn functional_semantic_reseed_with_lower_value_still_stores() {
-    let _guard = FUNCTIONAL_SEMANTIC_LOCK.lock().unwrap();
-    reseed_functional_semantic_id(75);
-    reseed_functional_semantic_id(3);
-    assert_eq!(allocate_functional_semantic_id(), 4);
+  fn functional_property_reseed_with_lower_value_still_stores() {
+    let _guard = FUNCTIONAL_PROPERTY_LOCK.lock().unwrap();
+    reseed_functional_property_id(75);
+    reseed_functional_property_id(3);
+    assert_eq!(allocate_functional_property_id(), 4);
   }
 }
