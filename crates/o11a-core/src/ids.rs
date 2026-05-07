@@ -5,6 +5,7 @@ static NEXT_FEATURE_ID: AtomicI32 = AtomicI32::new(1);
 static NEXT_REQUIREMENT_ID: AtomicI32 = AtomicI32::new(1);
 static NEXT_BEHAVIOR_ID: AtomicI32 = AtomicI32::new(1);
 static NEXT_FUNCTIONAL_PROPERTY_ID: AtomicI32 = AtomicI32::new(1);
+static NEXT_ADVERSARIAL_PROPERTY_ID: AtomicI32 = AtomicI32::new(1);
 
 pub fn allocate_feature_id() -> i32 {
   NEXT_FEATURE_ID.fetch_add(1, Ordering::Relaxed)
@@ -39,6 +40,17 @@ pub fn allocate_functional_property_id() -> i32 {
 
 pub fn reseed_functional_property_id(max_loaded: i32) {
   NEXT_FUNCTIONAL_PROPERTY_ID.store(max_loaded + 1, Ordering::Relaxed);
+}
+
+/// Allocate an `A`-prefixed topic ID. Shared across `ThreatTopic` and
+/// `InvariantTopic` (and, in a future step, `ConditionTopic`) — all of which
+/// are "adversarial properties" in the security model.
+pub fn allocate_adversarial_property_id() -> i32 {
+  NEXT_ADVERSARIAL_PROPERTY_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+pub fn reseed_adversarial_property_id(max_loaded: i32) {
+  NEXT_ADVERSARIAL_PROPERTY_ID.store(max_loaded + 1, Ordering::Relaxed);
 }
 
 /// UTC ISO-8601 timestamp with seconds precision (`YYYY-MM-DDTHH:MM:SSZ`).
@@ -79,6 +91,7 @@ mod tests {
   static REQUIREMENT_LOCK: Mutex<()> = Mutex::new(());
   static BEHAVIOR_LOCK: Mutex<()> = Mutex::new(());
   static FUNCTIONAL_PROPERTY_LOCK: Mutex<()> = Mutex::new(());
+  static ADVERSARIAL_PROPERTY_LOCK: Mutex<()> = Mutex::new(());
 
   #[test]
   fn feature_allocation_is_monotonic() {
@@ -176,5 +189,28 @@ mod tests {
     reseed_functional_property_id(75);
     reseed_functional_property_id(3);
     assert_eq!(allocate_functional_property_id(), 4);
+  }
+
+  #[test]
+  fn adversarial_property_allocation_is_monotonic() {
+    let _guard = ADVERSARIAL_PROPERTY_LOCK.lock().unwrap();
+    reseed_adversarial_property_id(0);
+    assert_eq!(allocate_adversarial_property_id(), 1);
+    assert_eq!(allocate_adversarial_property_id(), 2);
+  }
+
+  #[test]
+  fn adversarial_property_reseed_advances_past_max() {
+    let _guard = ADVERSARIAL_PROPERTY_LOCK.lock().unwrap();
+    reseed_adversarial_property_id(20);
+    assert_eq!(allocate_adversarial_property_id(), 21);
+  }
+
+  #[test]
+  fn adversarial_property_reseed_with_lower_value_still_stores() {
+    let _guard = ADVERSARIAL_PROPERTY_LOCK.lock().unwrap();
+    reseed_adversarial_property_id(75);
+    reseed_adversarial_property_id(3);
+    assert_eq!(allocate_adversarial_property_id(), 4);
   }
 }

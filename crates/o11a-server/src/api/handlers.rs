@@ -1458,7 +1458,7 @@ pub async fn get_threat_invariants(
   Path((audit_id, threat_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
   let threat_topic =
-    topic::parse_attack_vector_topic(&threat_id).map_err(|e| {
+    topic::parse_adversarial_property_topic(&threat_id).map_err(|e| {
       tracing::warn!("Invalid topic ID in path: {}", e);
       StatusCode::BAD_REQUEST
     })?;
@@ -1823,7 +1823,7 @@ pub async fn create_threat_feature_link(
     payload.feature_id
   );
 
-  let threat_topic = topic::parse_attack_vector_topic(&payload.threat_id)
+  let threat_topic = topic::parse_adversarial_property_topic(&payload.threat_id)
     .map_err(|e| {
       tracing::warn!("Invalid topic ID in payload: {}", e);
       StatusCode::BAD_REQUEST
@@ -1833,8 +1833,8 @@ pub async fn create_threat_feature_link(
       tracing::warn!("Invalid topic ID in payload: {}", e);
       StatusCode::BAD_REQUEST
     })?;
-  let threat_id = threat_topic.numeric_id() as i64;
-  let feature_id = feature_topic.numeric_id() as i64;
+  let threat_id = threat_topic.numeric_id();
+  let feature_id = feature_topic.numeric_id();
 
   let relation = domain::ThreatFeatureRelation::parse_str(&payload.relation)
     .ok_or(StatusCode::BAD_REQUEST)?;
@@ -1907,7 +1907,7 @@ pub async fn delete_threat_feature_link(
   Path((audit_id, threat_id, feature_id)): Path<(String, String, String)>,
 ) -> Result<StatusCode, StatusCode> {
   let threat_topic =
-    topic::parse_attack_vector_topic(&threat_id).map_err(|e| {
+    topic::parse_adversarial_property_topic(&threat_id).map_err(|e| {
       tracing::warn!("Invalid topic ID in path: {}", e);
       StatusCode::BAD_REQUEST
     })?;
@@ -1915,8 +1915,8 @@ pub async fn delete_threat_feature_link(
     tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
-  let threat_id = threat_topic.numeric_id() as i64;
-  let feature_id = feature_topic.numeric_id() as i64;
+  let threat_id = threat_topic.numeric_id();
+  let feature_id = feature_topic.numeric_id();
   tracing::debug!(
     "DELETE /api/v1/audits/{}/impact_analysis/{}/{}",
     audit_id,
@@ -2267,8 +2267,11 @@ pub async fn create_threat(
     payload.subject_topic
   );
 
+  let id = o11a_core::ids::allocate_adversarial_property_id();
+
   let row = db::create_threat(
     &state.db,
+    id,
     &audit_id,
     &payload.subject_topic,
     &payload.description,
@@ -2282,7 +2285,7 @@ pub async fn create_threat(
   })?;
 
   let subject_topic = topic::new_topic(&payload.subject_topic);
-  let threat_topic = topic::new_attack_vector_topic(row.id as i32);
+  let threat_topic = topic::new_adversarial_property_topic(id);
 
   let threat = domain::Threat {
     invariant_topics: Vec::new(),
@@ -2320,11 +2323,11 @@ pub async fn delete_threat(
   Path((audit_id, threat_id)): Path<(String, String)>,
 ) -> Result<StatusCode, StatusCode> {
   let threat_topic =
-    topic::parse_attack_vector_topic(&threat_id).map_err(|e| {
+    topic::parse_adversarial_property_topic(&threat_id).map_err(|e| {
       tracing::warn!("Invalid topic ID in path: {}", e);
       StatusCode::BAD_REQUEST
     })?;
-  let threat_id = threat_topic.numeric_id() as i64;
+  let threat_id = threat_topic.numeric_id();
   tracing::debug!("DELETE /api/v1/audits/{}/threats/{}", audit_id, threat_id);
 
   db::delete_threat(&state.db, threat_id).await.map_err(|e| {
@@ -2365,7 +2368,7 @@ pub async fn get_threat(
   Path((audit_id, threat_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
   let threat_topic =
-    topic::parse_attack_vector_topic(&threat_id).map_err(|e| {
+    topic::parse_adversarial_property_topic(&threat_id).map_err(|e| {
       tracing::warn!("Invalid topic ID in path: {}", e);
       StatusCode::BAD_REQUEST
     })?;
@@ -2403,11 +2406,11 @@ pub async fn create_invariant(
   Json(payload): Json<CreateInvariantRequest>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
   let threat_topic =
-    topic::parse_attack_vector_topic(&threat_id).map_err(|e| {
+    topic::parse_adversarial_property_topic(&threat_id).map_err(|e| {
       tracing::warn!("Invalid topic ID in path: {}", e);
       StatusCode::BAD_REQUEST
     })?;
-  let threat_id = threat_topic.numeric_id() as i64;
+  let threat_id = threat_topic.numeric_id();
   tracing::debug!(
     "POST /api/v1/audits/{}/threats/{}/invariants",
     audit_id,
@@ -2427,8 +2430,11 @@ pub async fn create_invariant(
     }
   };
 
+  let id = o11a_core::ids::allocate_adversarial_property_id();
+
   let row = db::create_invariant(
     &state.db,
+    id,
     threat_id,
     &payload.description,
     payload.author,
@@ -2440,7 +2446,7 @@ pub async fn create_invariant(
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
-  let inv_topic = topic::new_invariant_topic(row.id as i32);
+  let inv_topic = topic::new_adversarial_property_topic(id);
 
   let invariant = domain::Invariant {
     source_topics: Vec::new(),
@@ -2484,16 +2490,16 @@ pub async fn delete_invariant(
   Path((audit_id, threat_id, invariant_id)): Path<(String, String, String)>,
 ) -> Result<StatusCode, StatusCode> {
   let threat_topic =
-    topic::parse_attack_vector_topic(&threat_id).map_err(|e| {
+    topic::parse_adversarial_property_topic(&threat_id).map_err(|e| {
       tracing::warn!("Invalid topic ID in path: {}", e);
       StatusCode::BAD_REQUEST
     })?;
-  let inv_topic = topic::parse_invariant_topic(&invariant_id).map_err(|e| {
+  let inv_topic = topic::parse_adversarial_property_topic(&invariant_id).map_err(|e| {
     tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
-  let threat_id = threat_topic.numeric_id() as i64;
-  let invariant_id = inv_topic.numeric_id() as i64;
+  let threat_id = threat_topic.numeric_id();
+  let invariant_id = inv_topic.numeric_id();
   tracing::debug!(
     "DELETE /api/v1/audits/{}/threats/{}/invariants/{}",
     audit_id,
@@ -2535,7 +2541,7 @@ pub async fn get_invariant(
   State(state): State<AppState>,
   Path((audit_id, invariant_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  let inv_topic = topic::parse_invariant_topic(&invariant_id).map_err(|e| {
+  let inv_topic = topic::parse_adversarial_property_topic(&invariant_id).map_err(|e| {
     tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
@@ -2565,11 +2571,11 @@ pub async fn add_invariant_source_topic(
   Path((audit_id, invariant_id)): Path<(String, String)>,
   Json(payload): Json<AddSourceTopicRequest>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  let inv_topic = topic::parse_invariant_topic(&invariant_id).map_err(|e| {
+  let inv_topic = topic::parse_adversarial_property_topic(&invariant_id).map_err(|e| {
     tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
-  let invariant_id = inv_topic.numeric_id() as i64;
+  let invariant_id = inv_topic.numeric_id();
   tracing::debug!(
     "POST /api/v1/audits/{}/invariants/{}/source_topics",
     audit_id,
@@ -2611,11 +2617,11 @@ pub async fn remove_invariant_source_topic(
   State(state): State<AppState>,
   Path((audit_id, invariant_id, topic_id)): Path<(String, String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  let inv_topic = topic::parse_invariant_topic(&invariant_id).map_err(|e| {
+  let inv_topic = topic::parse_adversarial_property_topic(&invariant_id).map_err(|e| {
     tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
-  let invariant_id = inv_topic.numeric_id() as i64;
+  let invariant_id = inv_topic.numeric_id();
   tracing::debug!(
     "DELETE /api/v1/audits/{}/invariants/{}/source_topics/{}",
     audit_id,

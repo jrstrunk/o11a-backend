@@ -5,17 +5,16 @@ use std::str::FromStr;
 /// A topic identifier in the audit graph.
 ///
 /// The wire format is a single prefix character followed by a signed integer,
-/// e.g. `"F42"`, `"R7"`, `"B13"`, `"P99"`, `"N-100"`, `"D34"`, `"C2"`, `"I4"`,
-/// `"T1"`, `"Y5"`. Clients, the on-disk JSON report, and the DB columns all
-/// use this form. The prefix determines the variant; the suffix is stored as
-/// an `i32`.
+/// e.g. `"F42"`, `"R7"`, `"B13"`, `"P99"`, `"N-100"`, `"D34"`, `"C2"`, `"A4"`,
+/// `"Y5"`. Clients, the on-disk JSON report, and the DB columns all use this
+/// form. The prefix determines the variant; the suffix is stored as an `i32`.
 ///
 /// Prefix map:
 /// - `N` → `Node`
 /// - `D` → `Documentation`
 /// - `C` → `Comment`
-/// - `I` → `Invariant`
-/// - `T` → `AttackVector`
+/// - `A` → `AdversarialProperty` (shared by `ThreatTopic` and
+///   `InvariantTopic`; `ConditionTopic` will join later)
 /// - `F` → `Feature`
 /// - `R` → `Requirement`
 /// - `B` → `Behavior`
@@ -27,8 +26,7 @@ pub enum Topic {
   Node(i32),
   Documentation(i32),
   Comment(i32),
-  Invariant(i32),
-  AttackVector(i32),
+  AdversarialProperty(i32),
   Feature(i32),
   Requirement(i32),
   Behavior(i32),
@@ -43,8 +41,7 @@ impl Topic {
       Topic::Node(_) => 'N',
       Topic::Documentation(_) => 'D',
       Topic::Comment(_) => 'C',
-      Topic::Invariant(_) => 'I',
-      Topic::AttackVector(_) => 'T',
+      Topic::AdversarialProperty(_) => 'A',
       Topic::Feature(_) => 'F',
       Topic::Requirement(_) => 'R',
       Topic::Behavior(_) => 'B',
@@ -59,8 +56,7 @@ impl Topic {
       Topic::Node(id)
       | Topic::Documentation(id)
       | Topic::Comment(id)
-      | Topic::Invariant(id)
-      | Topic::AttackVector(id)
+      | Topic::AdversarialProperty(id)
       | Topic::Feature(id)
       | Topic::Requirement(id)
       | Topic::Behavior(id)
@@ -122,8 +118,7 @@ impl FromStr for Topic {
       'N' => Ok(Topic::Node(id)),
       'D' => Ok(Topic::Documentation(id)),
       'C' => Ok(Topic::Comment(id)),
-      'I' => Ok(Topic::Invariant(id)),
-      'T' => Ok(Topic::AttackVector(id)),
+      'A' => Ok(Topic::AdversarialProperty(id)),
       'F' => Ok(Topic::Feature(id)),
       'R' => Ok(Topic::Requirement(id)),
       'B' => Ok(Topic::Behavior(id)),
@@ -183,12 +178,8 @@ pub fn new_comment_topic(comment_id: i32) -> Topic {
   Topic::Comment(comment_id)
 }
 
-pub fn new_invariant_topic(invariant_id: i32) -> Topic {
-  Topic::Invariant(invariant_id)
-}
-
-pub fn new_attack_vector_topic(id: i32) -> Topic {
-  Topic::AttackVector(id)
+pub fn new_adversarial_property_topic(id: i32) -> Topic {
+  Topic::AdversarialProperty(id)
 }
 
 pub fn new_feature_topic(id: i32) -> Topic {
@@ -243,8 +234,11 @@ macro_rules! define_parse_variant {
 define_parse_variant!(parse_node_topic, Node, "N");
 define_parse_variant!(parse_documentation_topic, Documentation, "D");
 define_parse_variant!(parse_comment_topic, Comment, "C");
-define_parse_variant!(parse_invariant_topic, Invariant, "I");
-define_parse_variant!(parse_attack_vector_topic, AttackVector, "T");
+define_parse_variant!(
+  parse_adversarial_property_topic,
+  AdversarialProperty,
+  "A"
+);
 define_parse_variant!(parse_feature_topic, Feature, "F");
 define_parse_variant!(parse_requirement_topic, Requirement, "R");
 define_parse_variant!(parse_behavior_topic, Behavior, "B");
@@ -261,8 +255,8 @@ mod tests {
     assert_eq!(Topic::Node(-100).to_string(), "N-100");
     assert_eq!(Topic::Comment(7).to_string(), "C7");
     assert_eq!(Topic::Documentation(34).to_string(), "D34");
-    assert_eq!(Topic::Invariant(4).to_string(), "I4");
-    assert_eq!(Topic::AttackVector(1).to_string(), "T1");
+    assert_eq!(Topic::AdversarialProperty(4).to_string(), "A4");
+    assert_eq!(Topic::AdversarialProperty(1).to_string(), "A1");
     assert_eq!(Topic::Requirement(7).to_string(), "R7");
     assert_eq!(Topic::Behavior(13).to_string(), "B13");
     assert_eq!(Topic::FunctionalProperty(99).to_string(), "P99");
@@ -299,8 +293,8 @@ mod tests {
       Topic::Node(-100),
       Topic::Documentation(34),
       Topic::Comment(7),
-      Topic::Invariant(4),
-      Topic::AttackVector(1),
+      Topic::AdversarialProperty(4),
+      Topic::AdversarialProperty(1),
       Topic::Feature(42),
       Topic::Requirement(7),
       Topic::Behavior(13),

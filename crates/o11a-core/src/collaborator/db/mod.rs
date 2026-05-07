@@ -354,8 +354,8 @@ pub async fn get_unvoted_comment_ids(
 pub struct ThreatFeatureLinkRow {
   pub id: i64,
   pub audit_id: String,
-  pub threat_id: i64,
-  pub feature_id: i64,
+  pub threat_id: i32,
+  pub feature_id: i32,
   pub relation: String,
   pub severity: String,
 }
@@ -364,8 +364,8 @@ pub struct ThreatFeatureLinkRow {
 pub async fn create_threat_feature_link(
   pool: &SqlitePool,
   audit_id: &str,
-  threat_id: i64,
-  feature_id: i64,
+  threat_id: i32,
+  feature_id: i32,
   relation: &str,
   severity: &str,
 ) -> Result<ThreatFeatureLinkRow, sqlx::Error> {
@@ -398,8 +398,8 @@ pub async fn create_threat_feature_link(
 /// Deletes a threat-feature link
 pub async fn delete_threat_feature_link(
   pool: &SqlitePool,
-  threat_id: i64,
-  feature_id: i64,
+  threat_id: i32,
+  feature_id: i32,
 ) -> Result<(), sqlx::Error> {
   sqlx::query(
     "DELETE FROM threat_feature_links WHERE threat_id = ? AND feature_id = ?",
@@ -414,7 +414,7 @@ pub async fn delete_threat_feature_link(
 /// Gets all threat-feature links for a threat
 pub async fn get_threat_feature_links(
   pool: &SqlitePool,
-  threat_id: i64,
+  threat_id: i32,
 ) -> Result<Vec<ThreatFeatureLinkRow>, sqlx::Error> {
   sqlx::query_as::<_, ThreatFeatureLinkRow>(
     "SELECT * FROM threat_feature_links WHERE threat_id = ? ORDER BY id",
@@ -559,7 +559,7 @@ pub async fn get_condition_evaluations(
 /// Database row for a threat
 #[derive(Debug, sqlx::FromRow)]
 pub struct ThreatRow {
-  pub id: i64,
+  pub id: i32,
   pub audit_id: String,
   pub subject_topic: String,
   pub description: String,
@@ -569,21 +569,25 @@ pub struct ThreatRow {
   pub severity: Option<String>,
 }
 
-/// Creates a new threat and returns the row
+/// Creates a new threat and returns the row. The caller supplies the topic ID
+/// from `o11a_core::ids::allocate_adversarial_property_id()` so threats and
+/// invariants share the unified `A` namespace and never collide.
 pub async fn create_threat(
   pool: &SqlitePool,
+  id: i32,
   audit_id: &str,
   subject_topic: &str,
   description: &str,
   author_id: Author,
   severity: Option<&str>,
 ) -> Result<ThreatRow, sqlx::Error> {
-  let result = sqlx::query(
+  sqlx::query(
     r#"
-        INSERT INTO threats (audit_id, subject_topic, description, author_id, severity)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO threats (id, audit_id, subject_topic, description, author_id, severity)
+        VALUES (?, ?, ?, ?, ?, ?)
         "#,
   )
+  .bind(id)
   .bind(audit_id)
   .bind(subject_topic)
   .bind(description)
@@ -592,7 +596,6 @@ pub async fn create_threat(
   .execute(pool)
   .await?;
 
-  let id = result.last_insert_rowid();
   sqlx::query_as::<_, ThreatRow>("SELECT * FROM threats WHERE id = ?")
     .bind(id)
     .fetch_one(pool)
@@ -643,7 +646,7 @@ pub async fn delete_all_threats_for_audit(
 /// Deletes a threat and its associated invariants
 pub async fn delete_threat(
   pool: &SqlitePool,
-  threat_id: i64,
+  threat_id: i32,
 ) -> Result<(), sqlx::Error> {
   sqlx::query(
     r#"
@@ -673,8 +676,8 @@ pub async fn delete_threat(
 /// Database row for an invariant
 #[derive(Debug, sqlx::FromRow)]
 pub struct InvariantRow {
-  pub id: i64,
-  pub threat_id: i64,
+  pub id: i32,
+  pub threat_id: i32,
   pub description: String,
   #[sqlx(rename = "author_id")]
   pub author: Author,
@@ -682,20 +685,24 @@ pub struct InvariantRow {
   pub severity: Option<String>,
 }
 
-/// Creates a new invariant and returns the row
+/// Creates a new invariant and returns the row. The caller supplies the topic
+/// ID from `o11a_core::ids::allocate_adversarial_property_id()` so threats and
+/// invariants share the unified `A` namespace and never collide.
 pub async fn create_invariant(
   pool: &SqlitePool,
-  threat_id: i64,
+  id: i32,
+  threat_id: i32,
   description: &str,
   author_id: Author,
   severity: Option<&str>,
 ) -> Result<InvariantRow, sqlx::Error> {
-  let result = sqlx::query(
+  sqlx::query(
     r#"
-        INSERT INTO invariants (threat_id, description, author_id, severity)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO invariants (id, threat_id, description, author_id, severity)
+        VALUES (?, ?, ?, ?, ?)
         "#,
   )
+  .bind(id)
   .bind(threat_id)
   .bind(description)
   .bind(author_id)
@@ -703,7 +710,6 @@ pub async fn create_invariant(
   .execute(pool)
   .await?;
 
-  let id = result.last_insert_rowid();
   sqlx::query_as::<_, InvariantRow>("SELECT * FROM invariants WHERE id = ?")
     .bind(id)
     .fetch_one(pool)
@@ -713,7 +719,7 @@ pub async fn create_invariant(
 /// Deletes an invariant and its source topic associations
 pub async fn delete_invariant(
   pool: &SqlitePool,
-  invariant_id: i64,
+  invariant_id: i32,
 ) -> Result<(), sqlx::Error> {
   sqlx::query("DELETE FROM invariant_source_topics WHERE invariant_id = ?")
     .bind(invariant_id)
@@ -729,7 +735,7 @@ pub async fn delete_invariant(
 /// Adds a source topic to an invariant
 pub async fn add_invariant_source_topic(
   pool: &SqlitePool,
-  invariant_id: i64,
+  invariant_id: i32,
   topic_id: &str,
 ) -> Result<(), sqlx::Error> {
   sqlx::query(
@@ -748,7 +754,7 @@ pub async fn add_invariant_source_topic(
 /// Removes a source topic from an invariant
 pub async fn remove_invariant_source_topic(
   pool: &SqlitePool,
-  invariant_id: i64,
+  invariant_id: i32,
   topic_id: &str,
 ) -> Result<(), sqlx::Error> {
   sqlx::query(

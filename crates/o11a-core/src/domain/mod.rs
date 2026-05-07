@@ -387,7 +387,7 @@ pub struct ConditionEvaluation {
 /// A threat describing how an attacker could compromise a feature.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Threat {
-  /// I-prefixed topic IDs of invariants that defend against this threat
+  /// A-prefixed topic IDs of invariants that defend against this threat
   pub invariant_topics: Vec<topic::Topic>,
 }
 
@@ -461,7 +461,7 @@ pub struct AuditData {
   pub conditions: Vec<Condition>,
   /// Threats keyed by A-prefixed topic ID. Each belongs to one feature.
   pub threats: BTreeMap<topic::Topic, Threat>,
-  /// Invariants keyed by I-prefixed topic ID. Each belongs to one threat.
+  /// Invariants keyed by A-prefixed topic ID. Each belongs to one threat.
   pub invariants: BTreeMap<topic::Topic, Invariant>,
   /// Feature-to-requirement links (many-to-many). Keyed by F-prefixed topic.
   pub feature_requirement_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
