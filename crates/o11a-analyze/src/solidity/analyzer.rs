@@ -1540,7 +1540,7 @@ fn process_second_pass_nodes(
       };
 
       let topic_metadata_entry = TopicMetadata::NamedTopic {
-        topic: topic,
+        topic,
         kind: in_scope_topic_declaration.declaration_kind().clone(),
         visibility: visibility_to_named_topic_visibility(
           in_scope_topic_declaration.visibility(),
@@ -1552,7 +1552,7 @@ fn process_second_pass_nodes(
         ancestors: ancestor_topics,
         descendants: descendant_topics,
         relatives: relative_topics,
-        transitive_topic: transitive_topic,
+        transitive_topic,
         doc_references: Vec::new(),
       };
 
@@ -3671,9 +3671,9 @@ fn populate_context(
   // Build scope_map from completed topic_metadata
   let scope_map: BTreeMap<i32, Scope> = topic_metadata
     .iter()
-    .filter_map(|(topic, metadata)| {
+    .map(|(topic, metadata)| {
       let node_id = topic.numeric_id();
-      Some((node_id, metadata.scope().clone()))
+      (node_id, metadata.scope().clone())
     })
     .collect();
 
@@ -3761,17 +3761,15 @@ fn populate_expanded_context(
   // First, collect all scopes from existing topic_metadata
   let scope_map: BTreeMap<i32, Scope> = topic_metadata
     .iter()
-    .filter_map(|(topic, metadata)| {
+    .map(|(topic, metadata)| {
       let node_id = topic.numeric_id();
-      Some((node_id, metadata.scope().clone()))
+      (node_id, metadata.scope().clone())
     })
     .collect();
 
   // Collect expanded references for each topic before mutating
   let expanded_refs_map: BTreeMap<topic::Topic, Vec<SourceContext>> =
-    topic_metadata
-      .iter()
-      .filter_map(|(topic, _metadata)| {
+    topic_metadata.keys().map(|topic| {
         let node_id = topic.numeric_id();
 
         // Get recursive ancestry (ancestors, descendants, and relatives tracked separately)
@@ -3893,7 +3891,7 @@ fn populate_expanded_context(
           in_scope_files,
         );
 
-        Some((*topic, expanded_refs))
+        (*topic, expanded_refs)
       })
       .collect();
 

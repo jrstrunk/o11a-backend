@@ -88,7 +88,7 @@ fn placeholder_topic(node: &ASTNode) -> topic::Topic {
     ASTNode::Stub { kind, topic, .. } => {
       // If the stub carries a placeholder topic (Identifier → referenced
       // declaration, TypeConversion → argument), use it.
-      kind.placeholder_topic().cloned().unwrap_or_else(|| *topic)
+      kind.placeholder_topic().cloned().unwrap_or(*topic)
     }
     ASTNode::Identifier {
       referenced_declaration,

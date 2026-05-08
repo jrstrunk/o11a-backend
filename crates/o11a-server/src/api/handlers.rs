@@ -1872,8 +1872,8 @@ pub async fn create_threat_feature_link(
     audit_data
       .threat_feature_links
       .push(domain::ThreatFeatureLink {
-        threat_topic: threat_topic,
-        feature_topic: feature_topic,
+        threat_topic,
+        feature_topic,
         relation,
         severity,
       });
@@ -2294,7 +2294,7 @@ pub async fn create_threat(
   let metadata = domain::TopicMetadata::ThreatTopic {
     topic: threat_topic,
     description: row.description,
-    subject_topic: subject_topic,
+    subject_topic,
     author: row.author,
     created_at: row.created_at,
     severity: None,
@@ -2455,7 +2455,7 @@ pub async fn create_invariant(
   let metadata = domain::TopicMetadata::InvariantTopic {
     topic: inv_topic,
     description: row.description,
-    threat_topic: threat_topic,
+    threat_topic,
     author: row.author,
     created_at: row.created_at,
     severity,

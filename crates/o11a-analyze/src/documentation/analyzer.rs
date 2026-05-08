@@ -171,7 +171,7 @@ fn process_documentation_node(
       audit_data.topic_metadata.insert(
         topic,
         TopicMetadata::DocumentationTopic {
-          topic: topic,
+          topic,
           is_technical,
           scope: scope.clone(),
         },
@@ -207,7 +207,7 @@ fn process_documentation_node(
       audit_data.topic_metadata.insert(
         topic,
         TopicMetadata::UnnamedTopic {
-          topic: topic,
+          topic,
           kind: UnnamedTopicKind::DocumentationHeading,
           scope: scope.clone(),
           transitive_topic: None,
@@ -256,7 +256,7 @@ fn process_documentation_node(
       audit_data.topic_metadata.insert(
         topic,
         TopicMetadata::TitledTopic {
-          topic: topic,
+          topic,
           scope: scope.clone(),
           kind: TitledTopicKind::DocumentationSection,
           title: title.clone(),
@@ -295,7 +295,7 @@ fn process_documentation_node(
       audit_data.topic_metadata.insert(
         topic,
         TopicMetadata::UnnamedTopic {
-          topic: topic,
+          topic,
           kind: UnnamedTopicKind::DocumentationParagraph,
           scope: scope.clone(),
           transitive_topic: None,
@@ -327,7 +327,7 @@ fn process_documentation_node(
       audit_data.topic_metadata.insert(
         topic,
         TopicMetadata::UnnamedTopic {
-          topic: topic,
+          topic,
           kind: UnnamedTopicKind::DocumentationSentence,
           scope: scope.clone(),
           transitive_topic: None,
@@ -359,7 +359,7 @@ fn process_documentation_node(
       audit_data.topic_metadata.insert(
         topic,
         TopicMetadata::UnnamedTopic {
-          topic: topic,
+          topic,
           kind: UnnamedTopicKind::DocumentationCodeBlock,
           scope: scope.clone(),
           transitive_topic: None,
@@ -390,7 +390,7 @@ fn process_documentation_node(
       audit_data.topic_metadata.insert(
         topic,
         TopicMetadata::UnnamedTopic {
-          topic: topic,
+          topic,
           kind: UnnamedTopicKind::DocumentationList,
           scope: scope.clone(),
           transitive_topic: None,
@@ -421,7 +421,7 @@ fn process_documentation_node(
       audit_data.topic_metadata.insert(
         topic,
         TopicMetadata::UnnamedTopic {
-          topic: topic,
+          topic,
           kind: UnnamedTopicKind::DocumentationBlockQuote,
           scope: scope.clone(),
           transitive_topic: None,
@@ -452,7 +452,7 @@ fn process_documentation_node(
       audit_data.topic_metadata.insert(
         topic,
         TopicMetadata::UnnamedTopic {
-          topic: topic,
+          topic,
           kind: UnnamedTopicKind::DocumentationInlineCode,
           scope: scope.clone(),
           transitive_topic: None,
