@@ -147,6 +147,7 @@ pub fn get_named_topic_kind(
     | domain::TopicMetadata::FunctionalSemanticTopic { .. }
     | domain::TopicMetadata::FunctionalPurposeTopic { .. }
     | domain::TopicMetadata::PlacementRationaleTopic { .. }
+    | domain::TopicMetadata::ConditionTopic { .. }
     | domain::TopicMetadata::ThreatTopic { .. }
     | domain::TopicMetadata::InvariantTopic { .. }
     | domain::TopicMetadata::DocumentationTopic { .. } => None,

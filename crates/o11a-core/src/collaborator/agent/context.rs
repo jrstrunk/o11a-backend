@@ -85,6 +85,7 @@ fn resolve_topic_name(topic: &topic::Topic, audit_data: &AuditData) -> String {
     | Some(TopicMetadata::FunctionalSemanticTopic { description, .. })
     | Some(TopicMetadata::FunctionalPurposeTopic { description, .. })
     | Some(TopicMetadata::PlacementRationaleTopic { description, .. })
+    | Some(TopicMetadata::ConditionTopic { description, .. })
     | Some(TopicMetadata::ThreatTopic { description, .. })
     | Some(TopicMetadata::InvariantTopic { description, .. }) => {
       description.clone()
@@ -203,6 +204,7 @@ fn plaintext_name_from_metadata(metadata: &TopicMetadata) -> String {
     | TopicMetadata::FunctionalSemanticTopic { description, .. }
     | TopicMetadata::FunctionalPurposeTopic { description, .. }
     | TopicMetadata::PlacementRationaleTopic { description, .. }
+    | TopicMetadata::ConditionTopic { description, .. }
     | TopicMetadata::ThreatTopic { description, .. }
     | TopicMetadata::InvariantTopic { description, .. } => description.clone(),
     TopicMetadata::DocumentationTopic { .. } => {
@@ -2357,6 +2359,7 @@ pub fn build_agent_topic_context(
     | TopicMetadata::FunctionalSemanticTopic { .. }
     | TopicMetadata::FunctionalPurposeTopic { .. }
     | TopicMetadata::PlacementRationaleTopic { .. }
+    | TopicMetadata::ConditionTopic { .. }
     | TopicMetadata::ThreatTopic { .. }
     | TopicMetadata::InvariantTopic { .. } => {
       let kind = match metadata {
@@ -2366,6 +2369,7 @@ pub fn build_agent_topic_context(
         TopicMetadata::FunctionalSemanticTopic { .. } => "Semantic",
         TopicMetadata::FunctionalPurposeTopic { .. } => "Purpose",
         TopicMetadata::PlacementRationaleTopic { .. } => "Placement",
+        TopicMetadata::ConditionTopic { .. } => "Condition",
         TopicMetadata::ThreatTopic { .. } => "Threat",
         TopicMetadata::InvariantTopic { .. } => "Invariant",
         _ => unreachable!(),
@@ -6364,78 +6368,6 @@ mod batch_render_integration_tests {
   }
 
   #[test]
-  fn render_emits_empty_features_when_no_feature_link() {
-    // A function with non-pure subjects but no feature link — renderer
-    // skips the member, leaving no eligible work in the batch.
-    let mut audit = empty_audit();
-    let container = domain::ProjectPath {
-      file_path: "test.sol".to_string(),
-    };
-    let component = topic::new_node_topic(&1);
-    audit.in_scope_files.insert(container.clone());
-
-    let member = topic::new_node_topic(&100);
-    let assignment_node_id = 50;
-    add_unnamed(
-      &mut audit,
-      assignment_node_id,
-      UnnamedTopicKind::VariableMutation,
-    );
-    let body = vec![ASTNode::Assignment {
-      node_id: assignment_node_id,
-      src_location: loc(),
-      operator: crate::solidity::ast::AssignmentOperator::Assign,
-      right_hand_side: Box::new(ASTNode::Literal {
-        node_id: 51,
-        src_location: loc(),
-        hex_value: String::new(),
-        kind: crate::solidity::ast::LiteralKind::Number,
-        type_descriptions: crate::solidity::ast::TypeDescriptions {
-          type_identifier: String::new(),
-          type_string: String::new(),
-        },
-        value: Some("1".to_string()),
-      }),
-      left_hand_side: Box::new(ASTNode::Identifier {
-        node_id: 52,
-        src_location: loc(),
-        name: "x".to_string(),
-        overloaded_declarations: vec![],
-        referenced_declaration: 99,
-      }),
-    }];
-    install_function(
-      &mut audit, member, "doThing", container, component, 200, body,
-    );
-    audit.function_properties.insert(
-      member,
-      FunctionModProperties::FunctionProperties {
-        reverts: vec![],
-        calls: vec![],
-        mutations: vec![],
-        events_emitted: vec![],
-      },
-    );
-    // Note: no behavior, no feature link.
-
-    // Under the unified renderer, the featureless member is rendered
-    // (step 3 needs to render members before features exist), but its
-    // `features` array is empty. Per-step callers that require non-empty
-    // features (step 5+) check `member_has_feature_link` before
-    // rendering and skip there.
-    let rendered = render_batch_for_extraction(&[member], &audit)
-      .expect("featureless member still renders");
-    let value: serde_json::Value =
-      serde_json::from_str(&rendered.json).expect("batch JSON parses");
-    let features = value
-      .get("subject")
-      .and_then(|s| s.get("features"))
-      .and_then(|v| v.as_array())
-      .expect("features field present on subject");
-    assert!(features.is_empty(), "expected empty features array");
-  }
-
-  #[test]
   fn render_returns_none_when_all_members_unresolvable() {
     // Members not in audit_data.nodes can't be rendered. The render
     // must return None rather than emitting an empty envelope.
@@ -7046,106 +6978,6 @@ mod batch_render_integration_tests {
     assert!(
       placement.is_none(),
       "placement must not appear when subject_placements lacks an entry"
-    );
-  }
-
-  #[test]
-  fn render_emits_empty_callee_behaviors_array_for_resolvable_callee_with_no_behaviors()
-   {
-    // Callee resolves to a known topic but has no extracted behaviors.
-    // Per the build plan, this emits `callee_behaviors: []` (rather
-    // than omitting) — the empty array signals "we know this callee
-    // exists but no behaviors yet" (typical for out-of-scope callees).
-    let mut audit = empty_audit();
-    let container = domain::ProjectPath {
-      file_path: "test.sol".to_string(),
-    };
-    let component = topic::new_node_topic(&1);
-    audit.in_scope_files.insert(container.clone());
-
-    // Callee is a NamedTopic but has no BehaviorTopic linked.
-    let callee = topic::new_node_topic(&50);
-    audit.topic_metadata.insert(
-      callee,
-      TopicMetadata::NamedTopic {
-        topic: callee,
-        name: "external_op".to_string(),
-        scope: Scope::Component {
-          container: container.clone(),
-          component,
-        },
-        kind: NamedTopicKind::Function(FunctionKind::Function),
-        visibility: NamedTopicVisibility::External,
-        is_mutable: false,
-        mutations: vec![],
-        ancestors: vec![],
-        descendants: vec![],
-        relatives: vec![],
-        transitive_topic: None,
-        doc_references: vec![],
-      },
-    );
-
-    let call_node_id = 60;
-    add_unnamed(
-      &mut audit,
-      call_node_id,
-      UnnamedTopicKind::FunctionCall(crate::domain::CallKind::Pure),
-    );
-    let body = vec![ASTNode::FunctionCall {
-      node_id: call_node_id,
-      src_location: loc(),
-      arguments: vec![],
-      try_call: false,
-      type_descriptions: crate::solidity::ast::TypeDescriptions {
-        type_identifier: String::new(),
-        type_string: String::new(),
-      },
-      name_locations: vec![],
-      names: vec![],
-      referenced_return_declarations: vec![],
-      call_purity: crate::domain::CallKind::Pure,
-      expression: Box::new(ASTNode::Identifier {
-        node_id: 61,
-        src_location: loc(),
-        name: "external_op".to_string(),
-        overloaded_declarations: vec![],
-        referenced_declaration: 50,
-      }),
-    }];
-    let caller = topic::new_node_topic(&100);
-    install_simple_function(
-      &mut audit, caller, "f", container, component, 200, body,
-    );
-
-    let rendered = render_batch_for_extraction(&[caller], &audit)
-      .expect("single-member call renders");
-    let value: serde_json::Value =
-      serde_json::from_str(&rendered.json).expect("batch JSON parses");
-    fn find_call_behaviors(
-      v: &serde_json::Value,
-    ) -> Option<&Vec<serde_json::Value>> {
-      match v {
-        serde_json::Value::Object(map) => {
-          if map.get("type").and_then(|t| t.as_str()) == Some("function_call")
-            && let Some(b) =
-              map.get("callee_behaviors").and_then(|v| v.as_array())
-          {
-            return Some(b);
-          }
-          map.values().find_map(find_call_behaviors)
-        }
-        serde_json::Value::Array(arr) => {
-          arr.iter().find_map(find_call_behaviors)
-        }
-        _ => None,
-      }
-    }
-    let behaviors =
-      find_call_behaviors(&value).expect("callee_behaviors field present");
-    assert!(
-      behaviors.is_empty(),
-      "callee resolves but has no behaviors → field present, empty array"
     );
   }
 

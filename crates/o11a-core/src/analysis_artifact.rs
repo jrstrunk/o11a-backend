@@ -29,7 +29,7 @@
 //!     reapplied by `report::apply_report`)
 //!   - `name_index`, `comment_index`
 //!   - `topic_context`, `expanded_topic_context`
-//!   - `threat_feature_links`, `conditions`, `threats`, `invariants`
+//!   - `threat_feature_links`, `threats`, `invariants`
 //!   - `mentions_index`
 //!
 //! Excluded (reconstructed after load):
@@ -48,7 +48,7 @@
 //! the artifact by re-running `o11a-analyze`.
 
 use crate::domain::{
-  AST, AuditData, Condition, FunctionModProperties, Invariant, Node,
+  AST, AuditData, FunctionModProperties, Invariant, Node,
   ProjectPath, SolidityType, SourceContext, Threat, ThreatFeatureLink,
   TopicMetadata, TopicNameIndex, topic,
 };
@@ -60,7 +60,7 @@ use std::path::{Path, PathBuf};
 /// Bumped on any breaking change to [`AuditDataSnapshot`] or
 /// [`AnalysisArtifact`]. The server refuses to load a file whose version
 /// it doesn't recognize.
-pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
+pub const ARTIFACT_SCHEMA_VERSION: u32 = 2;
 
 /// Binary envelope for the analyzed `AuditData` snapshot. Private format
 /// between `o11a-analyze` (writer) and `o11a-server` (reader). Encoded
@@ -96,7 +96,6 @@ pub struct AuditDataSnapshot {
   pub topic_context: BTreeMap<topic::Topic, Vec<SourceContext>>,
   pub expanded_topic_context: BTreeMap<topic::Topic, Vec<SourceContext>>,
   pub threat_feature_links: Vec<ThreatFeatureLink>,
-  pub conditions: Vec<Condition>,
   pub threats: BTreeMap<topic::Topic, Threat>,
   pub invariants: BTreeMap<topic::Topic, Invariant>,
   pub mentions_index: HashMap<topic::Topic, Vec<topic::Topic>>,
@@ -136,7 +135,6 @@ pub fn snapshot_from_audit_data(audit_data: &AuditData) -> AuditDataSnapshot {
     topic_context: audit_data.topic_context.clone(),
     expanded_topic_context: audit_data.expanded_topic_context.clone(),
     threat_feature_links: audit_data.threat_feature_links.clone(),
-    conditions: audit_data.conditions.clone(),
     threats: audit_data.threats.clone(),
     invariants: audit_data.invariants.clone(),
     mentions_index: audit_data.mentions_index.clone(),
@@ -162,7 +160,6 @@ pub fn apply_snapshot(audit_data: &mut AuditData, snap: AuditDataSnapshot) {
   audit_data.topic_context = snap.topic_context;
   audit_data.expanded_topic_context = snap.expanded_topic_context;
   audit_data.threat_feature_links = snap.threat_feature_links;
-  audit_data.conditions = snap.conditions;
   audit_data.threats = snap.threats;
   audit_data.invariants = snap.invariants;
   audit_data.mentions_index = snap.mentions_index;

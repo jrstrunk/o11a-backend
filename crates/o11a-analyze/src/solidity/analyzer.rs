@@ -3734,6 +3734,7 @@ fn populate_context(
       | TopicMetadata::FunctionalSemanticTopic { .. }
       | TopicMetadata::FunctionalPurposeTopic { .. }
       | TopicMetadata::PlacementRationaleTopic { .. }
+      | TopicMetadata::ConditionTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. }
       | TopicMetadata::DocumentationTopic { .. } => {}

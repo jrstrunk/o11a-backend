@@ -298,53 +298,6 @@ pub async fn init_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .execute(pool)
   .await?;
 
-  // ── Conditions ──────────────────────────────────────────────────────────
-  sqlx::query(
-    r#"
-    CREATE TABLE IF NOT EXISTS conditions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        audit_id TEXT NOT NULL,
-        subject_topic TEXT NOT NULL,
-        condition_type TEXT NOT NULL,
-        description TEXT NOT NULL,
-        author_id INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-    "#,
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_conditions_audit ON conditions(audit_id)",
-  )
-  .execute(pool)
-  .await?;
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_conditions_subject ON conditions(subject_topic)",
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    r#"
-    CREATE TABLE IF NOT EXISTS condition_evaluations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        condition_id INTEGER NOT NULL,
-        question TEXT NOT NULL,
-        answer TEXT NOT NULL
-    )
-    "#,
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_cond_evals_cond ON condition_evaluations(condition_id)",
-  )
-  .execute(pool)
-  .await?;
-
   // ── User behaviors ──────────────────────────────────────────────────────
   // Column shapes mirror `TopicMetadata::BehaviorTopic`.
   sqlx::query(

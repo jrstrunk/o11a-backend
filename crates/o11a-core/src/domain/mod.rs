@@ -361,29 +361,6 @@ pub struct ThreatFeatureLink {
   pub severity: ThreatSeverity,
 }
 
-/// A condition evaluation on a non-pure subject. Conditions are the concrete,
-/// enumerable aspects of a subject's interaction surface that must be evaluated
-/// before threat generation. Each condition has standardized questions determined
-/// by its type, and the answers are stored as part of the evaluation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Condition {
-  /// The non-pure subject this condition belongs to
-  pub subject_topic: topic::Topic,
-  /// The type of non-pure interaction this condition represents
-  pub condition_type: NonPureSubjectType,
-  /// Description of the specific condition (e.g. "Revert PAIR_EXISTS on createPair")
-  pub description: String,
-  /// Question/answer pairs from the standardized evaluation
-  pub evaluations: Vec<ConditionEvaluation>,
-}
-
-/// A single question/answer pair in a condition evaluation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConditionEvaluation {
-  pub question: String,
-  pub answer: String,
-}
-
 /// A threat describing how an attacker could compromise a feature.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Threat {
@@ -456,9 +433,6 @@ pub struct AuditData {
   pub subject_placements: BTreeMap<topic::Topic, topic::Topic>,
   /// Impact analysis links between threats and features.
   pub threat_feature_links: Vec<ThreatFeatureLink>,
-  /// Conditions keyed by their database ID. Each belongs to a non-pure subject
-  /// and contains standardized question/answer evaluations.
-  pub conditions: Vec<Condition>,
   /// Threats keyed by A-prefixed topic ID. Each belongs to one feature.
   pub threats: BTreeMap<topic::Topic, Threat>,
   /// Invariants keyed by A-prefixed topic ID. Each belongs to one threat.
@@ -1165,6 +1139,31 @@ pub enum SubjectPurity {
   /// delegatecalls, assembly blocks, selfdestruct/create/create2.
   /// Requires condition evaluation and threat generation.
   NonPure,
+}
+
+/// The reasoning angle a Condition observation is taking. Loose taxonomy —
+/// the LLM picks; the auditor groups by kind in the review UI; mitigation
+/// strategies tend to differ across kinds (which is why the kinds split
+/// the way they do). Use `Other` for genuinely novel observations rather
+/// than forcing a fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConditionKind {
+  /// Can the interaction be triggered, and by whom?
+  Reachability,
+  /// Is the trigger restricted to authorized parties?
+  Authorization,
+  /// If the operation produces a wrong outcome, can the system recover?
+  Recoverability,
+  /// Can a caller control the inputs or state being read here?
+  Manipulability,
+  /// Can the value being read be out of date?
+  Staleness,
+  /// Can interleaving operations observe inconsistent state?
+  Atomicity,
+  /// Can shared resources be drained, locked, or starved?
+  ResourceExhaustion,
+  /// Genuinely novel observation; description carries the structure.
+  Other,
 }
 
 /// Non-pure subject type, determining which standardized condition questions apply.
@@ -1951,6 +1950,32 @@ pub enum TopicMetadata {
     /// Severity is assigned during impact analysis; None means pending
     severity: Option<ThreatSeverity>,
   },
+  /// A condition — a purpose-driven observation about a non-pure subject's
+  /// interaction surface. Generated in pipeline step 6 from the subject's
+  /// functional purpose and placement rationale. Each observation is its
+  /// own ConditionTopic; subjects typically have multiple. Step 7 (threats)
+  /// reasons from these as structured inputs.
+  ConditionTopic {
+    topic: topic::Topic,
+    /// The observation, in prose. One thing the auditor can agree or
+    /// disagree with independently.
+    description: String,
+    /// The non-pure subject this observation is about.
+    subject_topic: topic::Topic,
+    /// Reasoning angle this observation took.
+    kind: ConditionKind,
+    /// Topic IDs the LLM cited as justifying the observation. May include
+    /// subject siblings, called functions, declarations the function uses,
+    /// or documentation topics. Validated for well-formedness only in this
+    /// work; cross-pipeline rendered-context validation is a later
+    /// refinement.
+    evidence_topics: Vec<topic::Topic>,
+    author: crate::collaborator::models::Author,
+    /// `None` for pipeline-produced entities — see FeatureTopic for
+    /// rationale. (Following the FunctionalPurposeTopic pattern; not the
+    /// ThreatTopic/InvariantTopic non-Option shape.)
+    created_at: Option<String>,
+  },
   /// An invariant that must hold to prevent a threat
   InvariantTopic {
     topic: topic::Topic,
@@ -1984,6 +2009,7 @@ impl TopicMetadata {
       | TopicMetadata::FunctionalSemanticTopic { .. }
       | TopicMetadata::FunctionalPurposeTopic { .. }
       | TopicMetadata::PlacementRationaleTopic { .. }
+      | TopicMetadata::ConditionTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. } => &Scope::Global,
     }
@@ -2002,6 +2028,7 @@ impl TopicMetadata {
       | TopicMetadata::FunctionalSemanticTopic { .. }
       | TopicMetadata::FunctionalPurposeTopic { .. }
       | TopicMetadata::PlacementRationaleTopic { .. }
+      | TopicMetadata::ConditionTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. }
       | TopicMetadata::DocumentationTopic { .. } => None,
@@ -2021,6 +2048,7 @@ impl TopicMetadata {
       | TopicMetadata::FunctionalSemanticTopic { topic, .. }
       | TopicMetadata::FunctionalPurposeTopic { topic, .. }
       | TopicMetadata::PlacementRationaleTopic { topic, .. }
+      | TopicMetadata::ConditionTopic { topic, .. }
       | TopicMetadata::ThreatTopic { topic, .. }
       | TopicMetadata::InvariantTopic { topic, .. }
       | TopicMetadata::DocumentationTopic { topic, .. } => topic,
@@ -2088,6 +2116,9 @@ impl TopicMetadata {
       TopicMetadata::PlacementRationaleTopic { subject_topic, .. } => {
         Some(subject_topic)
       }
+      TopicMetadata::ConditionTopic { subject_topic, .. } => {
+        Some(subject_topic)
+      }
       TopicMetadata::InvariantTopic { threat_topic, .. } => Some(threat_topic),
       _ => None,
     }
@@ -2102,6 +2133,7 @@ impl TopicMetadata {
       | TopicMetadata::FunctionalSemanticTopic { author, .. }
       | TopicMetadata::FunctionalPurposeTopic { author, .. }
       | TopicMetadata::PlacementRationaleTopic { author, .. }
+      | TopicMetadata::ConditionTopic { author, .. }
       | TopicMetadata::ThreatTopic { author, .. }
       | TopicMetadata::InvariantTopic { author, .. } => Some(*author),
       _ => None,
@@ -2123,6 +2155,7 @@ impl TopicMetadata {
       | TopicMetadata::FunctionalSemanticTopic { description, .. }
       | TopicMetadata::FunctionalPurposeTopic { description, .. }
       | TopicMetadata::PlacementRationaleTopic { description, .. }
+      | TopicMetadata::ConditionTopic { description, .. }
       | TopicMetadata::ThreatTopic { description, .. }
       | TopicMetadata::InvariantTopic { description, .. } => {
         Some(description.as_str())
@@ -2150,7 +2183,8 @@ impl TopicMetadata {
       | TopicMetadata::BehaviorTopic { created_at, .. }
       | TopicMetadata::FunctionalSemanticTopic { created_at, .. }
       | TopicMetadata::FunctionalPurposeTopic { created_at, .. }
-      | TopicMetadata::PlacementRationaleTopic { created_at, .. } => {
+      | TopicMetadata::PlacementRationaleTopic { created_at, .. }
+      | TopicMetadata::ConditionTopic { created_at, .. } => {
         created_at.as_deref()
       }
       _ => None,
@@ -3082,7 +3116,6 @@ pub fn new_audit_data(
     subject_purposes: BTreeMap::new(),
     subject_placements: BTreeMap::new(),
     threat_feature_links: Vec::new(),
-    conditions: Vec::new(),
     threats: BTreeMap::new(),
     invariants: BTreeMap::new(),
     feature_requirement_links: BTreeMap::new(),
@@ -3373,5 +3406,65 @@ mod tests {
     let audit = new_audit_data("test".to_string(), HashSet::new(), None);
     assert!(audit.inheritance.is_empty());
     assert!(audit.resolution_graph.is_none());
+  }
+
+  #[test]
+  fn condition_topic_round_trips_through_serde() {
+    use crate::collaborator::models::Author;
+
+    let cond_topic = topic::new_adversarial_property_topic(1);
+    let subject_topic = topic::new_node_topic(&42);
+    let evidence = vec![topic::new_node_topic(&10), topic::new_node_topic(&20)];
+
+    let metadata = TopicMetadata::ConditionTopic {
+      topic: cond_topic,
+      description: "Caller can front-run the state read.".to_string(),
+      subject_topic,
+      kind: ConditionKind::Manipulability,
+      evidence_topics: evidence.clone(),
+      author: Author::AgentLarge,
+      created_at: None,
+    };
+
+    // Serialize and deserialize the TopicMetadata
+    let json = serde_json::to_string(&metadata).unwrap();
+    let back: TopicMetadata = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.topic(), &cond_topic);
+    assert_eq!(back.description(), Some("Caller can front-run the state read."));
+    assert_eq!(back.target_topic(), Some(&subject_topic));
+    assert_eq!(back.author(), Some(Author::AgentLarge));
+    assert!(back.created_at().is_none());
+
+    // Verify ConditionKind serde round-trip for each variant
+    for kind in [
+      ConditionKind::Reachability,
+      ConditionKind::Authorization,
+      ConditionKind::Recoverability,
+      ConditionKind::Manipulability,
+      ConditionKind::Staleness,
+      ConditionKind::Atomicity,
+      ConditionKind::ResourceExhaustion,
+      ConditionKind::Other,
+    ] {
+      let kind_json = serde_json::to_string(&kind).unwrap();
+      let kind_back: ConditionKind = serde_json::from_str(&kind_json).unwrap();
+      assert_eq!(kind, kind_back, "round-trip failed for {:?}", kind);
+    }
+
+    // Insert into topic_metadata map and verify lookups
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    audit.topic_metadata.insert(cond_topic, metadata);
+
+    let retrieved = audit.topic_metadata.get(&cond_topic).unwrap();
+    assert!(matches!(retrieved, TopicMetadata::ConditionTopic { .. }));
+    if let TopicMetadata::ConditionTopic {
+      kind,
+      evidence_topics,
+      ..
+    } = retrieved
+    {
+      assert_eq!(*kind, ConditionKind::Manipulability);
+      assert_eq!(*evidence_topics, evidence);
+    }
   }
 }

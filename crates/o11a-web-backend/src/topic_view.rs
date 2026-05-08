@@ -396,6 +396,12 @@ pub fn highlighted_name(metadata: &TopicMetadata) -> String {
         html_escape(description)
       )
     }
+    TopicMetadata::ConditionTopic { description, .. } => {
+      format!(
+        "<span class=\"condition\">{}</span>",
+        html_escape(description)
+      )
+    }
   };
 
   format!("<code>{}</code>", inner)

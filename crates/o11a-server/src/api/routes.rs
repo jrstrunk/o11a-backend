@@ -132,17 +132,6 @@ pub fn create_router(state: AppState) -> Router {
       delete(handlers::delete_threat_feature_link),
     )
     // ============================================
-    // Condition routes
-    // ============================================
-    .route(
-      "/api/v1/audits/:audit_id/conditions",
-      post(handlers::create_condition),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/conditions/:condition_id",
-      get(handlers::get_subject_conditions).delete(handlers::delete_condition),
-    )
-    // ============================================
     // Threat routes
     // ============================================
     .route(

@@ -370,6 +370,7 @@ pub async fn get_contracts(
       | o11a_core::domain::TopicMetadata::FunctionalSemanticTopic { .. }
       | o11a_core::domain::TopicMetadata::FunctionalPurposeTopic { .. }
       | o11a_core::domain::TopicMetadata::PlacementRationaleTopic { .. }
+      | o11a_core::domain::TopicMetadata::ConditionTopic { .. }
       | o11a_core::domain::TopicMetadata::ThreatTopic { .. }
       | o11a_core::domain::TopicMetadata::InvariantTopic { .. }
       | o11a_core::domain::TopicMetadata::DocumentationTopic { .. } => false,
@@ -598,6 +599,20 @@ pub struct PlacementRationaleTopicResponse {
   pub created_at: Option<String>,
 }
 
+/// Response for ConditionTopic metadata
+#[derive(Debug, Serialize)]
+pub struct ConditionTopicResponse {
+  pub topic_id: String,
+  pub description: String,
+  pub subject_topic: String,
+  pub kind: String,
+  pub evidence_topics: Vec<String>,
+  #[serde(rename = "author_id")]
+  pub author: Author,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<String>,
+}
+
 /// Response for ThreatTopic metadata
 #[derive(Debug, Serialize)]
 pub struct ThreatTopicResponse {
@@ -648,6 +663,8 @@ pub enum TopicMetadataResponse {
   Purpose(FunctionalPurposeTopicResponse),
   #[serde(rename = "placement")]
   Placement(PlacementRationaleTopicResponse),
+  #[serde(rename = "condition")]
+  Condition(ConditionTopicResponse),
   #[serde(rename = "threat")]
   Threat(ThreatTopicResponse),
   #[serde(rename = "invariant")]
@@ -842,6 +859,24 @@ fn topic_metadata_to_response(
       topic_id: topic.id(),
       description: description.clone(),
       subject_topic: subject_topic.id(),
+      author: *author_id,
+      created_at: created_at.clone(),
+    }),
+
+    o11a_core::domain::TopicMetadata::ConditionTopic {
+      description,
+      subject_topic,
+      kind,
+      evidence_topics,
+      author: author_id,
+      created_at,
+      ..
+    } => TopicMetadataResponse::Condition(ConditionTopicResponse {
+      topic_id: topic.id(),
+      description: description.clone(),
+      subject_topic: subject_topic.id(),
+      kind: format!("{:?}", kind),
+      evidence_topics: evidence_topics.iter().map(|t| t.id()).collect(),
       author: *author_id,
       created_at: created_at.clone(),
     }),
@@ -1955,228 +1990,6 @@ pub async fn delete_threat_feature_link(
     {
       *s = max_severity;
     }
-  }
-
-  Ok(StatusCode::NO_CONTENT)
-}
-
-// ============================================
-// Condition routes
-// ============================================
-
-#[derive(Debug, Deserialize)]
-pub struct CreateConditionRequest {
-  pub subject_topic: String,
-  pub condition_type: String,
-  pub description: String,
-  #[serde(rename = "author_id")]
-  pub author: Author,
-  #[serde(default)]
-  pub evaluations: Vec<ConditionEvaluationInput>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ConditionEvaluationInput {
-  pub question: String,
-  pub answer: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ConditionResponse {
-  pub id: i64,
-  pub subject_topic: String,
-  pub condition_type: String,
-  pub description: String,
-  #[serde(rename = "author_id")]
-  pub author: Author,
-  pub created_at: String,
-  pub evaluations: Vec<ConditionEvaluationResponse>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ConditionEvaluationResponse {
-  pub question: String,
-  pub answer: String,
-}
-
-/// POST /api/v1/audits/:audit_id/conditions
-/// Creates a new condition on a non-pure subject.
-pub async fn create_condition(
-  State(state): State<AppState>,
-  Path(audit_id): Path<String>,
-  Json(payload): Json<CreateConditionRequest>,
-) -> Result<Json<ConditionResponse>, StatusCode> {
-  tracing::debug!(
-    "POST /api/v1/audits/{}/conditions for {}",
-    audit_id,
-    payload.subject_topic
-  );
-
-  let row = db::create_condition(
-    &state.db,
-    &audit_id,
-    &payload.subject_topic,
-    &payload.condition_type,
-    &payload.description,
-    payload.author,
-  )
-  .await
-  .map_err(|e| {
-    tracing::error!("create_condition failed: {}", e);
-    StatusCode::INTERNAL_SERVER_ERROR
-  })?;
-
-  let mut eval_responses = Vec::new();
-  for eval in &payload.evaluations {
-    let _ = db::add_condition_evaluation(
-      &state.db,
-      row.id,
-      &eval.question,
-      &eval.answer,
-    )
-    .await;
-    eval_responses.push(ConditionEvaluationResponse {
-      question: eval.question.clone(),
-      answer: eval.answer.clone(),
-    });
-  }
-
-  // Update in-memory state
-  let condition_type = match payload.condition_type.as_str() {
-    "state_write" => domain::NonPureSubjectType::StateWrite,
-    "state_read" => domain::NonPureSubjectType::StateRead,
-    "external_call" => domain::NonPureSubjectType::ExternalCall,
-    "delegate_call" => domain::NonPureSubjectType::DelegateCall,
-    "inline_assembly" => domain::NonPureSubjectType::InlineAssembly,
-    "create" => domain::NonPureSubjectType::Create,
-    _ => return Err(StatusCode::BAD_REQUEST),
-  };
-
-  let condition = domain::Condition {
-    subject_topic: topic::new_topic(&payload.subject_topic),
-    condition_type,
-    description: payload.description.clone(),
-    evaluations: payload
-      .evaluations
-      .iter()
-      .map(|e| domain::ConditionEvaluation {
-        question: e.question.clone(),
-        answer: e.answer.clone(),
-      })
-      .collect(),
-  };
-
-  {
-    let mut ctx = state.data_context.lock().map_err(|e| {
-      tracing::error!("Mutex poisoned in create_condition: {}", e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let audit_data =
-      ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-    audit_data.conditions.push(condition);
-  }
-
-  Ok(Json(ConditionResponse {
-    id: row.id,
-    subject_topic: row.subject_topic,
-    condition_type: row.condition_type,
-    description: row.description,
-    author: row.author,
-    created_at: row.created_at,
-    evaluations: eval_responses,
-  }))
-}
-
-/// GET /api/v1/audits/:audit_id/conditions/:condition_id
-/// Returns all conditions for a subject. The path slot carries the subject's
-/// topic ID for this handler; numeric condition IDs are used by the DELETE
-/// variant on the same route.
-pub async fn get_subject_conditions(
-  State(state): State<AppState>,
-  Path((audit_id, subject_topic)): Path<(String, String)>,
-) -> Result<Json<Vec<ConditionResponse>>, StatusCode> {
-  tracing::debug!(
-    "GET /api/v1/audits/{}/conditions/{}",
-    audit_id,
-    subject_topic
-  );
-
-  let rows =
-    db::get_conditions_for_subject(&state.db, &audit_id, &subject_topic)
-      .await
-      .map_err(|e| {
-        tracing::error!("get_conditions_for_subject failed: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-      })?;
-
-  let mut responses = Vec::new();
-  for row in rows {
-    let evals = db::get_condition_evaluations(&state.db, row.id)
-      .await
-      .map_err(|e| {
-        tracing::error!("get_condition_evaluations failed: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-      })?;
-
-    responses.push(ConditionResponse {
-      id: row.id,
-      subject_topic: row.subject_topic,
-      condition_type: row.condition_type,
-      description: row.description,
-      author: row.author,
-      created_at: row.created_at,
-      evaluations: evals
-        .iter()
-        .map(|e| ConditionEvaluationResponse {
-          question: e.question.clone(),
-          answer: e.answer.clone(),
-        })
-        .collect(),
-    });
-  }
-
-  Ok(Json(responses))
-}
-
-/// DELETE /api/v1/audits/:audit_id/conditions/:condition_id
-pub async fn delete_condition(
-  State(state): State<AppState>,
-  Path((audit_id, condition_id)): Path<(String, i64)>,
-) -> Result<StatusCode, StatusCode> {
-  tracing::debug!(
-    "DELETE /api/v1/audits/{}/conditions/{}",
-    audit_id,
-    condition_id
-  );
-
-  // Get the condition before deleting so we can update in-memory state
-  let rows = db::get_conditions_for_subject(&state.db, &audit_id, "")
-    .await
-    .unwrap_or_default();
-  let subject_topic = rows
-    .iter()
-    .find(|r| r.id == condition_id)
-    .map(|r| r.subject_topic.clone());
-
-  db::delete_condition(&state.db, condition_id)
-    .await
-    .map_err(|e| {
-      tracing::error!("delete_condition failed: {}", e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-  // Remove from in-memory state
-  if let Some(_subject) = subject_topic {
-    let mut ctx = state.data_context.lock().map_err(|e| {
-      tracing::error!("Mutex poisoned in delete_condition: {}", e);
-      StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let audit_data =
-      ctx.get_audit_mut(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
-
-    // Remove condition by matching ID (we'd need to track IDs — for now, rebuild)
-    // Since conditions don't have topic IDs, we filter by description match
-    audit_data.conditions.retain(|_c| true); // TODO: proper filtering with IDs
   }
 
   Ok(StatusCode::NO_CONTENT)
