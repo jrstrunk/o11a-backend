@@ -1190,15 +1190,33 @@ pub async fn synthesize_features(
 
 /// Prompt for extracting behaviors from a batch of dependency-ordered
 /// functions/modifiers. The batch JSON is the output of
-/// `render_batch_for_behavior_extraction`. See pipeline-dag.md.
+/// `render_batch_for_extraction`. See pipeline-dag.md.
 const EXTRACT_BEHAVIORS_BATCH_PROMPT: &str = "Below are one or more functions/modifiers from \
-an in-scope smart contract project. Each function includes:\n\
-- Its `definition` AST (signature and body).\n\
-- A `semantics` map keyed by declaration topic — the project-specific \
-meaning of each parameter, return value, local, and mutated state variable.\n\
-- A `called_function_behaviors` map keyed by callee topic — the behaviors \
-of every internal function this one calls (already extracted in earlier \
-batches). Out-of-scope callees appear with an empty `behaviors` array.\n\n\
+an in-scope smart contract project. The input is wrapped in either a \
+`subject` field (single member) or a `batch` array (multiple members). \
+Each member object includes:\n\
+- `topic`: the N-prefixed topic ID of the function or modifier.\n\
+- `name`, `kind`, `visibility`, and a `modifiers` array of `{topic, name}` \
+entries listing every modifier applied to the function signature.\n\
+- `state_reads` and `state_writes`: arrays of state-variable topic IDs \
+this function reads from or mutates. (`state_reads` may be empty even \
+when reads occur; treat the body AST as the source of truth for reads.)\n\
+- `features`: an array of features this member contributes to. Each \
+feature has `topic`, `name`, `description`, and `requirements`. A member \
+may belong to more than one feature; reasoning that draws on multiple \
+features is welcome.\n\
+- `definition`: the function's signature and body as an AST. Reference \
+nodes (Identifier, IdentifierPath, MemberAccess) carry an inline \
+`semantic` field when the referenced declaration has a project-specific \
+meaning. Function call nodes carry an inline `callee_behaviors` array \
+when the callee is in-scope and already extracted.\n\
+- `semantics`: a top-level map keyed by declaration topic — the same \
+project-specific meanings as the inline annotations, deduped for \
+enumeration.\n\
+- `called_function_behaviors`: a top-level map keyed by callee topic — \
+the same callee behaviors as the inline call-site annotations, deduped \
+for enumeration. Out-of-scope callees appear with an empty `behaviors` \
+array.\n\n\
 Your task is to extract **behaviors** for each function — what it actually \
 does, described in business-level terms.\n\n\
 - Use the semantics to describe behaviors at a business level rather than \
@@ -1206,9 +1224,10 @@ mechanically. For example, if `propFactor` has the semantic \"proportional \
 reward multiplier\" and `stakerBalance` has \"user's staked token balance\", \
 describe the behavior as \"calculates proportional reward share for the \
 staker\" rather than \"multiplies propFactor by stakerBalance\".\n\
-- Use the called_function_behaviors to understand what internal calls do \
-without re-describing them. Describe the composite effect of this function \
-in terms of what its callees do, not how they do it.\n\
+- Use the called_function_behaviors and inline `callee_behaviors` to \
+understand what internal calls do without re-describing them. Describe \
+the composite effect of this function in terms of what its callees do, \
+not how they do it.\n\
 - Preserve the developer's specific terminology from the semantics — \
 subtle naming differences often reflect important design distinctions.\n\
 - Include both normal execution paths and edge case behaviors (reverts, \
@@ -1220,8 +1239,8 @@ Return a JSON object with a `members` key whose value is an array of member \
 groups. Each group has:\n\
 - `member_topic`: the N-prefixed topic ID of the function/modifier\n\
 - `behaviors`: an array of behavior description strings\n\n\
-Every function and modifier in the batch must appear in the output with at \
-least one behavior. If the batch is empty, return `{\"members\": []}`.\n\n";
+Every function and modifier in the input must appear in the output with at \
+least one behavior. If the input is empty, return `{\"members\": []}`.\n\n";
 
 /// Raw member behavior group from LLM.
 #[derive(Deserialize)]
@@ -1269,9 +1288,9 @@ pub struct ParsedBehaviors {
 
 /// Extract behaviors from a DAG-ordered batch of in-scope functions and
 /// modifiers via LLM. `batch_json` is the output of
-/// `context::render_batch_for_behavior_extraction`. `label` identifies
-/// the batch for logs and LLM-call telemetry (use the
-/// `BatchForExtraction.label` field).
+/// `context::render_batch_for_extraction`. `label` identifies the batch
+/// for logs and LLM-call telemetry (use the `BatchForExtraction.label`
+/// field).
 pub async fn extract_behaviors_from_batch(
   batch_json: &str,
   label: &str,
@@ -1331,27 +1350,39 @@ pub async fn extract_behaviors_from_batch(
 // ============================================================================
 
 /// Prompt for generating functional purpose and placement rationale for
-/// every non-pure subject in a batch of in-scope functions/modifiers.
-/// The batch JSON is the output of
-/// `render_batch_for_functional_properties`. See pipeline-dag.md step 5.
-const EXTRACT_FUNCTIONAL_PROPERTIES_PROMPT: &str = "Below are one or more in-scope \
-functions/modifiers from a smart contract project. For each function:\n\
-- `definition` is the function's signature and body as an AST. **Non-pure \
-subjects in the body have `purity: \"non_pure\"`. Function calls include
-`purity: \"pure\"` or `purity: \"non_pure\"`.**\n\
-- `feature` is the linked feature: name, description, and requirements.\n\
-- `behaviors` lists what the function as a whole does (already extracted).\n\
-- `semantics` maps each declaration topic to its name and project-specific \
-meaning.\n\
-- `called_function_behaviors` maps each callee topic to what that callee does.\n\n\
+/// every non-pure subject in a single in-scope function/modifier. The
+/// input JSON is the output of `render_batch_for_extraction` called with
+/// a single-member slice; the envelope uses the `subject` shape (not
+/// `batch`). See pipeline-dag.md step 5.
+const EXTRACT_FUNCTIONAL_PROPERTIES_PROMPT: &str = "Below is one in-scope \
+function or modifier from a smart contract project. The function appears \
+under the `subject` field with:\n\
+- `topic`, `name`, `kind`, `visibility`, and a `modifiers` array of \
+`{topic, name}` entries.\n\
+- `state_reads` and `state_writes`: state-variable topic IDs the function \
+reads or mutates.\n\
+- `features`: an array of features this function contributes to. Each \
+feature has `topic`, `name`, `description`, and `requirements`. The \
+function may belong to more than one feature; the purpose and placement \
+of subjects inside it are constrained by all of them.\n\
+- `behaviors`: what the function as a whole does (already extracted).\n\
+- `definition`: the function's signature and body as an AST. **Non-pure \
+subjects in the body have `purity: \"non_pure\"`; function calls include \
+`purity: \"pure\"` or `purity: \"non_pure\"`.** Reference nodes carry an \
+inline `semantic` when the referenced declaration has a project-specific \
+meaning. Call sites carry an inline `callee_behaviors` when the callee \
+is in-scope.\n\
+- `semantics`: top-level map keyed by declaration topic, deduped \
+enumeration of the inline annotations.\n\
+- `called_function_behaviors`: top-level map keyed by callee topic, \
+deduped enumeration of the inline call-site annotations.\n\n\
 The top-level **`non_pure_subjects`** array lists every non-pure subject \
-across all functions in this batch. For **each** topic in that list, \
-produce two properties:\n\n\
+in this function. For **each** topic in that list, produce two \
+properties:\n\n\
 - **`functional_purpose`** — the business-logic reason this subject exists, \
-expressed in terms of the function's feature and the value the subject \
-contributes to that feature. Avoid restating what the operation \
-mechanically does; explain the impact on users or the system if it \
-were absent.\n\
+expressed in terms of the function's feature(s) and the value the subject \
+contributes to them. Avoid restating what the operation mechanically does; \
+explain the impact on users or the system if it were absent.\n\
 - **`placement_rationale`** — the ordering reason this subject is at this \
 point in its function rather than earlier or later. Refer to specific \
 neighboring operations in the function body when relevant: what state \
@@ -1368,7 +1399,7 @@ entry has:\n\
 - `functional_purpose`: one or two sentences\n\
 - `placement_rationale`: one or two sentences\n\n\
 Every topic in `non_pure_subjects` must appear exactly once in the output. \
-If the batch contains no subjects, return `{\"subjects\": []}`.\n\n";
+If the function contains no non-pure subjects, return `{\"subjects\": []}`.\n\n";
 
 #[derive(Deserialize)]
 struct LLMSubjectFunctionalProperties {
@@ -1426,13 +1457,13 @@ pub struct ParsedSubjectFunctionalProperties {
 }
 
 /// Run the functional-purpose / placement-rationale LLM task against a
-/// rendered batch. `batch_json` is the output of
-/// `context::render_batch_for_functional_properties`. `label` identifies
-/// the batch for logs. Validates that every topic in the batch's
-/// `non_pure_subjects` list appears exactly once in the LLM's response;
-/// missing or extra topics surface as `tracing::warn` events but do not
-/// fail the task — the auditor sees the partial result and can prompt
-/// for missing entries during review.
+/// single function rendered by `context::render_batch_for_extraction`
+/// in `subject` shape. `label` identifies the function for logs.
+/// Validates that every topic in the input's `non_pure_subjects` list
+/// appears exactly once in the LLM's response; missing or extra topics
+/// surface as `tracing::warn` events but do not fail the task — the
+/// auditor sees the partial result and can prompt for missing entries
+/// during review.
 pub async fn extract_functional_properties_from_batch(
   batch_json: &str,
   label: &str,

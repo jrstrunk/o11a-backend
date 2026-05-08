@@ -438,7 +438,7 @@ pub async fn build_behaviors(
           audit_id: audit_id.to_string(),
         }
       })?;
-      context::render_batch_for_behavior_extraction(&batch.members, audit_data)
+      context::render_batch_for_extraction(&batch.members, audit_data)
     };
 
     let Some(rendered) = rendered else {
@@ -1360,8 +1360,13 @@ pub async fn build_functional_properties(
     domain::rebuild_feature_context(audit_data);
   }
 
-  // Reuse the DAG batches from behavior extraction. Same callee context
-  // is available; we inject feature + behaviors per member.
+  // Reuse the DAG batches from behavior extraction to enumerate members
+  // in DAG-respecting order, then iterate each batch's members flat —
+  // step 5 generates per-subject output, so the LLM call granularity is
+  // per-function, not per-batch. Affinity batching is bypassed; layer
+  // ordering is preserved (callees still appear in earlier batches than
+  // callers, so by the time we render any caller, callee behaviors are
+  // already committed by step 3).
   let batches = {
     let ctx = state
       .data_context
@@ -1383,17 +1388,11 @@ pub async fn build_functional_properties(
     return Ok(());
   }
 
-  let total_batches = batches.len();
-  tracing::info!(
-    "Generating functional properties across {} batches (in parallel)",
-    total_batches
-  );
-
-  // Render every eligible batch up front under a single lock acquisition,
+  // Render every eligible member up front under a single lock acquisition,
   // counting featureless members for the reconciliation-gap report.
-  // Batches without eligible subjects are dropped here so they don't take
-  // a parallelism slot.
-  let mut rendered_batches: Vec<context::BatchForExtraction> = Vec::new();
+  // Members without eligible subjects (no feature link, or no non-pure
+  // subjects) are dropped here so they don't take a parallelism slot.
+  let mut rendered_members: Vec<context::BatchForExtraction> = Vec::new();
   let mut total_skipped_no_feature: usize = 0;
   {
     let ctx = state
@@ -1407,25 +1406,37 @@ pub async fn build_functional_properties(
           audit_id: audit_id.to_string(),
         })?;
     for batch in &batches {
-      total_skipped_no_feature += batch
-        .members
-        .iter()
-        .filter(|m| !member_has_feature_link(m, audit_data))
-        .count();
-      if let Some(rendered) = context::render_batch_for_functional_properties(
-        &batch.members,
-        audit_data,
-      ) {
-        rendered_batches.push(rendered);
+      for member in &batch.members {
+        if !member_has_feature_link(member, audit_data) {
+          total_skipped_no_feature += 1;
+          continue;
+        }
+        if let Some(rendered) =
+          context::render_batch_for_extraction(&[*member], audit_data)
+        {
+          if rendered.non_pure_subjects.is_empty() {
+            // Pure-only function: nothing to ask the LLM about. The
+            // unified renderer is step-agnostic and renders pure-only
+            // members for step 3 (behaviors); step 5 filters them here.
+            continue;
+          }
+          rendered_members.push(rendered);
+        }
       }
     }
   }
 
-  // Functional-property batches have no inter-batch dependencies — each
-  // generates its own subjects from already-committed feature and
-  // behavior context. Spawn all LLM calls concurrently.
+  let total_members = rendered_members.len();
+  tracing::info!(
+    "Generating functional properties for {} member(s) (per-function, in parallel)",
+    total_members
+  );
+
+  // Per-member calls have no inter-member dependencies — each generates
+  // its own subjects from already-committed feature and behavior context.
+  // Spawn all LLM calls concurrently.
   let mut handles = Vec::new();
-  for rendered in rendered_batches {
+  for rendered in rendered_members {
     handles.push(tokio::spawn(async move {
       let result = task::extract_functional_properties_from_batch(
         &rendered.json,
@@ -1502,19 +1513,20 @@ pub async fn build_functional_properties(
     );
   }
   tracing::info!(
-    "Completed functional property generation: {} subjects across {} batches",
+    "Completed functional property generation: {} subjects across {} member(s)",
     total_subjects,
-    total_batches
+    total_members
   );
 
   Ok(())
 }
 
 /// Returns true when `member` has at least one behavior linked to some
-/// feature. Mirrors the eligibility check inside
-/// `context::render_batch_for_functional_properties` so the skip metric
-/// reported by `build_functional_properties` matches what the renderer
-/// actually drops.
+/// feature. The unified renderer is step-agnostic and emits members
+/// regardless of feature linkage (step 3 runs before features exist);
+/// `build_functional_properties` and later per-subject steps use this
+/// helper to gate the LLM call themselves and to count the
+/// reconciliation gap.
 fn member_has_feature_link(
   member: &topic::Topic,
   audit_data: &domain::AuditData,
@@ -1631,7 +1643,8 @@ mod member_has_feature_link_tests {
   //! Tests for the helper that decides whether a function member is
   //! eligible for functional-purpose / placement-rationale generation.
   //! Mirrors the eligibility check inside
-  //! `context::render_batch_for_functional_properties`.
+  //! `context::render_batch_for_extraction` (the renderer drops members
+  //! whose `features` array is empty).
   use super::*;
   use crate::collaborator::models::Author;
   use crate::domain::{TopicMetadata, new_audit_data};
