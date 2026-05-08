@@ -1407,7 +1407,7 @@ pub async fn build_functional_properties(
         })?;
     for batch in &batches {
       for member in &batch.members {
-        if !member_has_feature_link(member, audit_data) {
+        if !context::member_has_feature_link(member, audit_data) {
           total_skipped_no_feature += 1;
           continue;
         }
@@ -1521,25 +1521,6 @@ pub async fn build_functional_properties(
   Ok(())
 }
 
-/// Returns true when `member` has at least one behavior linked to some
-/// feature. The unified renderer is step-agnostic and emits members
-/// regardless of feature linkage (step 3 runs before features exist);
-/// `build_functional_properties` and later per-subject steps use this
-/// helper to gate the LLM call themselves and to count the
-/// reconciliation gap.
-fn member_has_feature_link(
-  member: &topic::Topic,
-  audit_data: &domain::AuditData,
-) -> bool {
-  let Some(beh_topics) = audit_data.member_behaviors.get(member) else {
-    return false;
-  };
-  audit_data
-    .feature_behavior_links
-    .values()
-    .any(|feat_behs| beh_topics.iter().any(|bt| feat_behs.contains(bt)))
-}
-
 #[cfg(test)]
 mod merge_condensed_entry_tests {
   use super::*;
@@ -1638,76 +1619,4 @@ mod merge_condensed_entry_tests {
   }
 }
 
-#[cfg(test)]
-mod member_has_feature_link_tests {
-  //! Tests for the helper that decides whether a function member is
-  //! eligible for functional-purpose / placement-rationale generation.
-  //! Mirrors the eligibility check inside
-  //! `context::render_batch_for_extraction` (the renderer drops members
-  //! whose `features` array is empty).
-  use super::*;
-  use crate::collaborator::models::Author;
-  use crate::domain::{TopicMetadata, new_audit_data};
-  use std::collections::HashSet;
 
-  fn empty_audit() -> domain::AuditData {
-    new_audit_data("test".to_string(), HashSet::new(), None)
-  }
-
-  fn install_behavior_for_member(
-    audit: &mut domain::AuditData,
-    member: topic::Topic,
-    beh: topic::Topic,
-  ) {
-    audit.topic_metadata.insert(
-      beh,
-      TopicMetadata::BehaviorTopic {
-        topic: beh,
-        description: "does X".to_string(),
-        member_topic: member,
-        author: Author::System,
-        created_at: None,
-      },
-    );
-    audit.member_behaviors.entry(member).or_default().push(beh);
-  }
-
-  #[test]
-  fn no_behaviors_means_no_link() {
-    let audit = empty_audit();
-    let member = topic::new_node_topic(&5);
-    assert!(!member_has_feature_link(&member, &audit));
-  }
-
-  #[test]
-  fn behaviors_without_feature_link_means_no_link() {
-    let mut audit = empty_audit();
-    let member = topic::new_node_topic(&5);
-    let beh = topic::new_behavior_topic(1);
-    install_behavior_for_member(&mut audit, member, beh);
-    assert!(!member_has_feature_link(&member, &audit));
-  }
-
-  #[test]
-  fn behavior_in_a_feature_link_is_recognized() {
-    let mut audit = empty_audit();
-    let member = topic::new_node_topic(&5);
-    let beh = topic::new_behavior_topic(1);
-    let feat = topic::new_feature_topic(1);
-    install_behavior_for_member(&mut audit, member, beh);
-    audit.feature_behavior_links.insert(feat, vec![beh]);
-    assert!(member_has_feature_link(&member, &audit));
-  }
-
-  #[test]
-  fn behavior_in_unrelated_feature_link_is_not_a_match() {
-    let mut audit = empty_audit();
-    let member = topic::new_node_topic(&5);
-    let beh = topic::new_behavior_topic(1);
-    let feat = topic::new_feature_topic(1);
-    let other_beh = topic::new_behavior_topic(2);
-    install_behavior_for_member(&mut audit, member, beh);
-    audit.feature_behavior_links.insert(feat, vec![other_beh]);
-    assert!(!member_has_feature_link(&member, &audit));
-  }
-}

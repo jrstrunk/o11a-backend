@@ -2935,6 +2935,25 @@ fn batch_label(members: &[topic::Topic], audit_data: &AuditData) -> String {
   }
 }
 
+/// Returns true when `member` has at least one behavior linked to
+/// some feature. The unified renderer is step-agnostic and emits
+/// members regardless of feature linkage (step 3 runs before features
+/// exist); `build_functional_properties` and later per-subject steps
+/// use this helper to gate the LLM call themselves and to count the
+/// reconciliation gap.
+pub(crate) fn member_has_feature_link(
+  member: &topic::Topic,
+  audit_data: &AuditData,
+) -> bool {
+  let Some(beh_topics) = audit_data.member_behaviors.get(member) else {
+    return false;
+  };
+  audit_data
+    .feature_behavior_links
+    .values()
+    .any(|feat_behs| beh_topics.iter().any(|bt| feat_behs.contains(bt)))
+}
+
 /// Look up every feature linked to a member via reconciliation
 /// behaviors. Returns a vector of feature objects (`{ topic, name,
 /// description, requirements }`); empty when no feature link exists,
@@ -2945,9 +2964,10 @@ fn lookup_member_features(
   member: &topic::Topic,
   audit_data: &AuditData,
 ) -> Vec<serde_json::Value> {
-  let Some(beh_topics) = audit_data.member_behaviors.get(member) else {
+  if !member_has_feature_link(member, audit_data) {
     return Vec::new();
-  };
+  }
+  let beh_topics = audit_data.member_behaviors.get(member).unwrap();
   let matches: Vec<&topic::Topic> = audit_data
     .feature_behavior_links
     .iter()
@@ -5410,6 +5430,63 @@ mod functional_property_render_tests {
 
     // The function picks the first by iteration order — that's `sem1`.
     assert_eq!(first_semantic(&decl, &audit), Some("first".to_string()));
+  }
+
+  fn install_behavior_for_member(
+    audit: &mut domain::AuditData,
+    member: topic::Topic,
+    beh: topic::Topic,
+  ) {
+    audit.topic_metadata.insert(
+      beh,
+      TopicMetadata::BehaviorTopic {
+        topic: beh,
+        description: "does X".to_string(),
+        member_topic: member,
+        author: crate::collaborator::models::Author::System,
+        created_at: None,
+      },
+    );
+    audit.member_behaviors.entry(member).or_default().push(beh);
+  }
+
+  #[test]
+  fn member_has_feature_link_no_behaviors_means_no_link() {
+    let audit = empty_audit();
+    let member = topic::new_node_topic(&5);
+    assert!(!member_has_feature_link(&member, &audit));
+  }
+
+  #[test]
+  fn member_has_feature_link_behaviors_without_feature_link_means_no_link() {
+    let mut audit = empty_audit();
+    let member = topic::new_node_topic(&5);
+    let beh = topic::new_behavior_topic(1);
+    install_behavior_for_member(&mut audit, member, beh);
+    assert!(!member_has_feature_link(&member, &audit));
+  }
+
+  #[test]
+  fn member_has_feature_link_behavior_in_a_feature_link_is_recognized() {
+    let mut audit = empty_audit();
+    let member = topic::new_node_topic(&5);
+    let beh = topic::new_behavior_topic(1);
+    let feat = topic::new_feature_topic(1);
+    install_behavior_for_member(&mut audit, member, beh);
+    audit.feature_behavior_links.insert(feat, vec![beh]);
+    assert!(member_has_feature_link(&member, &audit));
+  }
+
+  #[test]
+  fn member_has_feature_link_unrelated_feature_link_is_not_a_match() {
+    let mut audit = empty_audit();
+    let member = topic::new_node_topic(&5);
+    let beh = topic::new_behavior_topic(1);
+    let feat = topic::new_feature_topic(1);
+    let other_beh = topic::new_behavior_topic(2);
+    install_behavior_for_member(&mut audit, member, beh);
+    audit.feature_behavior_links.insert(feat, vec![other_beh]);
+    assert!(!member_has_feature_link(&member, &audit));
   }
 
   #[test]
