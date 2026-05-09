@@ -12,7 +12,7 @@ That second outline paragraph ("You could batch this per-function too") is the a
 | 7 Threats | per-batch | subject | step 6 conditions on the subject + everything step 6 had |
 | 8 Invariants | per-batch (or per-threat post-pass) | threat | step 7 threats + the threat's subject context |
 
-Steps 6 and 7 can stay bundled in one LLM call per batch if you want — "for each subject in this batch, list condition observations and the threats those observations imply" — but I'd separate them because the outline's diagnosable-disagreement property is the whole point: the auditor needs to be able to agree with an observation but reject the threat without re-deriving both.
+Steps 6 and 7 should be separated because the outline's diagnosable-disagreement property is the whole point: the auditor needs to be able to agree with an observation but reject the threat without re-deriving both.
 
 ## What delivers the most audit value
 
