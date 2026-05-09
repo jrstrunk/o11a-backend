@@ -1502,8 +1502,11 @@ fn render_solidity_ast_snippet(
 
   // Inline functional purpose, placement rationale, and conditions on
   // non-pure subject nodes when previous pipeline steps have produced
-  // them. Field availability is data-flow driven: each lookup is gated
-  // on presence in `audit_data`, so step 6's input naturally carries
+  // them. Conditions here are positive assertions (what must hold for
+  // purpose+placement to be fulfilled), not failure observations —
+  // step 7 (threats) generates adversarial inversions at output time.
+  // Field availability is data-flow driven: each lookup is gated on
+  // presence in `audit_data`, so step 6's input naturally carries
   // step 5's output and step 7+'s input naturally carries step 6's.
   if is_non_pure {
     if let Some(p_topic) = audit_data.subject_purposes.get(&topic)
@@ -7180,9 +7183,10 @@ mod batch_render_integration_tests {
       cond_a1,
       TopicMetadata::ConditionTopic {
         topic: cond_a1,
-        description: "caller can front-run the state read".to_string(),
+        description: "the read state is not attacker-controlled at this point"
+          .to_string(),
         subject_topic: assignment_topic,
-        kind: domain::ConditionKind::Manipulability,
+        kind: domain::ConditionKind::InputIntegrity,
         evidence_topics: vec![],
         author: crate::collaborator::models::Author::System,
         created_at: None,
@@ -7192,10 +7196,10 @@ mod batch_render_integration_tests {
       cond_a2,
       TopicMetadata::ConditionTopic {
         topic: cond_a2,
-        description: "stale balance used after concurrent withdrawal"
+        description: "the balance read reflects the latest committed state"
           .to_string(),
         subject_topic: assignment_topic,
-        kind: domain::ConditionKind::Staleness,
+        kind: domain::ConditionKind::ValueFreshness,
         evidence_topics: evidence.clone(),
         author: crate::collaborator::models::Author::System,
         created_at: None,
@@ -7249,9 +7253,9 @@ mod batch_render_integration_tests {
     assert_eq!(c1["topic"].as_str(), Some(cond_a1.id().as_str()));
     assert_eq!(
       c1["description"].as_str(),
-      Some("caller can front-run the state read")
+      Some("the read state is not attacker-controlled at this point")
     );
-    assert_eq!(c1["kind"].as_str(), Some("Manipulability"));
+    assert_eq!(c1["kind"].as_str(), Some("InputIntegrity"));
     assert_eq!(c1["evidence_topics"].as_array().unwrap().len(), 0);
 
     // Verify second condition shape
@@ -7259,9 +7263,9 @@ mod batch_render_integration_tests {
     assert_eq!(c2["topic"].as_str(), Some(cond_a2.id().as_str()));
     assert_eq!(
       c2["description"].as_str(),
-      Some("stale balance used after concurrent withdrawal")
+      Some("the balance read reflects the latest committed state")
     );
-    assert_eq!(c2["kind"].as_str(), Some("Staleness"));
+    assert_eq!(c2["kind"].as_str(), Some("ValueFreshness"));
     let ev = c2["evidence_topics"].as_array().unwrap();
     assert_eq!(ev.len(), 1);
     assert_eq!(ev[0].as_str(), Some(evidence[0].id().as_str()));
@@ -7415,9 +7419,9 @@ mod batch_render_integration_tests {
       valid_cond,
       TopicMetadata::ConditionTopic {
         topic: valid_cond,
-        description: "valid observation".to_string(),
+        description: "valid assertion".to_string(),
         subject_topic: assignment_topic,
-        kind: domain::ConditionKind::Reachability,
+        kind: domain::ConditionKind::RestrictedReachability,
         evidence_topics: vec![],
         author: crate::collaborator::models::Author::System,
         created_at: None,
@@ -7471,7 +7475,7 @@ mod batch_render_integration_tests {
     );
     assert_eq!(
       conditions[0]["description"].as_str(),
-      Some("valid observation")
+      Some("valid assertion")
     );
   }
 }

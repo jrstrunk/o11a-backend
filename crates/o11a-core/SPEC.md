@@ -100,8 +100,8 @@ When a user adds a new element to the security model, the relevant pipeline step
 - **New behavior** — Created during code review, grouped under the code scope where it was observed. If features have already been synthesized, the behavior is associated with the appropriate feature based on its code scope. Behaviors are reconciliation artifacts and do not carry threat or invariant links.
 - **New functional semantic** — Persisted on a declaration with provenance to its source documentation topic. If the semantic changes the meaning of a declaration, downstream properties (behaviors that reference the declaration, functional purpose on containing statements) may need re-evaluation.
 - **New functional purpose / placement rationale** — Generated as a sibling pair on a non-pure subject. If purpose is added or corrected, conditions and threats on the same subject re-evaluate against the new purpose. Placement rationale invalidates when surrounding statements in the containing function change; purpose invalidates when the subject's feature description changes.
-- **New condition** — Evaluated on a non-pure subject with standardized questions. Condition evaluations trigger re-evaluation of the subject's threats, as new condition answers may reveal risks not previously identified.
-- **New threat** — Generated on non-pure subjects from condition evaluations (see Managing Threats and Invariants below). Created without a mandatory link to a feature, allowing the discoverer to record it immediately. Invariants are generated from the threat and attached to the subject. The system triggers re-checks on the subject. The feature linkage is established during impact analysis.
+- **New condition** — Recorded as an assertion on a non-pure subject (what must hold for its purpose+placement to be fulfilled). Adding or correcting a condition triggers re-evaluation of the subject's threats, since each threat is anchored to a specific condition it falsifies; a new or revised assertion may surface threat scenarios not previously identified.
+- **New threat** — Generated on non-pure subjects as the adversarial inversion of a specific condition (see Managing Threats and Invariants below). Carries a link to the condition it falsifies. Created without a mandatory link to a feature, allowing the discoverer to record it immediately. Invariants are generated from the threat and attached to the subject. The system triggers re-checks on the subject. The feature linkage is established during impact analysis.
 - **New invariant** — Attached to a source subject, linked to its parent threat. The system triggers re-checks against the subject and any related subjects within the invariant's scope.
 
 The user's request completes immediately; background work finishes asynchronously.
@@ -159,16 +159,15 @@ Source Subject: deployCampaign() → IERC20(token).transferFrom(...)   [non-pure
   ├── Functional Semantics:
   │     ├── "token": "campaign reward token" (from docs: D3 "Campaign Token Setup")
   │     └── "amount": "total campaign allocation" (from docs: D5 "Campaign Funding")
-  ├── Condition: Revert "PAIR_EXISTS" on createPair
-  │     ├── Can an attacker trigger? Yes — token address is deterministic (CREATE opcode)
-  │     ├── Can normal operation trigger? No
-  │     └── Is it recoverable? No — createPair has no overwrite mechanism
-  ├── Condition: Reentrancy via token callback
-  │     ├── Does the call transfer control to untrusted code? Yes — token is user-supplied
-  │     └── Can the callee re-enter? Yes — no reentrancy guard
+  ├── Condition: "createPair invocations are not pre-emptable for the same token address"
+  │     └── Kind: RestrictedReachability
+  ├── Condition: "no token-callback re-entry observes partial state during setup"
+  │     └── Kind: AtomicConsistency
   ├── Threat: "Frontrunning via pre-computed token address bricks deployment"
+  │     ├── Falsifies condition: "createPair invocations are not pre-emptable..."
   │     └── Impact: [is vulnerable to] "Protocol Campaigns" (severity: critical)
   ├── Threat: "Reentrancy via token callback during campaign setup"
+  │     ├── Falsifies condition: "no token-callback re-entry observes partial state..."
   │     └── Impact: [is vulnerable to] "Protocol Campaigns" (severity: critical)
   ├── Invariant: "State updates precede external calls in deployCampaign"
   │     └── Parent Threat: "Reentrancy via token callback..."
@@ -238,8 +237,8 @@ There are three types of properties that may be checked on the subjects of a spe
   4. Invariants (defensive properties the subject must uphold, derived from threats)
 - Non-Pure Subjects (state reads, state writes, external calls, delegatecalls, assembly blocks):
   1. All of the above, plus:
-  2. Conditions (structured evaluations of the subject's interaction surface, determined by subject type)
-  3. Threats (implementation-specific risks derived from condition evaluations)
+  2. Conditions (positive assertions about what must hold for the subject's purpose+placement to be fulfilled)
+  3. Threats (implementation-specific risks generated as adversarial inversions of specific conditions)
 - Expressions and Values:
   1. Functional Semantics (what it represents within the context of the application, derived from project documentation)
 
@@ -375,51 +374,77 @@ Non-pure subject types include:
 - Assembly blocks (bypasses compiler safety checks)
 - Selfdestruct / create / create2
 
-Each non-pure subject has conditions determined by its type. Conditions are the concrete, enumerable aspects of a subject's interaction surface that must be evaluated. The analyzer identifies conditions from data it already tracks — revert conditions from function signatures, value domains from type constraints, access patterns from require statements. Each condition is evaluated with standardized questions specific to the subject type, and the answers are stored on the subject and shared between evaluators.
+Each non-pure subject carries conditions: positive **assertions** about what must hold for the subject's functional purpose and placement rationale to be fulfilled. A condition catalogues an assumption the subject's purpose makes about its environment — what its caller, inputs, callees, or surrounding state must look like for the subject to do its job. Each condition is one assertion the auditor can independently agree with, and each carries a `kind` naming the category of assertion (caller restriction, value freshness, atomic consistency, etc.; see the closed `ConditionKind` enum for the eight categories).
 
-Conditions are evaluated before threat generation. This provides threat generation with concrete, bounded inputs to reason from rather than relying on open-ended adversarial reasoning. The reasoning chain is: structured observations about each condition → threats derived from those observations → invariants derived from those threats. Separating observations from threats also allows the human auditor to agree with an observation but disagree with the threat assessment, making disagreements diagnosable.
+Conditions are generated before threat generation. This provides threat generation with concrete, bounded inputs to reason from rather than relying on open-ended adversarial reasoning. The reasoning chain is: **purpose+placement → conditions (what must hold for the purpose to be fulfilled) → threats (scenarios where assertions break) → invariants (code-enforced defenses against those threat scenarios, propagated by re-check across scope)**. Separating positive assertions from threats also allows the human auditor to agree with an assertion but disagree with the threat assessment, making disagreements diagnosable.
 
-Standardized questions by condition type:
+Each condition's `description` is phrased affirmatively: "the caller carries the privilege the subject's purpose presumes," "the value reflects the latest committed state," "no interleaving operation observes inconsistent state across this point." Failure-mode language ("could fail," "an attacker can…") is reserved for threats, which generate adversarial inversions of these assertions.
 
-**Revert conditions on function calls.** For each revert condition in the callee's signature:
+Example assertions per non-pure subject type. These are illustrative, not enumerative — the LLM produces conditions tailored to each subject's purpose+placement and may emit none from a list below if the purpose does not presume them, or several including some not listed:
 
-- Can an attacker trigger this condition?
-- Can normal system operation trigger this condition?
-- Is this condition recoverable if triggered?
+**External calls.** For an external call site, conditions might assert:
 
-For example, Uniswap's `createPair` has a revert condition "PAIR_EXISTS." When evaluating an external call to `createPair` where the token address is produced by `Clones.clone()` (which uses the deterministic CREATE opcode), the evaluation yields: an attacker *can* trigger PAIR_EXISTS by pre-computing the token address and calling `createPair` first; this condition is *not* recoverable because `createPair` has no mechanism to overwrite an existing pair. These observations directly produce the threat "frontrunning via pre-computed token address bricks deployment."
+- The callee is restricted to trusted addresses (kind: `AuthorizedAccess` or `RestrictedReachability`).
+- The callee cannot re-enter the current contract before the surrounding state commits (kind: `AtomicConsistency`).
+- The return value is honored before subsequent operations rely on success (kind: `ErrorRecoverability`).
 
-**State mutations.** For each state write:
+For example, an external call to Uniswap's `createPair` whose token address comes from `Clones.clone()` typically emits a `RestrictedReachability` condition: "the token address is constrained to one that no other party can pre-compute." The threats step then generates the inversion: "an attacker pre-computes the deterministic token address, calls `createPair` first, and bricks the deployment."
 
-- Can the value be set to something that makes other functionality fail?
-- Can the value be set by an unauthorized party?
-- Is the mutation reversible?
+**State mutations.** For a state write, conditions might assert:
 
-**State reads of mutable variables.** For each state read:
+- Only the authorized writer can reach this mutation (kind: `AuthorizedAccess`).
+- The pre-write state matches the purpose's preconditions (kind: `InputIntegrity`).
+- The mutation is recoverable or its invalid range is unreachable (kind: `ErrorRecoverability`).
 
-- Can the value be manipulated before this read?
-- Can the value be stale?
-- Does the caller control what value is read (via timing, ordering)?
+**State reads of mutable variables.** For a state read, conditions might assert:
 
-**External calls (beyond revert conditions).** For each external call:
+- The value reflects the latest committed state (kind: `ValueFreshness`).
+- The read is not influenced by attacker-controlled timing or ordering (kind: `InputIntegrity`).
+- The read order with respect to surrounding operations preserves consistency (kind: `AtomicConsistency`).
 
-- Does the call transfer control to untrusted code?
-- Can the callee re-enter the current contract?
-- Is the return value checked?
+**Delegatecalls.** For a delegatecall, conditions might assert:
 
-**Delegatecalls.** For each delegatecall:
+- The target address is restricted to trusted, audited code (kind: `AuthorizedAccess`).
+- The delegated code's storage assumptions match the calling contract's layout (kind: `InputIntegrity`).
 
-- Can the target address be manipulated?
-- Does the delegated code make assumptions about storage layout?
+**Assembly blocks.** For an assembly block, conditions might assert:
 
-**Assembly blocks.** For each assembly block:
+- The compiler safety check the assembly bypasses is upheld by the surrounding code (kind: `InputIntegrity`).
+- The block's memory and storage assumptions match the surrounding contract's layout (kind: `AtomicConsistency` or `InputIntegrity`).
 
-- Does the assembly bypass compiler safety checks that the surrounding code relies on?
-- Does the assembly make assumptions about memory or storage layout?
+#### Auditor verification of conditions
+
+When an auditor approves a condition, the verification prompt asks three questions to convert approval from a frictionless click into a verified judgment:
+
+- **Is this assertion load-bearing for the subject's purpose?** If the purpose would still be fulfilled without this assertion, the condition is trivia and should be removed or rewritten.
+- **Would the purpose still hold if this assertion failed?** If yes, the condition is mislabeled — it is not actually a presumption the purpose makes.
+- **Does the assertion anchor to topics visible in the subject's surrounding code?** Evidence topics should reference state vars, parameters, callees, or documentation topics that establish what the assertion is about. Empty `evidence_topics` is acceptable when the assertion is about an absence (e.g. "the caller is constrained to the contract's owner" with no positive code anchor for the constraint), but should be questioned.
+
+The first two questions test whether the condition is doing the work it claims; the third tests evidence grounding. Conditions are independently approvable: an auditor can approve a condition while disagreeing with the threats that step 7 generates against it.
+
+### Conditions vs. Invariants
+
+The chain: **purpose → conditions → threats → invariants**. Conditions are not a redundant layer above invariants; the two serve different reasoning loops, and the textual content can overlap (a condition "the caller carries the privilege the subject's purpose presumes" and an invariant "every privileged-state-modifying function checks ownership" can read nearly identically). The role split is what differs.
+
+**Conditions' unique upstream value over invariants:**
+
+1. **Layer.** Conditions live at the purpose layer — they catalogue what each subject's purpose presumes about its environment. Invariants live at the threat layer — they catalogue what the codebase must enforce to block specific threat scenarios. Conditions answer "what does this subject's purpose presume?"; invariants answer "what must the codebase enforce to defend against this threat?"
+2. **Coverage.** Conditions are uniform — every non-pure subject has them by construction during the initial generation pipeline. Invariants are sparse — they exist only where threat work has surfaced one. Conditions provide a complete map of purpose-level assumptions across the audit; invariants provide depth on the subset of subjects where threat analysis has been done. Skipping conditions means subjects whose purposes are misinterpreted but never threat-analyzed have no checkpoint.
+3. **Threat bounding.** Conditions provide bounded inputs to threat generation. With conditions, threat generation prompts "find scenarios that falsify each assertion" — anchored, tractable. Without conditions, threat generation is open-ended adversarial reasoning ("find what could go wrong") — much weaker, harder to verify completeness, and harder to attribute disagreements.
+4. **Correction surface.** When the auditor disagrees with a condition, that signal propagates back to questioning the purpose itself, before threat work begins. Without conditions, the only correction handle on a misinterpreted purpose is downstream threat disagreement — more expensive to surface, harder to attribute to root cause.
+5. **Indexing.** Conditions are subject-local — every subject has its own list, addressable by the subject's topic. Invariants are scope-organized — one invariant can apply to many subjects, with re-check as the propagation mechanism that finds every other subject in scope that lacks the expected defense.
+
+**Surface similarity vs. structural difference.** A condition and an invariant can name the same code-level statement; that is the chain working, not redundancy. The condition is organized around one subject's purpose-presumptions; the invariant is organized around one threat's enforced defense, propagated across all subjects in scope. Both can exist for the same statement — the condition records why the subject's purpose needs the property; the invariant records that the codebase must enforce the property as a defense, with a parent threat naming what the defense protects against.
+
+**Distinguishing test for prompts and review.** A condition prompt asks "what does this subject's purpose presume?" — never "what should the code enforce?" An invariant prompt asks "given this threat, what defensive property prevents it, and where in the codebase must that property hold?" Miswriting cues:
+
+- If a condition is written as "the code must X," it has been miswritten as a small invariant — rewrite as "the purpose presumes X."
+- If a condition names a specific failure scenario, it has been miswritten as a threat — rewrite as the assumption that scenario would violate.
+- If an invariant is written as "the purpose presumes X," it has been miswritten as a condition — restate as "the codebase must enforce X to defend against [threat]."
 
 ### Managing Threats and Invariants
 
-Threats are generated on-demand for non-pure subjects only, after their conditions have been evaluated. When a non-pure subject is first evaluated during the audit, the LLM is given the subject, its condition evaluations, its backward context, its feature description and requirements (as the adversarial context), and its type constraints (to avoid restating those), and asked "given these condition evaluations, what implementation-specific risks exist at this code point?" The condition evaluations provide concrete inputs — "an attacker can trigger PAIR_EXISTS and it is not recoverable" — from which the LLM derives specific threats rather than reasoning from scratch. The result is cached on the subject and presented to the auditor for review.
+Threats are generated on-demand for non-pure subjects only, after their conditions have been generated. When a non-pure subject is first evaluated during the audit, the LLM is given the subject, its conditions (the assertions that must hold for the subject's purpose to be fulfilled), its backward context, its feature description and requirements (as the adversarial context), and its type constraints (to avoid restating those), and asked "given these assertions, what scenarios would falsify each one — and what implementation-specific risks does that create?" The conditions provide concrete inputs — "the token address is constrained to one that no other party can pre-compute" — from which the LLM derives specific threats by inverting each assertion ("an attacker pre-computes the deterministic token address, calls `createPair` first, and bricks deployment") rather than reasoning from scratch. Each generated threat carries a link back to the condition it falsifies, so an auditor disagreeing with a threat can trace the disagreement to the assertion the threat targets without invalidating that assertion. The result is cached on the subject and presented to the auditor for review.
 
 Threats are created without a mandatory link to a feature. This keeps discovery lightweight — the auditor or LLM records the implementation-specific risk immediately without needing to perform impact analysis on the spot. Cross-cutting vulnerabilities like storage collisions may affect multiple features in ways that aren't apparent during code review, and forcing the link at creation time would either block documentation, produce a hasty and potentially misleading link, or cause the threat to go unrecorded. The linkage to features, along with severity and the relationship type ("is vulnerable to" or "defends against"), is established during the dedicated impact analysis step.
 
@@ -456,7 +481,7 @@ General audit flow is:
 1. Read and understand the docs and the purpose of the project
 2. Run the initial generation pipeline: extract requirements from documentation, generate functional semantics via semantic linking, extract behaviors from source code with semantics in context, synthesize features via reconciliation, and generate functional purpose and placement rationale for every non-pure subject in an in-scope function (with adversarial critique attached)
 3. Review and refine the generated security model — verify functional semantics, add missing requirements, correct behavior descriptions, adjust feature groupings, confirm or correct generated purpose and placement rationale
-4. Step through all convergences — for non-pure subjects, conditions are evaluated with standardized questions, then threats are generated from the condition evaluations, and invariants from threats are attached and checked at convergences
+4. Step through all convergences — for non-pure subjects, conditions are recorded as assertions about what must hold for the subject's purpose+placement to be fulfilled, then threats are generated as adversarial inversions of those assertions, and invariants from threats are attached and checked at convergences
 5. Perform impact analysis — link threats to the features they affect, establishing severity and the relationship type ("is vulnerable to" or "defends against"); unlinked threats are flagged for review
 6. Re-reconcile requirements against behaviors per feature as needed, identifying unimplemented specification and undocumented implementation
 7. As new requirements, behaviors, conditions, threats, invariants, functional semantics, functional purpose, or placement rationale are discovered during code review, add them to the security model — the re-check system propagates them to all relevant subjects, ensuring nothing is missed
@@ -467,7 +492,7 @@ Convergences are the main point of verification in the audit process. They have 
 
 ## Subject Evaluation Context Strategy
 
-When evaluating subjects for invariant upholding or invariant recognition, we use **backward-only context** as the default strategy. When auditing a given subject, the system provides context about where the subject's values originated (their data provenance, taint sources, and upstream transformations), the subject's functional purpose (why it exists, derived from the feature), the subject's functional semantics (what it represents, derived from project documentation via semantic linking, with provenance to the source documentation topic), its invariants (defensive properties it must uphold), and for non-pure subjects, its condition evaluations (structured analysis of the subject's interaction surface) and threats (implementation-specific risks derived from condition evaluations). The system does not, by default, include forward context about where those values propagate to downstream.
+When evaluating subjects for invariant upholding or invariant recognition, we use **backward-only context** as the default strategy. When auditing a given subject, the system provides context about where the subject's values originated (their data provenance, taint sources, and upstream transformations), the subject's functional purpose (why it exists, derived from the feature), the subject's functional semantics (what it represents, derived from project documentation via semantic linking, with provenance to the source documentation topic), its invariants (defensive properties it must uphold), and for non-pure subjects, its conditions (assertions about its interaction surface that its purpose presumes) and threats (adversarial inversions of those assertions). The system does not, by default, include forward context about where those values propagate to downstream.
 
 This is a deliberate architectural choice, not a limitation. The system compensates for the absence of forward context through the **security model's on-the-fly generation and re-check mechanism**, which provides equivalent or superior coverage to bidirectional context while maintaining focused, low-noise audit passes.
 

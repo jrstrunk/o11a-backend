@@ -1,6 +1,6 @@
 # Step 6 — Conditions on Non-Pure Subjects
 
-This is the implementation plan for pipeline step 6: generating **conditions** — purpose-driven observations about a non-pure subject's interaction surface — for every non-pure subject that received a functional purpose in step 5. Conditions are the structured input that step 7 (threats) reasons from.
+This is the implementation plan for pipeline step 6: generating **conditions** — assertions that must hold for a non-pure subject's functional purpose and placement rationale to be fulfilled — for every non-pure subject that received a functional purpose in step 5. Conditions are the structured input that step 7 (threats) reasons from; threats are the adversarial inversions of these assertions. Phases 0-5 land the structural pipeline. Phase 6 was added after Phases 2-5 committed, correcting a polarity miss (conditions originally landed as adversarial observations); see Phase 6 for the reframe and the SPEC's "Conditions vs. Invariants" subsection it introduces.
 
 Read `pipeline-dag.md` first; this doc assumes its DAG, batching, and step-5 patterns are in place.
 
@@ -8,13 +8,15 @@ Read `pipeline-dag.md` first; this doc assumes its DAG, batching, and step-5 pat
 
 These were settled during design and should not be re-litigated during implementation:
 
-- **Per-function generation, per-subject output.** One LLM call per in-scope function with non-pure subjects. Output is keyed by subject; one ConditionTopic per observation. A single subject typically produces 1–8 conditions. Step 5 is also being refactored to per-function in this work (see Phase 0); step 3 stays batched. The rule: LLM call granularity matches the reasoning unit — function-scope reasoning batches functions; subject-within-function reasoning calls per function.
+- **Conditions are positive assertions, not adversarial observations.** Each condition states what must hold for the subject's functional purpose and placement rationale to be fulfilled; threats (step 7) are the adversarial inversions of these assertions. Phases 2-5 landed conditions in adversarial framing; Phase 6 corrects the polarity. Do not relitigate this — collapsing it re-introduces the role overlap with threats and loses the SPEC's "agree with the assertion, disagree with the threat" disagreement axis.
+- **Conditions and invariants are different roles, not different specificity levels.** Conditions are subject-local assertions about what each subject's purpose presumes; invariants are scope-organized defenses derived from threats and propagated by re-check. The SPEC's "Conditions vs. Invariants" subsection (added in Phase 6) is the canonical reference; the distinction is load-bearing for downstream design.
+- **Per-function generation, per-subject output.** One LLM call per in-scope function with non-pure subjects. Output is keyed by subject; one ConditionTopic per assertion. A single subject typically produces 1–8 conditions. Step 5 is also being refactored to per-function in this work (see Phase 0); step 3 stays batched. The rule: LLM call granularity matches the reasoning unit — function-scope reasoning batches functions; subject-within-function reasoning calls per function.
 - **A-prefixed shared topic family.** ConditionTopic, ThreatTopic, InvariantTopic all share the `A` prefix and the `NEXT_ADVERSARIAL_PROPERTY_ID` counter. The migration is already done; this work just adds ConditionTopic to the family.
 - **Old `Condition` / `ConditionEvaluation` model is retired.** The existing per-template Q/A model in `domain/mod.rs` and its DB tables are replaced wholesale. DB has no production data; no migration shim needed.
-- **Loose taxonomy with eight kinds**, plus `Other`. Listed below.
-- **Evidence is `Vec<topic::Topic>`** — a list of topic IDs that justify the observation. No structural constraints beyond well-formed topic IDs (cross-pipeline rendered-context validation is deferred to a later refinement pass).
+- **Loose taxonomy of eight assertion categories**, plus `Other`. Listed below (post-Phase-6 names).
+- **Evidence is `Vec<topic::Topic>`** — a list of topic IDs that justify the assertion. No structural constraints beyond well-formed topic IDs (cross-pipeline rendered-context validation is deferred to a later refinement pass).
 - **Skip-on-no-feature.** Functions without feature links are skipped, same as step 5. Reported as a reconciliation gap. No degraded fallback.
-- **Per-subject duplication of cross-cutting observations.** If "caller is unrestricted" applies to every external call in a function, each call site gets its own ConditionTopic. Text is cheap; auditor focus is expensive.
+- **Per-subject duplication of cross-cutting assertions.** If "the caller carries the privilege the subject's purpose presumes" applies to every external call in a function, each call site gets its own ConditionTopic. Text is cheap; auditor focus is expensive.
 - **No on-the-fly path yet.** Pipeline only. Generator is structured so an on-the-fly caller can reuse it later, but that path is not built or tested in this work.
 
 ## What you will build
@@ -31,6 +33,8 @@ The work splits into two precursor commits and one additive commit:
 3. Add `subject_conditions` reverse index to `AuditData`, populated by `rebuild_feature_context`. Inline-conditions injection in the unified renderer (Phase 0 prepared the hook; Phase 3 supplies the data the hook reads).
 4. Add the task layer (`extract_conditions_from_batch`) with prompt and JSON schema.
 5. Wire it as pipeline step 6 (`build_conditions`) and renumber steps in `run_full_pipeline`.
+
+**Phase 6 — Polarity reframe.** Added after Phases 2-5 committed. Corrects conditions from adversarial observations ("could fail, be violated, be subverted") to positive assertions ("must hold for purpose+placement to be fulfilled"). The eight `ConditionKind` variant names are renamed 1:1 to their positive forms; the LLM prompt is rewritten; doc-comments across the conditions code paths and this build plan's Phase 2/4 embedded examples are updated; the SPEC's "Managing Conditions" section is rewritten and a new "Conditions vs. Invariants" subsection is added. No structural changes — same storage, same renderer hook, same pipeline orchestration. Test fixtures and parser tests rename mechanically.
 
 Each phase is independently verifiable. Do not move on until the previous one compiles, its tests pass, and `cargo test --workspace` is green.
 
@@ -247,28 +251,33 @@ Add the `ConditionTopic` `TopicMetadata` variant and the `ConditionKind` enum. T
 Add a `ConditionKind` enum, modeled on the existing small enums in the file. Place it near `NonPureSubjectType` (around line 1170) so related taxonomies cluster:
 
 ```rust
-/// The reasoning angle a Condition observation is taking. Loose taxonomy —
-/// the LLM picks; the auditor groups by kind in the review UI; mitigation
-/// strategies tend to differ across kinds (which is why the kinds split
-/// the way they do). Use `Other` for genuinely novel observations rather
-/// than forcing a fit.
+/// The category of assertion this condition expresses — what must hold
+/// for the subject's functional purpose and placement rationale to be
+/// fulfilled. Loose taxonomy; the LLM picks; the auditor groups by
+/// category in the review UI. Use `Other` for genuinely novel assertions
+/// rather than forcing a fit. Threats (step 7) are adversarial inversions
+/// of these assertions; the kinds here name what holds, not what fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConditionKind {
-  /// Can the interaction be triggered, and by whom?
-  Reachability,
-  /// Is the trigger restricted to authorized parties?
-  Authorization,
-  /// If the operation produces a wrong outcome, can the system recover?
-  Recoverability,
-  /// Can a caller control the inputs or state being read here?
-  Manipulability,
-  /// Can the value being read be out of date?
-  Staleness,
-  /// Can interleaving operations observe inconsistent state?
-  Atomicity,
-  /// Can shared resources be drained, locked, or starved?
-  ResourceExhaustion,
-  /// Genuinely novel observation; description carries the structure.
+  /// Triggering of this interaction is constrained to expected runtime
+  /// contexts.
+  RestrictedReachability,
+  /// The caller carries the privilege the subject's purpose presumes.
+  AuthorizedAccess,
+  /// On failure, the system is in a recoverable state.
+  ErrorRecoverability,
+  /// Inputs and read state are not attacker-controlled in a way that
+  /// defeats the purpose.
+  InputIntegrity,
+  /// The value being read reflects the latest committed state relevant
+  /// to the purpose.
+  ValueFreshness,
+  /// No interleaving operation observes inconsistent state across this
+  /// point.
+  AtomicConsistency,
+  /// Shared resources remain available under expected use.
+  ResourceAvailability,
+  /// Genuinely novel assertion; description carries the structure.
   Other,
 }
 ```
@@ -276,21 +285,27 @@ pub enum ConditionKind {
 Add the `ConditionTopic` variant to `TopicMetadata`. Place it next to `ThreatTopic` and `InvariantTopic` (around line 1944). Mirror `FunctionalPurposeTopic` for the field shape:
 
 ```rust
-/// A condition — a purpose-driven observation about a non-pure subject's
-/// interaction surface. Generated in pipeline step 6 from the subject's
-/// functional purpose and placement rationale. Each observation is its
-/// own ConditionTopic; subjects typically have multiple. Step 7 (threats)
-/// reasons from these as structured inputs.
+/// A condition — an assertion that must hold for the non-pure subject's
+/// functional purpose and placement rationale to be fulfilled.
+/// Generated in pipeline step 6 from the subject's functional purpose
+/// and placement rationale. Each assertion is its own ConditionTopic;
+/// subjects typically have multiple. Step 7 (threats) generates
+/// adversarial scenarios that falsify these assertions; an auditor
+/// disagreeing with a threat does not invalidate the underlying
+/// assertion. See SPEC's "Conditions vs. Invariants" for the role
+/// distinction with InvariantTopic.
 ConditionTopic {
   topic: topic::Topic,
-  /// The observation, in prose. One thing the auditor can agree or
-  /// disagree with independently.
+  /// The assertion, in prose, phrased affirmatively ("X holds," "the
+  /// caller is …", "the value reflects …"). One thing the auditor can
+  /// agree or disagree with independently.
   description: String,
-  /// The non-pure subject this observation is about.
+  /// The non-pure subject whose purpose+placement this assertion
+  /// supports.
   subject_topic: topic::Topic,
-  /// Reasoning angle this observation took.
+  /// Category of assertion this condition expresses.
   kind: ConditionKind,
-  /// Topic IDs the LLM cited as justifying the observation. May include
+  /// Topic IDs the LLM cited as justifying the assertion. May include
   /// subject siblings, called functions, declarations the function uses,
   /// or documentation topics. Validated for well-formedness only in this
   /// work; cross-pipeline rendered-context validation is a later
@@ -396,11 +411,12 @@ Add a section header (mirror the `// Functional Purpose & Placement Rationale (P
 Add the prompt constant. Use `EXTRACT_FUNCTIONAL_PROPERTIES_PROMPT` at line 1337 as your structural model. The prompt should:
 
 - Describe the input format (batch with non_pure_subjects list, members with feature/behaviors/semantics/called_function_behaviors, AST nodes with `purity` markers and `functional_purpose` / `placement_rationale` fields on non-pure subjects).
-- Explain the task: for **each** topic in `non_pure_subjects`, produce one or more conditions. Each condition is one observation about why the subject's purpose could fail or be violated, given its placement.
+- Explain the task: for **each** topic in `non_pure_subjects`, produce one or more conditions. Each condition is one **assertion that must hold** for the subject's `functional_purpose` and `placement_rationale` to be fulfilled — what the purpose presumes about the environment, inputs, callees, or surrounding state. Phrase every condition affirmatively ("X holds," "the caller is …", "the value reflects …").
+- **Prohibit failure-mode language.** The prompt must explicitly forbid "could fail," "may be stale," "an attacker can …", and similar phrasing. Those belong to step 7 (threats), which generates adversarial inversions. Include the distinguishing test: "if a condition reads 'the code must enforce X,' rewrite as 'the purpose presumes X'; if it names a specific failure scenario, rewrite as the assumption that scenario would violate."
 - Describe the output schema (subjects array; each entry has subject_topic and a conditions array; each condition has description, kind, evidence_topics).
-- Enumerate the eight `ConditionKind` values with one-line descriptions, identical to the doc-comments on the enum variants. Tell the LLM to pick the kind that best names the *reasoning angle* it took, and to use `Other` rather than force-fitting.
+- Enumerate the eight `ConditionKind` values with one-line descriptions, identical to the doc-comments on the (post-Phase-6) enum variants. Tell the LLM to pick the kind that best names the **category of assertion** being expressed, and to use `Other` rather than force-fitting.
 - Tell it to ground evidence_topics in topic IDs visible in the rendered batch (state vars, parameters, callees, sibling subjects, semantic blocks). Cross-pipeline validation is deferred, so the prompt is the only enforcement layer for this work.
-- Direct it to produce **at least one** condition per subject. A zero-condition subject should be impossible — if no observations about a subject's interaction surface seem worth recording, that itself is signal the subject's purpose is degenerate, and the post-processor will warn but not error.
+- Direct it to produce **at least one** condition per subject. If no purpose-relevant assertion seems load-bearing, emit a single condition with kind `Other` naming the degenerate state ("this subject's purpose makes no presumption about its environment beyond mechanical correctness"); a zero-condition subject is signal that the LLM gave up and the post-processor warns and drops the subject.
 
 Define the deserialization types (model on `LLMSubjectFunctionalProperties` / `LLMFunctionalPropertiesResponse` at line 1374):
 
@@ -424,7 +440,7 @@ struct LLMConditionsResponse {
 }
 ```
 
-Define the JSON schema (mirror `FUNCTIONAL_PROPERTIES_SCHEMA` at line 1385). The `kind` property should constrain to the eight enum string forms via `"enum": ["Reachability", "Authorization", ...]`.
+Define the JSON schema (mirror `FUNCTIONAL_PROPERTIES_SCHEMA` at line 1385). The `kind` property should constrain to the eight enum string forms via `"enum": ["RestrictedReachability", "AuthorizedAccess", "ErrorRecoverability", "InputIntegrity", "ValueFreshness", "AtomicConsistency", "ResourceAvailability", "Other"]`.
 
 Define the parsed output types:
 
@@ -531,7 +547,138 @@ The only thing not exercised by unit tests is the orchestration in `build_condit
 
 ### Pivotal decision
 
-Conditions are allocated one A-topic per observation, not one per subject. A subject with five conditions consumes five A-IDs. This matches the design that each observation is independently addressable (its own topic, its own conversation, its own approval state).
+Conditions are allocated one A-topic per assertion, not one per subject. A subject with five conditions consumes five A-IDs. This matches the design that each assertion is independently addressable (its own topic, its own conversation, its own approval state).
+
+## Phase 6 — Polarity reframe (conditions as positive assertions)
+
+### Goal
+
+Phases 2-5 landed conditions as **adversarial observations** of failure modes. The prompt asked the LLM to describe "the conditions under which the subject's functional purpose could fail, be violated, or be subverted given its placement," and the eight `ConditionKind` variants (Reachability, Authorization, Recoverability, Manipulability, Staleness, Atomicity, ResourceExhaustion, Other) named *failure-mode angles*. Design review after the commit surfaced that this polarity collapses the condition role into the threat role: both layers describe failure modes, the SPEC's "auditor agrees with the observation but disagrees with the threat" disagreement axis becomes meaningless when the observation is itself a failure description, and step 7 (threats) becomes either redundant with step 6 or arbitrarily more specific.
+
+Phase 6 corrects the polarity. Conditions become **positive assertions** about what must hold for the subject's functional purpose and placement rationale to be fulfilled. Threats remain the adversarial inversions — generated against bounded inputs (the assertions). The structural pipeline is unchanged; what changes is framing, taxonomy names, prompt text, and documentation.
+
+### Files to change
+
+**`crates/o11a-core/src/domain/mod.rs` — `ConditionKind` enum**
+
+Rename variants 1:1 to their positive forms and rewrite each variant doc comment as an assertion about what must hold:
+
+| Old (negative angle)  | New (assertion)         | New variant doc comment                                                                |
+| --------------------- | ----------------------- | -------------------------------------------------------------------------------------- |
+| `Reachability`        | `RestrictedReachability`| Triggering of this interaction is constrained to expected runtime contexts.            |
+| `Authorization`       | `AuthorizedAccess`      | The caller carries the privilege the subject's purpose presumes.                       |
+| `Recoverability`      | `ErrorRecoverability`   | On failure, the system is in a recoverable state.                                      |
+| `Manipulability`      | `InputIntegrity`        | Inputs and read state are not attacker-controlled in a way that defeats the purpose.   |
+| `Staleness`           | `ValueFreshness`        | The value being read reflects the latest committed state relevant to the purpose.      |
+| `Atomicity`           | `AtomicConsistency`     | No interleaving operation observes inconsistent state across this point.               |
+| `ResourceExhaustion`  | `ResourceAvailability`  | Shared resources remain available under expected use.                                  |
+| `Other`               | `Other`                 | Genuinely novel assertion; description carries the structure.                          |
+
+Rewrite the enum-level doc comment: drop "the reasoning angle a Condition observation is taking" and "mitigation strategies tend to differ across kinds" (both are threat-flavored). Replace with: "the category of assertion this condition expresses — what must hold for the subject's purpose to be fulfilled. Loose taxonomy; the LLM picks; the auditor groups by category in the review UI. Use `Other` for genuinely novel assertions rather than forcing a fit."
+
+Rewrite the `ConditionTopic` variant doc comment: replace "purpose-driven observation about a non-pure subject's interaction surface" with "an assertion that must hold for the non-pure subject's functional purpose and placement rationale to be fulfilled. Step 7 (threats) generates adversarial scenarios that falsify these assertions; an auditor disagreeing with a threat does not invalidate the underlying assertion." Field shape unchanged.
+
+`RestrictedReachability` and `AuthorizedAccess` overlap conceptually — both speak to "the right party triggers this." The 1:1 rename preserves the existing storage shape; consolidation is a follow-up after observing how the LLM uses the two in real output.
+
+**`crates/o11a-core/src/collaborator/agent/task.rs`**
+
+Rewrite `EXTRACT_CONDITIONS_PROMPT` end-to-end. Anchors:
+
+- Task description: "for **each** topic in `non_pure_subjects`, produce one or more **conditions** — assertions that must hold for the subject's `functional_purpose` and `placement_rationale` to be fulfilled. Each condition states what the subject's purpose presumes about its environment, inputs, callees, or surrounding state. Phrase every condition affirmatively: 'X holds,' 'the caller is …', 'the value reflects …'."
+- Explicit prohibition: "Do not describe failure modes, attack scenarios, or what could go wrong. Those belong to step 7 (threats), which generates adversarial inversions of these assertions. If you find yourself writing 'could fail,' 'may be stale,' or 'an attacker can …', stop and re-state as the assumption being violated by that scenario."
+- Each `kind` doc-line is the positive form (mirror the enum-rewrite table above, one line each).
+- Distinguishing test (include verbatim): "If a condition reads 'the code must enforce X,' it has been miswritten as a small invariant — rewrite as 'the purpose presumes X.' If a condition names a specific failure scenario, it has been miswritten as a threat — rewrite as the assumption that scenario would violate."
+- Empty-conditions guidance: "Every subject must have at least one condition. If no purpose-relevant assertion seems load-bearing for this subject, emit one condition with kind `Other` and a description naming the degenerate state ('this subject's purpose makes no presumption about its environment beyond mechanical correctness'). The post-processor warns and drops zero-condition subjects; do not exploit that."
+- `evidence_topics` paragraph stays — assertions still anchor to topics they're about (state vars, parameters, callees, sibling subjects, semantic blocks).
+
+Update `CONDITIONS_SCHEMA`'s `kind.enum` array to the eight new string names (`RestrictedReachability`, `AuthorizedAccess`, `ErrorRecoverability`, `InputIntegrity`, `ValueFreshness`, `AtomicConsistency`, `ResourceAvailability`, `Other`).
+
+Update the section-header comment block (`// Conditions (Pipeline Step 6) //`) to drop "purpose-driven observations" language; replace with the assertion framing.
+
+Update the parser tests in `conditions_parser_tests` — the eight kind names appear in JSON literals (roughly twelve places across the test bodies). Mechanical rename, no logic change. Verify `parser_accepts_each_condition_kind` still tests all eight under the new names.
+
+**`crates/o11a-core/src/collaborator/agent/pipeline.rs`**
+
+Rewrite the `build_conditions` doc comment: replace "purpose-driven observations about the subject's interaction surface that the threats step (step 7) will reason from" with "assertions about the subject's interaction surface that must hold for its functional purpose and placement rationale to be fulfilled. Step 7 (threats) generates adversarial scenarios that falsify these assertions."
+
+Rewrite the `[6/6] Condition Generation` line in `run_full_pipeline`'s docstring with the same framing — drop "conditions under which that purpose could fail or be subverted."
+
+**`crates/o11a-core/src/collaborator/agent/context.rs`**
+
+Rewrite the comment block above the inline-conditions hook (currently mentions step 6's adversarial framing in passing). The renderer logic itself is framing-agnostic — only the comment changes.
+
+**`crates/o11a-analyze/docs/build-plans/conditions-step-6.md` (this doc)**
+
+Update embedded examples to the post-Phase-6 state so the doc reads consistently:
+
+- Phase 2's `ConditionKind` enum block (currently shows the eight old variants with negative-angle doc-lines) — replace with the eight new variants and positive doc-lines from the rename table above.
+- Phase 2's `ConditionTopic` variant doc comment — replace "purpose-driven observation" wording.
+- Phase 4's bulleted prompt-content list (the bullet that says "produce one or more conditions. Each condition is one observation about why the subject's purpose could fail or be violated, given its placement") — rewrite to the assertion framing.
+- Phase 4's bullet enumerating the eight kinds with one-line descriptions — replace with the new names.
+- Phase 4's schema-`enum` line — replace the eight enum strings.
+
+The prose narrative of Phases 0-5 stays as historical record. The "What you will build" section, the intro, and the Summary of decisions have already been updated to forward-looking framing.
+
+**`crates/o11a-core/SPEC.md` — "Managing Conditions" section** (currently around L365-419)
+
+Substantial rewrite. The current section describes the retired Q/A template model ("concrete, enumerable aspects … evaluated with standardized questions"). Replace with the assertion model:
+
+1. **Opening paragraph.** Conditions are LLM-generated positive assertions tied to a non-pure subject's purpose+placement. Each catalogues an assumption the subject's purpose makes about its environment that must hold for the purpose to be fulfilled. Replace the pure/non-pure framing paragraphs at the top of the current section if they refer to "interaction surface evaluation" — the pure/non-pure distinction itself stays.
+
+2. **Reasoning chain.** Replace "structured observations about each condition → threats derived from those observations → invariants derived from those threats" with: "purpose+placement → conditions (what must hold for the purpose to be fulfilled) → threats (scenarios that falsify specific conditions) → invariants (code-enforced defenses against those threat scenarios, propagated by re-check across scope)."
+
+3. **Standardized-questions blocks** (revert conditions, state mutations, state reads, external calls, delegatecalls, assembly blocks). The Q/A templates were the surface of the retired model. Convert each block into "Example assertions per non-pure subject type" so the SPEC retains concrete examples per subject type without the template framing. Each subject-type bullet becomes a list of two or three example positive assertions illustrating the kinds of conditions that subject type typically produces. Drop the question-and-answer prose entirely.
+
+4. **Auditor verification prompt.** Borrow the "preset questions" pattern from "Managing Functional Purpose" (around the current L315): when an auditor approves a condition, the verification prompt is "is this assertion load-bearing for the subject's purpose? would the purpose still hold if this assertion failed? does the assertion anchor to topics visible in the subject's surrounding code?" The first two questions test whether the condition is doing the work it claims; the third tests evidence grounding. State this prompt explicitly in the SPEC.
+
+**`crates/o11a-core/SPEC.md` — new subsection "Conditions vs. Invariants"** (place inside or immediately following "Managing Conditions"; it is referenced from the Summary of decisions in this build plan)
+
+Articulate the role distinction so it is not relitigated. Target content:
+
+> The chain: **purpose → conditions → threats → invariants**. Conditions are not a redundant layer above invariants; the two serve different reasoning loops, and the textual content can overlap (a condition "the caller carries the privilege the subject's purpose presumes" and an invariant "every privileged-state-modifying function checks ownership" can read nearly identically). The role split is what differs.
+>
+> **Conditions' unique upstream value:**
+>
+> 1. **Layer.** Conditions live at the purpose layer; invariants live at the threat layer. Conditions answer "what does this subject's purpose presume about its environment?"; invariants answer "what must the codebase enforce to block this specific threat scenario?"
+> 2. **Coverage.** Conditions are uniform — every non-pure subject has them by construction. Invariants are sparse — they exist only where threat work has surfaced one. Conditions provide a complete map of purpose-level assumptions; invariants provide depth on threat-analyzed subjects. Skipping conditions means subjects whose purposes are misinterpreted but never threat-analyzed have no checkpoint.
+> 3. **Threat bounding.** Conditions provide bounded inputs to threat generation. With conditions, step 7 prompts "find scenarios that falsify each assertion" (anchored, tractable). Without conditions, threat generation is open-ended adversarial reasoning ("find what could go wrong") — much weaker.
+> 4. **Correction surface.** When the auditor disagrees with a condition, that signal propagates back to questioning the purpose itself, before threat work begins. Without conditions, the only correction handle on a misinterpreted purpose is downstream threat disagreement — more expensive to surface, harder to attribute to root cause.
+> 5. **Indexing.** Conditions are subject-local — every subject has its own list. Invariants are scope-organized — one invariant can apply to many subjects, with re-check as the propagation mechanism.
+>
+> **Surface similarity vs. structural difference.** A condition and an invariant can name the same code-level statement; that is the chain working, not redundancy. The condition is organized around one subject's purpose-presumptions; the invariant is organized around one threat's enforced defense, propagated across all subjects in scope.
+>
+> **Distinguishing test for prompts and review.** A condition prompt asks "what does this subject's purpose presume?" — never "what should the code enforce?" An invariant prompt (later) asks "given this threat, what defensive property prevents it, and where must that property hold?" If a condition is written as "the code must X," it has been miswritten as a small invariant — rewrite as "the purpose presumes X." If an invariant is written as "the purpose presumes X," it has been miswritten as a condition — restate as "the codebase must enforce X to defend against [threat]."
+
+**`crates/o11a-core/SPEC.md` — other touchpoints**
+
+- Hierarchy diagram (currently L162-167). The `Condition: Revert "PAIR_EXISTS" on createPair` block with three sub-questions and the `Condition: Reentrancy via token callback` block with two sub-questions — both reflect the retired Q/A model. Replace with assertion-form examples carrying their `kind`. For instance: `Condition: createPair invocations are not pre-emptable for the same token address` (kind `RestrictedReachability`); `Condition: token-callback re-entry cannot observe partial state` (kind `AtomicConsistency`). Drop the sub-question lines.
+- "On-the-Fly Generation" entry for "New condition" (currently L103). Replace "Evaluated on a non-pure subject with standardized questions. Condition evaluations trigger re-evaluation of the subject's threats" with: "Recorded as an assertion on a non-pure subject. Adding or correcting a condition triggers re-evaluation of the subject's threats, since each threat is anchored to a specific condition it falsifies."
+- "Subject Evaluation Context Strategy" (currently L470). "its condition evaluations (structured analysis of the subject's interaction surface)" → "its conditions (assertions about its interaction surface that its purpose presumes)."
+- General audit flow (currently L459, in step 4). "for non-pure subjects, conditions are evaluated with standardized questions, then threats are generated from the condition evaluations" → "for non-pure subjects, conditions are recorded as assertions, then threats are generated as adversarial inversions of those assertions."
+- Step 7 / threat description (currently L420-424). The opening paragraph references "condition evaluations" as inputs. Rephrase to "their conditions" (assertions). The "from which the LLM derives specific threats rather than reasoning from scratch" argument carries over — the bounded-input value-prop holds; only the framing of the input changes.
+
+**`crates/o11a-analyze/docs/build-plans/pipeline-dag.md`** and **`crates/o11a-analyze/docs/build-plans/planned.md`**
+
+Quick scan for negatively-framed condition references; touch as needed. Neither doc substantively covers conditions, so this should be light. If a stray "condition evaluations" or "could fail" turns up in a forward reference, update.
+
+### How to verify Phase 6
+
+- `cargo build --workspace` clean, no new warnings.
+- `cargo test --workspace` all pass. The conditions parser tests will need their JSON fixtures updated to the new kind names; that is the bulk of the test-side diff.
+- `grep -rn --include='*.rs' "ConditionKind::Reachability\|ConditionKind::Authorization\|ConditionKind::Recoverability\|ConditionKind::Manipulability\|ConditionKind::Staleness\|ConditionKind::Atomicity\|ConditionKind::ResourceExhaustion" crates/` returns zero matches (no old variant names remain in `.rs` source). Restricting to `.rs` is deliberate: the verification commands in this build plan reference the old names by design and would otherwise self-match.
+- `grep -rn --include='*.rs' "purpose-driven observation\|could fail, be violated\|could be subverted" crates/` returns zero matches in conditions code paths.
+- `grep -n "standardized questions\|condition evaluations" crates/o11a-core/SPEC.md` returns zero matches (Q/A framing fully removed from the SPEC).
+- `grep -n "Conditions vs. Invariants" crates/o11a-core/SPEC.md` returns at least one match (role-distinction subsection exists).
+- Smoke run: re-run step 6 on the reference audit fixture and manually inspect ten or so produced ConditionTopic descriptions. Every one reads as a positive assertion ("X holds," "the caller is …", "the value reflects …"), not a failure description ("could fail," "may be …", "an attacker can …"). Failures here mean the prompt rewrite is not strong enough; iterate on the prompt before declaring Phase 6 done.
+
+### Pivotal decisions
+
+- **Conditions are positive assertions; threats are adversarial inversions.** This is restated explicitly because the original framing in this build plan ran the other direction. The role split is not negotiable in this model: collapsing it re-introduces the adversarial-condition overlap with threats and loses the SPEC's "agree with assertion, disagree with threat" disagreement axis.
+- **Conditions and invariants serve different roles.** Conditions catalog purpose-level presumptions (subject-local, complete coverage); invariants catalog threat-level defenses (scope-organized, sparse, propagated by re-check). The SPEC's new "Conditions vs. Invariants" subsection is the canonical articulation; downstream steps (especially step 7's prompt) cite it.
+- **Eight variants preserved, polarity inverted.** A 1:1 rename minimizes diff scope and keeps the existing storage and JSON-schema shape unchanged. `RestrictedReachability` and `AuthorizedAccess` overlap; merging them is a follow-up after the LLM's drift is observable in real output.
+- **Failure-mode language is banned in the prompt, not merely discouraged.** The prompt includes an explicit prohibition and a distinguishing test ("if you find yourself writing 'could fail,' stop and re-state as the assumption being violated"). Soft guidance was tried in the original prompt and the LLM drifted to threat-flavored output; an explicit rule is necessary.
+- **Empty-conditions case handled by `Other`, not by allowing zero.** ≥1 condition per subject remains the rule; subjects with no purpose-relevant assertion emit a single `Other` condition naming the degenerate state. Allowing zero would make the post-processor logic ambiguous (is no entry "the LLM gave up" or "no assumption applies?") and lose signal.
+- **Phase 6 includes the SPEC rewrite, not just the code changes.** The SPEC is the authoritative document for the role distinction; deferring the rewrite would leave the new code working from a stale conceptual model that future contributors would re-anchor against.
 
 ## Cost notes
 
@@ -546,6 +693,8 @@ After Phase 0, both step 5 and step 6 are per-function (step 3 stays per-batch).
 
 Quality argument for the per-function shift: full attention budget per function for the per-subject reasoning steps, sharper failure isolation, and consistent granularity across steps 5 and 6.
 
+**Phase 6 cost shape.** Phase 6 introduces no new LLM calls and does not change the response shape. The rewritten prompt is **modestly longer** (~30–40%) than the pre-Phase-6 version because of the new prohibition paragraph, the distinguishing-test guidance, and the per-subject empty-conditions instruction. The kind list itself is roughly the same length (the positive-form doc-lines are similar to the negative-form ones). Net effect on per-audit token cost: input grows ~30–40% on the step-6 calls only (~60 calls of ~5K tokens each → roughly +10–15% of step-6 input tokens, fractional at the audit level since steps 1-5 dominate). Output shape and size are unchanged. The smoke run re-issues step 6 against any reference audit fixtures so the polarity of the produced descriptions can be verified — that is one additional pipeline run, not an ongoing cost change.
+
 ## Out of scope
 
 These are tracked decisions; do not build them in this work:
@@ -558,7 +707,7 @@ These are tracked decisions; do not build them in this work:
 
 ## Final verification
 
-After all six phases land (Phase 0 + Phase 1 as precursors; Phases 2-5 as the additive step-6 commit):
+After all phases land (Phase 0 + Phase 1 as precursors; Phases 2-5 as the additive step-6 commit; Phase 6 as the polarity reframe):
 
 - `cargo build --workspace` clean, no new warnings.
 - `cargo test --workspace` all green.
@@ -567,4 +716,8 @@ After all six phases land (Phase 0 + Phase 1 as precursors; Phases 2-5 as the ad
 - `grep -rn "render_batch_for_behavior_extraction\|render_batch_for_functional_properties" crates/` returns zero matches (both old renderers replaced by `render_batch_for_extraction`).
 - `grep -rn "TopicMetadata::ConditionTopic" crates/` returns matches in the domain layer, the rebuild_feature_context, the pipeline step, and (optionally) the renderer if it inspects the variant by name — but **not** in any HTTP handler (the API layer is the next layer up; it is not part of this work).
 - `ARTIFACT_SCHEMA_VERSION` in `analysis_artifact.rs` is `2`.
-- A trial run of the full pipeline on a known audit produces ConditionTopic entries on every non-pure subject in feature-linked functions, with at least one condition per subject and every kind represented at least once across the run. Step 3 and step 5 outputs against the same fixture should be equivalent or improved — not regressed.
+- `grep -rn --include='*.rs' "ConditionKind::Reachability\|ConditionKind::Authorization\|ConditionKind::Recoverability\|ConditionKind::Manipulability\|ConditionKind::Staleness\|ConditionKind::Atomicity\|ConditionKind::ResourceExhaustion" crates/` returns zero matches (Phase 6 rename complete in `.rs` source).
+- `grep -rn --include='*.rs' "purpose-driven observation\|could fail, be violated\|could be subverted" crates/` returns zero matches.
+- `grep -n "standardized questions\|condition evaluations" crates/o11a-core/SPEC.md` returns zero matches.
+- `grep -n "Conditions vs. Invariants" crates/o11a-core/SPEC.md` returns at least one match.
+- A trial run of the full pipeline on a known audit produces ConditionTopic entries on every non-pure subject in feature-linked functions, with at least one condition per subject and every (post-Phase-6) kind represented at least once across the run. Sampled descriptions read as positive assertions, not failure descriptions. Step 3 and step 5 outputs against the same fixture are equivalent or improved — not regressed.

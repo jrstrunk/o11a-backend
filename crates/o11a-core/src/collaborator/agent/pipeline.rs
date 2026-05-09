@@ -75,9 +75,10 @@ impl PipelineState {
 ///    every in-scope function with a feature link, generate purpose and
 ///    placement rationale (per-function).
 /// 6. **Condition Generation** — for every non-pure subject with a purpose
-///    and placement, generate the conditions under which that purpose
-///    could fail or be subverted (per-function). Each condition is its
-///    own A-prefixed topic; step 7 (threats) reasons from these.
+///    and placement, generate the assertions that must hold for that
+///    purpose and placement to be fulfilled (per-function). Each condition
+///    is its own A-prefixed topic; step 7 (threats) generates adversarial
+///    inversions of these assertions.
 ///
 /// Semantic linking runs first so functional semantics are available when
 /// rendering documentation for requirement extraction — inline code
@@ -1531,14 +1532,17 @@ pub async fn build_functional_properties(
 }
 
 /// For every non-pure subject in every in-scope, feature-linked function or
-/// modifier, generate a list of **conditions** — purpose-driven observations
-/// about the subject's interaction surface that the threats step (step 7)
-/// will reason from. One LLM call per function (mirrors step 5's
+/// modifier, generate a list of **conditions** — assertions that must hold
+/// for the subject's functional purpose and placement rationale to be
+/// fulfilled. Step 7 (threats) generates adversarial scenarios that
+/// falsify these assertions. One LLM call per function (mirrors step 5's
 /// per-function granularity); one A-prefixed `ConditionTopic` per
-/// observation (subjects typically produce 1–8). Requires step 5 output:
+/// assertion (subjects typically produce 1–8). Requires step 5 output:
 /// the renderer inlines `functional_purpose` and `placement_rationale` on
 /// each non-pure subject so the LLM grounds conditions in purpose +
-/// placement. If step 5 produced nothing, this step skips cleanly.
+/// placement. If step 5 produced nothing, this step skips cleanly. See
+/// SPEC's "Conditions vs. Invariants" for the role distinction with
+/// invariants (which are scope-organized defenses derived from threats).
 #[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
 pub async fn build_conditions(
   state: &PipelineState,

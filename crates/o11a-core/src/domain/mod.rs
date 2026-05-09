@@ -1143,36 +1143,50 @@ pub enum SubjectPurity {
   Pure,
   /// Non-pure: state writes, state reads of mutables, external calls,
   /// delegatecalls, assembly blocks, selfdestruct/create/create2.
-  /// Requires condition evaluation and threat generation.
+  /// Receives conditions in step 6 and threats in step 7.
   NonPure,
 }
 
-/// The reasoning angle a Condition observation is taking. Loose taxonomy —
-/// the LLM picks; the auditor groups by kind in the review UI; mitigation
-/// strategies tend to differ across kinds (which is why the kinds split
-/// the way they do). Use `Other` for genuinely novel observations rather
-/// than forcing a fit.
+/// The category of assertion this condition expresses — what must hold
+/// for the subject's functional purpose and placement rationale to be
+/// fulfilled. Loose taxonomy; the LLM picks; the auditor groups by
+/// category in the review UI. Use `Other` for genuinely novel assertions
+/// rather than forcing a fit. Threats (step 7) are adversarial inversions
+/// of these assertions; the kinds here name what holds, not what fails.
+///
+/// **Variant order is wire-format-relevant.** `AuditDataSnapshot` is
+/// serialized via bincode, which encodes enum variants by their declaration
+/// index (not by name). Renaming a variant in place is safe; reordering,
+/// removing, or inserting variants is a wire-format break that requires
+/// bumping `analysis_artifact::ARTIFACT_SCHEMA_VERSION`. The HTTP API
+/// emits the variant name (`format!("{:?}", kind)` in handlers.rs), so
+/// any rename is also a surface-level API change for downstream clients.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConditionKind {
-  /// Can the interaction be triggered, and by whom?
-  Reachability,
-  /// Is the trigger restricted to authorized parties?
-  Authorization,
-  /// If the operation produces a wrong outcome, can the system recover?
-  Recoverability,
-  /// Can a caller control the inputs or state being read here?
-  Manipulability,
-  /// Can the value being read be out of date?
-  Staleness,
-  /// Can interleaving operations observe inconsistent state?
-  Atomicity,
-  /// Can shared resources be drained, locked, or starved?
-  ResourceExhaustion,
-  /// Genuinely novel observation; description carries the structure.
+  /// Triggering of this interaction is constrained to expected runtime
+  /// contexts.
+  RestrictedReachability,
+  /// The caller carries the privilege the subject's purpose presumes.
+  AuthorizedAccess,
+  /// On failure, the system is in a recoverable state.
+  ErrorRecoverability,
+  /// Inputs and read state are not attacker-controlled in a way that
+  /// defeats the purpose.
+  InputIntegrity,
+  /// The value being read reflects the latest committed state relevant
+  /// to the purpose.
+  ValueFreshness,
+  /// No interleaving operation observes inconsistent state across this
+  /// point.
+  AtomicConsistency,
+  /// Shared resources remain available under expected use.
+  ResourceAvailability,
+  /// Genuinely novel assertion; description carries the structure.
   Other,
 }
 
-/// Non-pure subject type, determining which standardized condition questions apply.
+/// Non-pure subject type. Filter facet on the auditor UI; classifies
+/// each subject by interaction-surface category for grouping and review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NonPureSubjectType {
   StateWrite,
@@ -1956,21 +1970,27 @@ pub enum TopicMetadata {
     /// Severity is assigned during impact analysis; None means pending
     severity: Option<ThreatSeverity>,
   },
-  /// A condition — a purpose-driven observation about a non-pure subject's
-  /// interaction surface. Generated in pipeline step 6 from the subject's
-  /// functional purpose and placement rationale. Each observation is its
-  /// own ConditionTopic; subjects typically have multiple. Step 7 (threats)
-  /// reasons from these as structured inputs.
+  /// A condition — an assertion that must hold for the non-pure subject's
+  /// functional purpose and placement rationale to be fulfilled.
+  /// Generated in pipeline step 6 from the subject's functional purpose
+  /// and placement rationale. Each assertion is its own ConditionTopic;
+  /// subjects typically have multiple. Step 7 (threats) generates
+  /// adversarial scenarios that falsify these assertions; an auditor
+  /// disagreeing with a threat does not invalidate the underlying
+  /// assertion. See SPEC's "Conditions vs. Invariants" for the role
+  /// distinction with InvariantTopic.
   ConditionTopic {
     topic: topic::Topic,
-    /// The observation, in prose. One thing the auditor can agree or
-    /// disagree with independently.
+    /// The assertion, in prose, phrased affirmatively ("X holds," "the
+    /// caller is …", "the value reflects …"). One thing the auditor can
+    /// agree or disagree with independently.
     description: String,
-    /// The non-pure subject this observation is about.
+    /// The non-pure subject whose purpose+placement this assertion
+    /// supports.
     subject_topic: topic::Topic,
-    /// Reasoning angle this observation took.
+    /// Category of assertion this condition expresses.
     kind: ConditionKind,
-    /// Topic IDs the LLM cited as justifying the observation. May include
+    /// Topic IDs the LLM cited as justifying the assertion. May include
     /// subject siblings, called functions, declarations the function uses,
     /// or documentation topics. Validated for well-formedness only in this
     /// work; cross-pipeline rendered-context validation is a later
@@ -3437,9 +3457,10 @@ mod tests {
 
     let metadata = TopicMetadata::ConditionTopic {
       topic: cond_topic,
-      description: "Caller can front-run the state read.".to_string(),
+      description: "The caller carries the privilege the subject's purpose presumes."
+        .to_string(),
       subject_topic,
-      kind: ConditionKind::Manipulability,
+      kind: ConditionKind::InputIntegrity,
       evidence_topics: evidence.clone(),
       author: Author::AgentLarge,
       created_at: None,
@@ -3451,7 +3472,7 @@ mod tests {
     assert_eq!(back.topic(), &cond_topic);
     assert_eq!(
       back.description(),
-      Some("Caller can front-run the state read.")
+      Some("The caller carries the privilege the subject's purpose presumes.")
     );
     assert_eq!(back.target_topic(), Some(&subject_topic));
     assert_eq!(back.author(), Some(Author::AgentLarge));
@@ -3459,13 +3480,13 @@ mod tests {
 
     // Verify ConditionKind serde round-trip for each variant
     for kind in [
-      ConditionKind::Reachability,
-      ConditionKind::Authorization,
-      ConditionKind::Recoverability,
-      ConditionKind::Manipulability,
-      ConditionKind::Staleness,
-      ConditionKind::Atomicity,
-      ConditionKind::ResourceExhaustion,
+      ConditionKind::RestrictedReachability,
+      ConditionKind::AuthorizedAccess,
+      ConditionKind::ErrorRecoverability,
+      ConditionKind::InputIntegrity,
+      ConditionKind::ValueFreshness,
+      ConditionKind::AtomicConsistency,
+      ConditionKind::ResourceAvailability,
       ConditionKind::Other,
     ] {
       let kind_json = serde_json::to_string(&kind).unwrap();
@@ -3485,7 +3506,7 @@ mod tests {
       ..
     } = retrieved
     {
-      assert_eq!(*kind, ConditionKind::Manipulability);
+      assert_eq!(*kind, ConditionKind::InputIntegrity);
       assert_eq!(*evidence_topics, evidence);
     }
   }
@@ -3507,9 +3528,9 @@ mod tests {
       cond_a1,
       TopicMetadata::ConditionTopic {
         topic: cond_a1,
-        description: "first observation on a".to_string(),
+        description: "first assertion on a".to_string(),
         subject_topic: subject_a,
-        kind: ConditionKind::Reachability,
+        kind: ConditionKind::RestrictedReachability,
         evidence_topics: vec![],
         author: Author::System,
         created_at: None,
@@ -3519,9 +3540,9 @@ mod tests {
       cond_a2,
       TopicMetadata::ConditionTopic {
         topic: cond_a2,
-        description: "second observation on a".to_string(),
+        description: "second assertion on a".to_string(),
         subject_topic: subject_a,
-        kind: ConditionKind::Authorization,
+        kind: ConditionKind::AuthorizedAccess,
         evidence_topics: vec![topic::new_node_topic(&99)],
         author: Author::System,
         created_at: None,
@@ -3531,9 +3552,9 @@ mod tests {
       cond_b1,
       TopicMetadata::ConditionTopic {
         topic: cond_b1,
-        description: "observation on b".to_string(),
+        description: "assertion on b".to_string(),
         subject_topic: subject_b,
-        kind: ConditionKind::Staleness,
+        kind: ConditionKind::ValueFreshness,
         evidence_topics: vec![],
         author: Author::System,
         created_at: None,
@@ -3577,9 +3598,9 @@ mod tests {
       cond_a1,
       TopicMetadata::ConditionTopic {
         topic: cond_a1,
-        description: "observation".to_string(),
+        description: "assertion".to_string(),
         subject_topic: subject_a,
-        kind: ConditionKind::Reachability,
+        kind: ConditionKind::RestrictedReachability,
         evidence_topics: vec![],
         author: Author::System,
         created_at: None,

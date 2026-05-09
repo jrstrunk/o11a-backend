@@ -1622,14 +1622,16 @@ fn validate_functional_property_coverage(
 // Conditions (Pipeline Step 6)
 // ============================================================================
 
-/// Prompt for generating conditions — purpose-driven observations about a
-/// non-pure subject's interaction surface — for every non-pure subject in
-/// a single in-scope function/modifier. The input JSON is the output of
+/// Prompt for generating conditions — assertions that must hold for a
+/// non-pure subject's functional purpose and placement rationale to be
+/// fulfilled — for every non-pure subject in a single in-scope
+/// function/modifier. The input JSON is the output of
 /// `render_batch_for_extraction` called with a single-member slice; the
 /// envelope uses the `subject` shape (not `batch`). The renderer inlines
 /// `functional_purpose` and `placement_rationale` (from step 5) on each
 /// non-pure subject node, so the LLM can reason from purpose+placement
-/// without re-deriving them. See pipeline-dag.md step 6.
+/// without re-deriving them. See pipeline-dag.md step 6 and SPEC's
+/// "Managing Conditions" / "Conditions vs. Invariants" sections.
 const EXTRACT_CONDITIONS_PROMPT: &str = "Below is one in-scope function or \
 modifier from a smart contract project. The function appears under the \
 `subject` field with:\n\
@@ -1654,52 +1656,71 @@ enumeration of the inline annotations.\n\
 deduped enumeration of the inline call-site annotations.\n\n\
 The top-level **`non_pure_subjects`** array lists every non-pure subject \
 in this function. For **each** topic in that list, produce one or more \
-**conditions**. A condition is a single observation about the subject's \
-interaction surface — the conditions under which the subject's functional \
-purpose could fail, be violated, or be subverted given its placement. \
-Each condition is one thing the auditor can independently agree or \
-disagree with; do not bundle multiple observations into one entry.\n\n\
-For each condition, choose a `kind` that names the *reasoning angle* the \
-observation takes. The kinds are:\n\
-- `Reachability` — Can the interaction be triggered, and by whom?\n\
-- `Authorization` — Is the trigger restricted to authorized parties?\n\
-- `Recoverability` — If the operation produces a wrong outcome, can the \
-system recover?\n\
-- `Manipulability` — Can a caller control the inputs or state being read \
-here?\n\
-- `Staleness` — Can the value being read be out of date?\n\
-- `Atomicity` — Can interleaving operations observe inconsistent state?\n\
-- `ResourceExhaustion` — Can shared resources be drained, locked, or \
-starved?\n\
-- `Other` — Genuinely novel observation; description carries the \
-structure. Use `Other` when no kind above fits, rather than force-fitting \
-to a near-match.\n\n\
+**conditions**. A condition is a single **assertion that must hold** for \
+the subject's `functional_purpose` and `placement_rationale` to be \
+fulfilled — what the subject's purpose presumes about its environment, \
+inputs, callees, or surrounding state. Phrase every condition \
+affirmatively: \"X holds,\" \"the caller is …\", \"the value reflects \
+…\", \"no other operation observes …\". Each condition is one thing the \
+auditor can independently agree or disagree with; do not bundle multiple \
+assertions into one entry.\n\n\
+**Do not describe failure modes, attack scenarios, or what could go \
+wrong.** Those belong to the next pipeline step (threats), which \
+generates adversarial inversions of these assertions. If you find \
+yourself writing \"could fail,\" \"may be stale,\" \"an attacker can \
+…\", or any phrase about something going wrong, stop and re-state as \
+the assumption being violated by that scenario. Distinguishing tests:\n\
+- If a condition reads \"the code must enforce X,\" you have written a \
+small invariant — rewrite as \"the purpose presumes X.\"\n\
+- If a condition names a specific failure scenario, you have written a \
+threat — rewrite as the assumption that scenario would violate.\n\n\
+For each condition, choose a `kind` that names the **category of \
+assertion** being expressed. The kinds are:\n\
+- `RestrictedReachability` — Triggering of this interaction is \
+constrained to expected runtime contexts.\n\
+- `AuthorizedAccess` — The caller carries the privilege the subject's \
+purpose presumes.\n\
+- `ErrorRecoverability` — On failure, the system is in a recoverable \
+state.\n\
+- `InputIntegrity` — Inputs and read state are not attacker-controlled \
+in a way that defeats the purpose.\n\
+- `ValueFreshness` — The value being read reflects the latest committed \
+state relevant to the purpose.\n\
+- `AtomicConsistency` — No interleaving operation observes inconsistent \
+state across this point.\n\
+- `ResourceAvailability` — Shared resources remain available under \
+expected use.\n\
+- `Other` — Genuinely novel assertion; description carries the \
+structure. Use `Other` when no kind above fits, rather than \
+force-fitting to a near-match.\n\n\
 For `evidence_topics`, cite topic IDs that are **visible in the rendered \
-input** and that justify the observation: state-variable topics (from \
+input** and that justify the assertion: state-variable topics (from \
 `state_reads`/`state_writes`), parameter topics, callee topics (from \
 inline `callee_behaviors` or `called_function_behaviors`), declaration \
 topics from `semantics`, sibling non-pure subject topics, or \
 documentation topics from `features.requirements`. Do not invent topic \
-IDs. An empty `evidence_topics` array is acceptable when the observation \
-is about an absence of code (e.g. \"no caller restriction is applied\") \
-that has no positive code anchor.\n\n\
+IDs. An empty `evidence_topics` array is acceptable when the assertion \
+is about an absence of code (e.g. \"the caller is constrained to the \
+contract's owner\") that has no positive code anchor.\n\n\
 Ground each condition in the subject's `functional_purpose` (what value \
 this subject contributes to its feature) and `placement_rationale` (why \
-this subject is at this point in the function). The condition explains \
-how that purpose could be defeated or violated — not what the subject \
-mechanically does.\n\n\
+this subject is at this point in the function). The condition states \
+what the purpose presumes — not what the subject mechanically does, and \
+not how the purpose might fail.\n\n\
 Return a JSON object with a `subjects` key whose value is an array. Each \
 entry has:\n\
 - `subject_topic`: the topic ID from the `non_pure_subjects` list\n\
 - `conditions`: an array of `{description, kind, evidence_topics}` \
-entries (length >= 1). Each `description` is one or two sentences; \
-`kind` is one of the eight values above; `evidence_topics` is an array \
-of topic ID strings as described.\n\n\
+entries (length >= 1). Each `description` is one or two sentences \
+phrased affirmatively; `kind` is one of the eight values above; \
+`evidence_topics` is an array of topic ID strings as described.\n\n\
 Every topic in `non_pure_subjects` must appear exactly once in the \
 output, and each must have at least one condition. If a subject has no \
-non-trivial conditions worth recording, that itself is signal — emit a \
-single condition that names the degenerate state and use the `Other` \
-kind. If the function contains no non-pure subjects, return \
+purpose-relevant assertion that seems load-bearing, that itself is \
+signal — emit a single condition with kind `Other` and a description \
+naming the degenerate state (e.g. \"this subject's purpose makes no \
+presumption about its environment beyond mechanical correctness\"). If \
+the function contains no non-pure subjects, return \
 `{\"subjects\": []}`.\n\n";
 
 #[derive(Deserialize)]
@@ -1746,13 +1767,13 @@ static CONDITIONS_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
                   "kind": {
                     "type": "string",
                     "enum": [
-                      "Reachability",
-                      "Authorization",
-                      "Recoverability",
-                      "Manipulability",
-                      "Staleness",
-                      "Atomicity",
-                      "ResourceExhaustion",
+                      "RestrictedReachability",
+                      "AuthorizedAccess",
+                      "ErrorRecoverability",
+                      "InputIntegrity",
+                      "ValueFreshness",
+                      "AtomicConsistency",
+                      "ResourceAvailability",
                       "Other"
                     ]
                   },
@@ -2406,7 +2427,7 @@ mod conditions_parser_tests {
     let expected = expected_set(&[]);
     let got = vec![subject(
       "N10",
-      vec![cond("c", domain::ConditionKind::Reachability, &[])],
+      vec![cond("c", domain::ConditionKind::RestrictedReachability, &[])],
     )];
     validate_conditions_coverage(&expected, &got, "test");
   }
@@ -2417,11 +2438,11 @@ mod conditions_parser_tests {
     let got = vec![
       subject(
         "N10",
-        vec![cond("c1", domain::ConditionKind::Reachability, &[])],
+        vec![cond("c1", domain::ConditionKind::RestrictedReachability, &[])],
       ),
       subject(
         "N20",
-        vec![cond("c2", domain::ConditionKind::Authorization, &[])],
+        vec![cond("c2", domain::ConditionKind::AuthorizedAccess, &[])],
       ),
     ];
     validate_conditions_coverage(&expected, &got, "test");
@@ -2433,11 +2454,11 @@ mod conditions_parser_tests {
     let got = vec![
       subject(
         "N10",
-        vec![cond("c", domain::ConditionKind::Reachability, &[])],
+        vec![cond("c", domain::ConditionKind::RestrictedReachability, &[])],
       ),
       subject(
         "N99",
-        vec![cond("c", domain::ConditionKind::Authorization, &[])],
+        vec![cond("c", domain::ConditionKind::AuthorizedAccess, &[])],
       ),
     ];
     validate_conditions_coverage(&expected, &got, "test");
@@ -2449,11 +2470,11 @@ mod conditions_parser_tests {
   fn parser_round_trips_well_formed_response() {
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
-        {"description":"caller is unrestricted","kind":"Authorization","evidence_topics":["N5"]},
-        {"description":"value can be stale","kind":"Staleness","evidence_topics":[]}
+        {"description":"the caller is the privileged owner","kind":"AuthorizedAccess","evidence_topics":["N5"]},
+        {"description":"the value reflects the latest committed price","kind":"ValueFreshness","evidence_topics":[]}
       ]},
       {"subject_topic":"N20","conditions":[
-        {"description":"resource can be drained","kind":"ResourceExhaustion","evidence_topics":["N7","N8"]}
+        {"description":"shared liquidity remains available under expected use","kind":"ResourceAvailability","evidence_topics":["N7","N8"]}
       ]}
     ]}"#;
     let entries = run_parse(json);
@@ -2462,7 +2483,7 @@ mod conditions_parser_tests {
     assert_eq!(entries[0].conditions.len(), 2);
     assert_eq!(
       entries[0].conditions[0].kind,
-      domain::ConditionKind::Authorization
+      domain::ConditionKind::AuthorizedAccess
     );
     assert_eq!(
       entries[0].conditions[0].evidence_topics,
@@ -2470,7 +2491,7 @@ mod conditions_parser_tests {
     );
     assert_eq!(
       entries[0].conditions[1].kind,
-      domain::ConditionKind::Staleness
+      domain::ConditionKind::ValueFreshness
     );
     assert!(entries[0].conditions[1].evidence_topics.is_empty());
     assert_eq!(entries[1].subject_topic, topic::new_node_topic(&20));
@@ -2488,7 +2509,7 @@ mod conditions_parser_tests {
     // only the entries that were in the response.
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
-        {"description":"c","kind":"Reachability","evidence_topics":[]}
+        {"description":"c","kind":"RestrictedReachability","evidence_topics":[]}
       ]}
     ]}"#;
     let expected = expected_set(&["N10", "N20"]);
@@ -2501,10 +2522,10 @@ mod conditions_parser_tests {
   fn parser_rejects_subject_not_in_non_pure_subjects() {
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
-        {"description":"ok","kind":"Reachability","evidence_topics":[]}
+        {"description":"ok","kind":"RestrictedReachability","evidence_topics":[]}
       ]},
       {"subject_topic":"N999","conditions":[
-        {"description":"hallucinated","kind":"Reachability","evidence_topics":[]}
+        {"description":"hallucinated","kind":"RestrictedReachability","evidence_topics":[]}
       ]}
     ]}"#;
     let expected = expected_set(&["N10"]);
@@ -2517,10 +2538,10 @@ mod conditions_parser_tests {
   fn parser_dedupes_repeated_subject() {
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
-        {"description":"first","kind":"Reachability","evidence_topics":[]}
+        {"description":"first","kind":"RestrictedReachability","evidence_topics":[]}
       ]},
       {"subject_topic":"N10","conditions":[
-        {"description":"second","kind":"Authorization","evidence_topics":[]}
+        {"description":"second","kind":"AuthorizedAccess","evidence_topics":[]}
       ]}
     ]}"#;
     let entries = run_parse(json);
@@ -2533,10 +2554,10 @@ mod conditions_parser_tests {
   fn parser_skips_malformed_subject_topic() {
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
-        {"description":"ok","kind":"Reachability","evidence_topics":[]}
+        {"description":"ok","kind":"RestrictedReachability","evidence_topics":[]}
       ]},
       {"subject_topic":"NOT_A_TOPIC","conditions":[
-        {"description":"bad","kind":"Reachability","evidence_topics":[]}
+        {"description":"bad","kind":"RestrictedReachability","evidence_topics":[]}
       ]}
     ]}"#;
     let entries = run_parse(json);
@@ -2549,7 +2570,7 @@ mod conditions_parser_tests {
     // Subjects must be N-prefixed; an A-prefixed topic must be skipped.
     let json = r#"{"subjects":[
       {"subject_topic":"A5","conditions":[
-        {"description":"x","kind":"Reachability","evidence_topics":[]}
+        {"description":"x","kind":"RestrictedReachability","evidence_topics":[]}
       ]}
     ]}"#;
     let entries = run_parse(json);
@@ -2560,7 +2581,7 @@ mod conditions_parser_tests {
   fn parser_drops_malformed_evidence_topic_keeps_condition() {
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
-        {"description":"c","kind":"Reachability","evidence_topics":["N5","BAD","N7"]}
+        {"description":"c","kind":"RestrictedReachability","evidence_topics":["N5","BAD","N7"]}
       ]}
     ]}"#;
     let entries = run_parse(json);
@@ -2577,7 +2598,7 @@ mod conditions_parser_tests {
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[]},
       {"subject_topic":"N20","conditions":[
-        {"description":"c","kind":"Reachability","evidence_topics":[]}
+        {"description":"c","kind":"RestrictedReachability","evidence_topics":[]}
       ]}
     ]}"#;
     let entries = run_parse(json);
@@ -2595,7 +2616,7 @@ mod conditions_parser_tests {
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[]},
       {"subject_topic":"N10","conditions":[
-        {"description":"second","kind":"Reachability","evidence_topics":[]}
+        {"description":"second","kind":"RestrictedReachability","evidence_topics":[]}
       ]}
     ]}"#;
     let entries = run_parse(json);
@@ -2610,13 +2631,13 @@ mod conditions_parser_tests {
   fn parser_accepts_each_condition_kind() {
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
-        {"description":"a","kind":"Reachability","evidence_topics":[]},
-        {"description":"b","kind":"Authorization","evidence_topics":[]},
-        {"description":"c","kind":"Recoverability","evidence_topics":[]},
-        {"description":"d","kind":"Manipulability","evidence_topics":[]},
-        {"description":"e","kind":"Staleness","evidence_topics":[]},
-        {"description":"f","kind":"Atomicity","evidence_topics":[]},
-        {"description":"g","kind":"ResourceExhaustion","evidence_topics":[]},
+        {"description":"a","kind":"RestrictedReachability","evidence_topics":[]},
+        {"description":"b","kind":"AuthorizedAccess","evidence_topics":[]},
+        {"description":"c","kind":"ErrorRecoverability","evidence_topics":[]},
+        {"description":"d","kind":"InputIntegrity","evidence_topics":[]},
+        {"description":"e","kind":"ValueFreshness","evidence_topics":[]},
+        {"description":"f","kind":"AtomicConsistency","evidence_topics":[]},
+        {"description":"g","kind":"ResourceAvailability","evidence_topics":[]},
         {"description":"h","kind":"Other","evidence_topics":[]}
       ]}
     ]}"#;
@@ -2627,13 +2648,13 @@ mod conditions_parser_tests {
     assert_eq!(
       kinds,
       vec![
-        domain::ConditionKind::Reachability,
-        domain::ConditionKind::Authorization,
-        domain::ConditionKind::Recoverability,
-        domain::ConditionKind::Manipulability,
-        domain::ConditionKind::Staleness,
-        domain::ConditionKind::Atomicity,
-        domain::ConditionKind::ResourceExhaustion,
+        domain::ConditionKind::RestrictedReachability,
+        domain::ConditionKind::AuthorizedAccess,
+        domain::ConditionKind::ErrorRecoverability,
+        domain::ConditionKind::InputIntegrity,
+        domain::ConditionKind::ValueFreshness,
+        domain::ConditionKind::AtomicConsistency,
+        domain::ConditionKind::ResourceAvailability,
         domain::ConditionKind::Other,
       ]
     );
@@ -2669,14 +2690,94 @@ mod conditions_parser_tests {
     // matching step 5).
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
-        {"description":"a","kind":"Reachability","evidence_topics":[]}
+        {"description":"a","kind":"RestrictedReachability","evidence_topics":[]}
       ]},
       {"subject_topic":"N20","conditions":[
-        {"description":"b","kind":"Authorization","evidence_topics":[]}
+        {"description":"b","kind":"AuthorizedAccess","evidence_topics":[]}
       ]}
     ]}"#;
     let entries =
       run_parse_with_expected(json, std::collections::HashSet::new());
     assert_eq!(entries.len(), 2);
+  }
+
+  /// Drift guard: the JSON schema's `kind.enum` array (which the LLM is
+  /// constrained against) must exactly match the Rust `ConditionKind`
+  /// variants by serialized name, in declaration order. If a future
+  /// contributor adds, removes, renames, or reorders a Rust variant
+  /// without updating `CONDITIONS_SCHEMA`, the schema and the parser
+  /// would silently disagree about the legal value set — the schema
+  /// might accept a value serde rejects (or vice versa), surfacing as
+  /// confusing test or production failures rather than as a single
+  /// clear drift error. Failing here means **update both sides
+  /// together.**
+  #[test]
+  fn schema_kind_enum_matches_rust_variants_exactly() {
+    use domain::ConditionKind;
+
+    // Source of truth: every variant of the Rust enum, serialized
+    // through serde to its wire-name, in declaration order. Adding a
+    // new variant requires extending this array — exhaustiveness on
+    // ConditionKind is checked at the bottom.
+    let rust_variants: Vec<String> = [
+      ConditionKind::RestrictedReachability,
+      ConditionKind::AuthorizedAccess,
+      ConditionKind::ErrorRecoverability,
+      ConditionKind::InputIntegrity,
+      ConditionKind::ValueFreshness,
+      ConditionKind::AtomicConsistency,
+      ConditionKind::ResourceAvailability,
+      ConditionKind::Other,
+    ]
+    .into_iter()
+    .map(|k| serde_json::to_value(k).unwrap().as_str().unwrap().to_string())
+    .collect();
+
+    // Enforce that the local list above is exhaustive over the enum.
+    // If a new variant is added without extending the array, this match
+    // fails to compile (which is the error we want — exhaustiveness on
+    // a domain enum is a compile-time guarantee, not a runtime one).
+    fn _exhaustiveness_guard(k: ConditionKind) {
+      match k {
+        ConditionKind::RestrictedReachability
+        | ConditionKind::AuthorizedAccess
+        | ConditionKind::ErrorRecoverability
+        | ConditionKind::InputIntegrity
+        | ConditionKind::ValueFreshness
+        | ConditionKind::AtomicConsistency
+        | ConditionKind::ResourceAvailability
+        | ConditionKind::Other => (),
+      }
+    }
+
+    // Walk the schema JSON to the kind.enum array.
+    let kind_enum = CONDITIONS_SCHEMA
+      .schema
+      .pointer(
+        "/properties/subjects/items/properties/conditions/items/properties/kind/enum",
+      )
+      .expect(
+        "CONDITIONS_SCHEMA shape changed; update the JSON pointer in this \
+         test to match",
+      )
+      .as_array()
+      .expect("kind.enum must be a JSON array");
+
+    let schema_strings: Vec<String> = kind_enum
+      .iter()
+      .map(|v| {
+        v.as_str()
+          .expect("kind.enum entries must be strings")
+          .to_string()
+      })
+      .collect();
+
+    assert_eq!(
+      schema_strings, rust_variants,
+      "CONDITIONS_SCHEMA's kind.enum drifted from the Rust ConditionKind \
+       variants. Update both together — the schema is what the LLM is \
+       constrained against; the Rust enum is what serde deserializes the \
+       response into."
+    );
   }
 }
