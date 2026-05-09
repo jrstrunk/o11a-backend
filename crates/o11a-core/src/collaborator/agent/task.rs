@@ -1618,6 +1618,361 @@ fn validate_functional_property_coverage(
   }
 }
 
+// ============================================================================
+// Conditions (Pipeline Step 6)
+// ============================================================================
+
+/// Prompt for generating conditions — purpose-driven observations about a
+/// non-pure subject's interaction surface — for every non-pure subject in
+/// a single in-scope function/modifier. The input JSON is the output of
+/// `render_batch_for_extraction` called with a single-member slice; the
+/// envelope uses the `subject` shape (not `batch`). The renderer inlines
+/// `functional_purpose` and `placement_rationale` (from step 5) on each
+/// non-pure subject node, so the LLM can reason from purpose+placement
+/// without re-deriving them. See pipeline-dag.md step 6.
+const EXTRACT_CONDITIONS_PROMPT: &str = "Below is one in-scope function or \
+modifier from a smart contract project. The function appears under the \
+`subject` field with:\n\
+- `topic`, `name`, `kind`, `visibility`, and a `modifiers` array of \
+`{topic, name}` entries.\n\
+- `state_reads` and `state_writes`: state-variable topic IDs the function \
+reads or mutates.\n\
+- `features`: an array of features this function contributes to. Each \
+feature has `topic`, `name`, `description`, and `requirements`.\n\
+- `behaviors`: what the function as a whole does (already extracted).\n\
+- `definition`: the function's signature and body as an AST. Non-pure \
+subjects in the body have `purity: \"non_pure\"`; function calls include \
+`purity: \"pure\"` or `purity: \"non_pure\"`. Reference nodes carry an \
+inline `semantic` when the referenced declaration has a project-specific \
+meaning. Call sites carry an inline `callee_behaviors` when the callee \
+is in-scope. **Each non-pure subject node carries inline \
+`functional_purpose` and `placement_rationale` describing why that \
+subject exists at that point in the function.**\n\
+- `semantics`: top-level map keyed by declaration topic, deduped \
+enumeration of the inline annotations.\n\
+- `called_function_behaviors`: top-level map keyed by callee topic, \
+deduped enumeration of the inline call-site annotations.\n\n\
+The top-level **`non_pure_subjects`** array lists every non-pure subject \
+in this function. For **each** topic in that list, produce one or more \
+**conditions**. A condition is a single observation about the subject's \
+interaction surface — the conditions under which the subject's functional \
+purpose could fail, be violated, or be subverted given its placement. \
+Each condition is one thing the auditor can independently agree or \
+disagree with; do not bundle multiple observations into one entry.\n\n\
+For each condition, choose a `kind` that names the *reasoning angle* the \
+observation takes. The kinds are:\n\
+- `Reachability` — Can the interaction be triggered, and by whom?\n\
+- `Authorization` — Is the trigger restricted to authorized parties?\n\
+- `Recoverability` — If the operation produces a wrong outcome, can the \
+system recover?\n\
+- `Manipulability` — Can a caller control the inputs or state being read \
+here?\n\
+- `Staleness` — Can the value being read be out of date?\n\
+- `Atomicity` — Can interleaving operations observe inconsistent state?\n\
+- `ResourceExhaustion` — Can shared resources be drained, locked, or \
+starved?\n\
+- `Other` — Genuinely novel observation; description carries the \
+structure. Use `Other` when no kind above fits, rather than force-fitting \
+to a near-match.\n\n\
+For `evidence_topics`, cite topic IDs that are **visible in the rendered \
+input** and that justify the observation: state-variable topics (from \
+`state_reads`/`state_writes`), parameter topics, callee topics (from \
+inline `callee_behaviors` or `called_function_behaviors`), declaration \
+topics from `semantics`, sibling non-pure subject topics, or \
+documentation topics from `features.requirements`. Do not invent topic \
+IDs. An empty `evidence_topics` array is acceptable when the observation \
+is about an absence of code (e.g. \"no caller restriction is applied\") \
+that has no positive code anchor.\n\n\
+Ground each condition in the subject's `functional_purpose` (what value \
+this subject contributes to its feature) and `placement_rationale` (why \
+this subject is at this point in the function). The condition explains \
+how that purpose could be defeated or violated — not what the subject \
+mechanically does.\n\n\
+Return a JSON object with a `subjects` key whose value is an array. Each \
+entry has:\n\
+- `subject_topic`: the topic ID from the `non_pure_subjects` list\n\
+- `conditions`: an array of `{description, kind, evidence_topics}` \
+entries (length >= 1). Each `description` is one or two sentences; \
+`kind` is one of the eight values above; `evidence_topics` is an array \
+of topic ID strings as described.\n\n\
+Every topic in `non_pure_subjects` must appear exactly once in the \
+output, and each must have at least one condition. If a subject has no \
+non-trivial conditions worth recording, that itself is signal — emit a \
+single condition that names the degenerate state and use the `Other` \
+kind. If the function contains no non-pure subjects, return \
+`{\"subjects\": []}`.\n\n";
+
+#[derive(Deserialize)]
+struct LLMCondition {
+  description: String,
+  kind: domain::ConditionKind,
+  evidence_topics: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct LLMSubjectConditions {
+  subject_topic: String,
+  conditions: Vec<LLMCondition>,
+}
+
+#[derive(Deserialize)]
+struct LLMConditionsResponse {
+  subjects: Vec<LLMSubjectConditions>,
+}
+
+static CONDITIONS_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
+  name: "extract_conditions",
+  schema: json!({
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["subjects"],
+    "properties": {
+      "subjects": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subject_topic", "conditions"],
+          "properties": {
+            "subject_topic": { "type": "string" },
+            "conditions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["description", "kind", "evidence_topics"],
+                "properties": {
+                  "description": { "type": "string" },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "Reachability",
+                      "Authorization",
+                      "Recoverability",
+                      "Manipulability",
+                      "Staleness",
+                      "Atomicity",
+                      "ResourceExhaustion",
+                      "Other"
+                    ]
+                  },
+                  "evidence_topics": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }),
+  empty_response: r#"{"subjects":[]}"#,
+});
+
+/// Result of conditions extraction for one batch (one function in
+/// per-function mode). Each entry pairs a non-pure subject topic with
+/// the list of conditions the LLM produced for it.
+pub struct ParsedConditions {
+  pub entries: Vec<ParsedSubjectConditions>,
+}
+
+pub struct ParsedSubjectConditions {
+  pub subject_topic: topic::Topic,
+  pub conditions: Vec<ParsedCondition>,
+}
+
+pub struct ParsedCondition {
+  pub description: String,
+  pub kind: domain::ConditionKind,
+  pub evidence_topics: Vec<topic::Topic>,
+}
+
+/// Run the conditions LLM task against a single function rendered by
+/// `context::render_batch_for_extraction` in `subject` shape. `label`
+/// identifies the function for logs. Validates that every topic in the
+/// input's `non_pure_subjects` list appears exactly once in the LLM's
+/// response; missing or extra topics surface as `tracing::warn` events
+/// but do not fail the task. Subjects with zero conditions are dropped
+/// with a warning (step 7 will not see them). Malformed evidence topics
+/// are dropped from their condition; the condition itself is kept with
+/// the remaining valid evidence topics.
+pub async fn extract_conditions_from_batch(
+  batch_json: &str,
+  label: &str,
+) -> Result<ParsedConditions, TaskError> {
+  let prompt = format!("{}Batch:\n{}", EXTRACT_CONDITIONS_PROMPT, batch_json);
+
+  let log_label = format!("conditions_{}", label);
+  let response = router::chat_completion(
+    TaskSize::Large,
+    router::SYSTEM_MESSAGE_CODE,
+    &prompt,
+    Some(&log_label),
+    Some(&CONDITIONS_SCHEMA),
+  )
+  .await?;
+
+  let wrapper: LLMConditionsResponse =
+    router::parse_response(&response, "conditions", &prompt)?;
+
+  let expected = parse_non_pure_subjects(batch_json);
+  validate_conditions_coverage(&expected, &wrapper.subjects, label);
+
+  // Parse each subject_topic safely, dedupe, reject any topic that wasn't
+  // in the batch's `non_pure_subjects` list, drop subjects with zero
+  // conditions, and parse evidence topics per condition. Same shape as
+  // step 5's strict-filter / dedupe block — see that function's comment
+  // for the rationale.
+  let mut entries = Vec::with_capacity(wrapper.subjects.len());
+  let mut seen_subjects: std::collections::HashSet<topic::Topic> =
+    std::collections::HashSet::new();
+  let mut duplicates: Vec<String> = Vec::new();
+  let mut rejected_unexpected: Vec<String> = Vec::new();
+  let mut empty_conditions: Vec<String> = Vec::new();
+  let mut malformed_evidence: Vec<String> = Vec::new();
+  for s in wrapper.subjects {
+    let subject_topic = match topic::parse_topic(&s.subject_topic) {
+      Ok(t @ topic::Topic::Node(_)) => t,
+      Ok(other) => {
+        tracing::warn!(
+          batch = %label,
+          "conditions: subject_topic {:?} is not an N-prefixed topic; \
+           skipping",
+          other
+        );
+        continue;
+      }
+      Err(e) => {
+        tracing::warn!(
+          batch = %label,
+          "conditions: failed to parse subject_topic {:?}: {}; skipping",
+          s.subject_topic,
+          e
+        );
+        continue;
+      }
+    };
+    // Strict membership check matches step 5: only accept subjects from
+    // the batch's `non_pure_subjects` list. When the input list is empty
+    // (parse failure or absent field), accept all valid topics so the
+    // caller still gets results.
+    if !expected.is_empty() && !expected.contains(&s.subject_topic) {
+      rejected_unexpected.push(s.subject_topic);
+      continue;
+    }
+    if !seen_subjects.insert(subject_topic) {
+      duplicates.push(s.subject_topic);
+      continue;
+    }
+
+    let mut conditions = Vec::with_capacity(s.conditions.len());
+    for c in s.conditions {
+      let mut evidence_topics = Vec::with_capacity(c.evidence_topics.len());
+      for ev in c.evidence_topics {
+        match topic::parse_topic(&ev) {
+          Ok(t) => evidence_topics.push(t),
+          Err(_) => malformed_evidence.push(ev),
+        }
+      }
+      conditions.push(ParsedCondition {
+        description: c.description,
+        kind: c.kind,
+        evidence_topics,
+      });
+    }
+
+    if conditions.is_empty() {
+      // OpenRouter's strict JSON-schema mode disallows `minItems`, so
+      // the schema cannot enforce conditions.len() >= 1. The prompt
+      // tells the LLM to emit at least one condition per subject; a
+      // zero-condition subject is signal that the LLM gave up on this
+      // subject. Drop the entry (step 7 won't see it) and keep the
+      // seen-marker — a duplicate empty followed by non-empty for the
+      // same subject is still treated as "first wins, dropped".
+      empty_conditions.push(s.subject_topic);
+      continue;
+    }
+
+    entries.push(ParsedSubjectConditions {
+      subject_topic,
+      conditions,
+    });
+  }
+  if !duplicates.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "conditions: LLM returned {} duplicate subject_topic(s) (kept \
+       first, dropped subsequent): {:?}",
+      duplicates.len(),
+      duplicates
+    );
+  }
+  if !rejected_unexpected.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "conditions: rejected {} subject_topic(s) outside the batch's \
+       non_pure_subjects list: {:?}",
+      rejected_unexpected.len(),
+      rejected_unexpected
+    );
+  }
+  if !empty_conditions.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "conditions: dropped {} subject(s) with zero conditions: {:?}",
+      empty_conditions.len(),
+      empty_conditions
+    );
+  }
+  if !malformed_evidence.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "conditions: dropped {} malformed evidence_topic(s) across all \
+       subjects: {:?}",
+      malformed_evidence.len(),
+      malformed_evidence
+    );
+  }
+
+  Ok(ParsedConditions { entries })
+}
+
+/// Log warnings for any input topic missing from the LLM output and for
+/// any output topic not in the input list. Same shape as step 5's
+/// `validate_functional_property_coverage`.
+fn validate_conditions_coverage(
+  expected: &std::collections::HashSet<String>,
+  got: &[LLMSubjectConditions],
+  label: &str,
+) {
+  if expected.is_empty() {
+    return;
+  }
+  let received: std::collections::HashSet<String> =
+    got.iter().map(|s| s.subject_topic.clone()).collect();
+  let missing: Vec<&String> = expected.difference(&received).collect();
+  let extra: Vec<&String> = received.difference(expected).collect();
+  if !missing.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "conditions: {} subject(s) in batch were not addressed by the LLM: {:?}",
+      missing.len(),
+      missing
+    );
+  }
+  if !extra.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "conditions: {} subject(s) in LLM output were not in the batch's \
+       non_pure_subjects list: {:?}",
+      extra.len(),
+      extra
+    );
+  }
+}
+
 /// Prompt for normalizing a documentation file for plain text readability.
 const NORMALIZE_DOCUMENTATION_PROMPT: &str = "Below is a documentation file from a smart contract \
 project. Your task is to normalize it for optimal plain text readability \
@@ -1960,5 +2315,368 @@ mod behaviors_parser_tests {
     ]}"#;
     let got = run_parse(json);
     assert!(got.is_empty());
+  }
+}
+
+#[cfg(test)]
+mod conditions_parser_tests {
+  use super::*;
+
+  fn expected_set(items: &[&str]) -> std::collections::HashSet<String> {
+    items.iter().map(|s| s.to_string()).collect()
+  }
+
+  /// Mirror of the parse + dedupe + strict-filter block from
+  /// `extract_conditions_from_batch` — runs without an LLM call so the
+  /// parsing logic can be unit-tested deterministically. `expected`
+  /// matches the batch's `non_pure_subjects` list; an empty set means
+  /// "accept all" (legacy behavior).
+  fn run_parse_with_expected(
+    json_response: &str,
+    expected: std::collections::HashSet<String>,
+  ) -> Vec<ParsedSubjectConditions> {
+    let wrapper: LLMConditionsResponse =
+      serde_json::from_str(json_response).expect("malformed test JSON");
+    let mut entries = Vec::new();
+    let mut seen: std::collections::HashSet<topic::Topic> =
+      std::collections::HashSet::new();
+    for s in wrapper.subjects {
+      let Ok(t @ topic::Topic::Node(_)) = topic::parse_topic(&s.subject_topic)
+      else {
+        continue;
+      };
+      if !expected.is_empty() && !expected.contains(&s.subject_topic) {
+        continue;
+      }
+      if !seen.insert(t) {
+        continue;
+      }
+      let mut conditions = Vec::with_capacity(s.conditions.len());
+      for c in s.conditions {
+        let mut evidence_topics = Vec::with_capacity(c.evidence_topics.len());
+        for ev in c.evidence_topics {
+          if let Ok(et) = topic::parse_topic(&ev) {
+            evidence_topics.push(et);
+          }
+        }
+        conditions.push(ParsedCondition {
+          description: c.description,
+          kind: c.kind,
+          evidence_topics,
+        });
+      }
+      if conditions.is_empty() {
+        continue;
+      }
+      entries.push(ParsedSubjectConditions {
+        subject_topic: t,
+        conditions,
+      });
+    }
+    entries
+  }
+
+  fn run_parse(json_response: &str) -> Vec<ParsedSubjectConditions> {
+    run_parse_with_expected(json_response, std::collections::HashSet::new())
+  }
+
+  // --------- coverage validation ---------
+
+  fn subject(id: &str, conditions: Vec<LLMCondition>) -> LLMSubjectConditions {
+    LLMSubjectConditions {
+      subject_topic: id.to_string(),
+      conditions,
+    }
+  }
+
+  fn cond(
+    description: &str,
+    kind: domain::ConditionKind,
+    evidence: &[&str],
+  ) -> LLMCondition {
+    LLMCondition {
+      description: description.to_string(),
+      kind,
+      evidence_topics: evidence.iter().map(|s| s.to_string()).collect(),
+    }
+  }
+
+  #[test]
+  fn validate_coverage_no_op_when_expected_empty() {
+    let expected = expected_set(&[]);
+    let got = vec![subject(
+      "N10",
+      vec![cond("c", domain::ConditionKind::Reachability, &[])],
+    )];
+    validate_conditions_coverage(&expected, &got, "test");
+  }
+
+  #[test]
+  fn validate_coverage_full_match_passes() {
+    let expected = expected_set(&["N10", "N20"]);
+    let got = vec![
+      subject(
+        "N10",
+        vec![cond("c1", domain::ConditionKind::Reachability, &[])],
+      ),
+      subject(
+        "N20",
+        vec![cond("c2", domain::ConditionKind::Authorization, &[])],
+      ),
+    ];
+    validate_conditions_coverage(&expected, &got, "test");
+  }
+
+  #[test]
+  fn validate_coverage_handles_missing_and_extra() {
+    let expected = expected_set(&["N10", "N20", "N30"]);
+    let got = vec![
+      subject(
+        "N10",
+        vec![cond("c", domain::ConditionKind::Reachability, &[])],
+      ),
+      subject(
+        "N99",
+        vec![cond("c", domain::ConditionKind::Authorization, &[])],
+      ),
+    ];
+    validate_conditions_coverage(&expected, &got, "test");
+  }
+
+  // --------- end-to-end response parsing ---------
+
+  #[test]
+  fn parser_round_trips_well_formed_response() {
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"description":"caller is unrestricted","kind":"Authorization","evidence_topics":["N5"]},
+        {"description":"value can be stale","kind":"Staleness","evidence_topics":[]}
+      ]},
+      {"subject_topic":"N20","conditions":[
+        {"description":"resource can be drained","kind":"ResourceExhaustion","evidence_topics":["N7","N8"]}
+      ]}
+    ]}"#;
+    let entries = run_parse(json);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].subject_topic, topic::new_node_topic(&10));
+    assert_eq!(entries[0].conditions.len(), 2);
+    assert_eq!(
+      entries[0].conditions[0].kind,
+      domain::ConditionKind::Authorization
+    );
+    assert_eq!(
+      entries[0].conditions[0].evidence_topics,
+      vec![topic::new_node_topic(&5)]
+    );
+    assert_eq!(
+      entries[0].conditions[1].kind,
+      domain::ConditionKind::Staleness
+    );
+    assert!(entries[0].conditions[1].evidence_topics.is_empty());
+    assert_eq!(entries[1].subject_topic, topic::new_node_topic(&20));
+    assert_eq!(
+      entries[1].conditions[0].evidence_topics,
+      vec![topic::new_node_topic(&7), topic::new_node_topic(&8)]
+    );
+  }
+
+  #[test]
+  fn parser_subject_missing_from_response_yields_no_entry() {
+    // Subject N20 was expected but not returned. The validator warns
+    // (no panic); the parser produces no entry for it. validation runs
+    // separately from parsing — here we just assert the parser produces
+    // only the entries that were in the response.
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"description":"c","kind":"Reachability","evidence_topics":[]}
+      ]}
+    ]}"#;
+    let expected = expected_set(&["N10", "N20"]);
+    let entries = run_parse_with_expected(json, expected);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].subject_topic, topic::new_node_topic(&10));
+  }
+
+  #[test]
+  fn parser_rejects_subject_not_in_non_pure_subjects() {
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"description":"ok","kind":"Reachability","evidence_topics":[]}
+      ]},
+      {"subject_topic":"N999","conditions":[
+        {"description":"hallucinated","kind":"Reachability","evidence_topics":[]}
+      ]}
+    ]}"#;
+    let expected = expected_set(&["N10"]);
+    let entries = run_parse_with_expected(json, expected);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].subject_topic, topic::new_node_topic(&10));
+  }
+
+  #[test]
+  fn parser_dedupes_repeated_subject() {
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"description":"first","kind":"Reachability","evidence_topics":[]}
+      ]},
+      {"subject_topic":"N10","conditions":[
+        {"description":"second","kind":"Authorization","evidence_topics":[]}
+      ]}
+    ]}"#;
+    let entries = run_parse(json);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].conditions.len(), 1);
+    assert_eq!(entries[0].conditions[0].description, "first");
+  }
+
+  #[test]
+  fn parser_skips_malformed_subject_topic() {
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"description":"ok","kind":"Reachability","evidence_topics":[]}
+      ]},
+      {"subject_topic":"NOT_A_TOPIC","conditions":[
+        {"description":"bad","kind":"Reachability","evidence_topics":[]}
+      ]}
+    ]}"#;
+    let entries = run_parse(json);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].subject_topic, topic::new_node_topic(&10));
+  }
+
+  #[test]
+  fn parser_skips_non_node_subject_topic() {
+    // Subjects must be N-prefixed; an A-prefixed topic must be skipped.
+    let json = r#"{"subjects":[
+      {"subject_topic":"A5","conditions":[
+        {"description":"x","kind":"Reachability","evidence_topics":[]}
+      ]}
+    ]}"#;
+    let entries = run_parse(json);
+    assert!(entries.is_empty(), "non-Node subject_topic must be skipped");
+  }
+
+  #[test]
+  fn parser_drops_malformed_evidence_topic_keeps_condition() {
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"description":"c","kind":"Reachability","evidence_topics":["N5","BAD","N7"]}
+      ]}
+    ]}"#;
+    let entries = run_parse(json);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].conditions.len(), 1);
+    assert_eq!(
+      entries[0].conditions[0].evidence_topics,
+      vec![topic::new_node_topic(&5), topic::new_node_topic(&7)]
+    );
+  }
+
+  #[test]
+  fn parser_drops_subject_with_zero_conditions() {
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[]},
+      {"subject_topic":"N20","conditions":[
+        {"description":"c","kind":"Reachability","evidence_topics":[]}
+      ]}
+    ]}"#;
+    let entries = run_parse(json);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].subject_topic, topic::new_node_topic(&20));
+  }
+
+  #[test]
+  fn parser_first_wins_even_when_first_has_empty_conditions() {
+    // Strict "first occurrence wins" semantics — matches step 5.
+    // If the LLM emits the same subject twice and the first copy has
+    // zero conditions, the subject is dropped and the second copy is
+    // discarded as a duplicate. Otherwise the dedup rule would silently
+    // become "first non-empty wins", which is hard to reason about.
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[]},
+      {"subject_topic":"N10","conditions":[
+        {"description":"second","kind":"Reachability","evidence_topics":[]}
+      ]}
+    ]}"#;
+    let entries = run_parse(json);
+    assert!(
+      entries.is_empty(),
+      "first-empty + second-non-empty must yield no entry under \
+       'first wins' semantics"
+    );
+  }
+
+  #[test]
+  fn parser_accepts_each_condition_kind() {
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"description":"a","kind":"Reachability","evidence_topics":[]},
+        {"description":"b","kind":"Authorization","evidence_topics":[]},
+        {"description":"c","kind":"Recoverability","evidence_topics":[]},
+        {"description":"d","kind":"Manipulability","evidence_topics":[]},
+        {"description":"e","kind":"Staleness","evidence_topics":[]},
+        {"description":"f","kind":"Atomicity","evidence_topics":[]},
+        {"description":"g","kind":"ResourceExhaustion","evidence_topics":[]},
+        {"description":"h","kind":"Other","evidence_topics":[]}
+      ]}
+    ]}"#;
+    let entries = run_parse(json);
+    assert_eq!(entries.len(), 1);
+    let kinds: Vec<domain::ConditionKind> =
+      entries[0].conditions.iter().map(|c| c.kind).collect();
+    assert_eq!(
+      kinds,
+      vec![
+        domain::ConditionKind::Reachability,
+        domain::ConditionKind::Authorization,
+        domain::ConditionKind::Recoverability,
+        domain::ConditionKind::Manipulability,
+        domain::ConditionKind::Staleness,
+        domain::ConditionKind::Atomicity,
+        domain::ConditionKind::ResourceExhaustion,
+        domain::ConditionKind::Other,
+      ]
+    );
+  }
+
+  #[test]
+  fn parser_rejects_off_list_kind() {
+    // An off-list kind must fail deserialization. The schema enforces
+    // this at the LLM layer; serde enforces it at the response-parse
+    // layer. This is the type-system's safety net for that contract.
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"description":"x","kind":"NotARealKind","evidence_topics":[]}
+      ]}
+    ]}"#;
+    let result: Result<LLMConditionsResponse, _> = serde_json::from_str(json);
+    assert!(
+      result.is_err(),
+      "off-list ConditionKind value must fail deserialization"
+    );
+  }
+
+  #[test]
+  fn parser_handles_empty_subjects_array() {
+    let json = r#"{"subjects":[]}"#;
+    let entries = run_parse(json);
+    assert!(entries.is_empty());
+  }
+
+  #[test]
+  fn parser_accepts_all_when_expected_empty() {
+    // No expected list → "accept all valid topics" (legacy behavior,
+    // matching step 5).
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"description":"a","kind":"Reachability","evidence_topics":[]}
+      ]},
+      {"subject_topic":"N20","conditions":[
+        {"description":"b","kind":"Authorization","evidence_topics":[]}
+      ]}
+    ]}"#;
+    let entries =
+      run_parse_with_expected(json, std::collections::HashSet::new());
+    assert_eq!(entries.len(), 2);
   }
 }

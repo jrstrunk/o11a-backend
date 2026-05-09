@@ -63,7 +63,7 @@ impl PipelineState {
 // Full-audit pipeline steps (used by the `analyze` endpoint)
 // ---------------------------------------------------------------------------
 
-/// Run the full analysis pipeline in five steps:
+/// Run the full analysis pipeline in six steps:
 ///
 /// 1. **Semantic Linking** — establish functional semantics on declarations.
 /// 2. **Requirement Extraction** — pull documentation requirements with
@@ -73,13 +73,19 @@ impl PipelineState {
 /// 4. **Feature Synthesis** — reconcile requirements and behaviors.
 /// 5. **Functional Purpose & Placement** — for every non-pure subject in
 ///    every in-scope function with a feature link, generate purpose and
-///    placement rationale (DAG-batched alongside behaviors).
+///    placement rationale (per-function).
+/// 6. **Condition Generation** — for every non-pure subject with a purpose
+///    and placement, generate the conditions under which that purpose
+///    could fail or be subverted (per-function). Each condition is its
+///    own A-prefixed topic; step 7 (threats) reasons from these.
 ///
 /// Semantic linking runs first so functional semantics are available when
 /// rendering documentation for requirement extraction — inline code
 /// references like `pID` get annotated with their project-specific meaning.
-/// Functional properties run last so they can use both feature context
-/// (from step 4) and prior callee behaviors (from step 3).
+/// Step 5 runs after feature synthesis so it can use both feature context
+/// (from step 4) and prior callee behaviors (from step 3); step 6 runs
+/// after step 5 because every condition is grounded in a subject's
+/// functional purpose and placement rationale.
 #[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
 pub async fn run_full_pipeline(
   state: &PipelineState,
@@ -87,20 +93,23 @@ pub async fn run_full_pipeline(
 ) -> Result<(), PipelineError> {
   tracing::info!("Starting full analysis pipeline for audit {}", audit_id);
 
-  tracing::info!("[1/5] Semantic Linking");
+  tracing::info!("[1/6] Semantic Linking");
   build_semantic_links(state, audit_id).await?;
 
-  tracing::info!("[2/5] Requirement Extraction");
+  tracing::info!("[2/6] Requirement Extraction");
   build_requirements(state, audit_id).await?;
 
-  tracing::info!("[3/5] Behavior Extraction");
+  tracing::info!("[3/6] Behavior Extraction");
   build_behaviors(state, audit_id).await?;
 
-  tracing::info!("[4/5] Feature Synthesis");
+  tracing::info!("[4/6] Feature Synthesis");
   synthesize_features(state, audit_id).await?;
 
-  tracing::info!("[5/5] Functional Purpose & Placement Generation");
+  tracing::info!("[5/6] Functional Purpose & Placement Generation");
   build_functional_properties(state, audit_id).await?;
+
+  tracing::info!("[6/6] Condition Generation");
+  build_conditions(state, audit_id).await?;
 
   tracing::info!("Pipeline complete for audit {}", audit_id);
   Ok(())
@@ -1521,6 +1530,198 @@ pub async fn build_functional_properties(
   Ok(())
 }
 
+/// For every non-pure subject in every in-scope, feature-linked function or
+/// modifier, generate a list of **conditions** — purpose-driven observations
+/// about the subject's interaction surface that the threats step (step 7)
+/// will reason from. One LLM call per function (mirrors step 5's
+/// per-function granularity); one A-prefixed `ConditionTopic` per
+/// observation (subjects typically produce 1–8). Requires step 5 output:
+/// the renderer inlines `functional_purpose` and `placement_rationale` on
+/// each non-pure subject so the LLM grounds conditions in purpose +
+/// placement. If step 5 produced nothing, this step skips cleanly.
+#[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
+pub async fn build_conditions(
+  state: &PipelineState,
+  audit_id: &str,
+) -> Result<(), PipelineError> {
+  use crate::collaborator::agent::{context, function_dag};
+
+  // Clear any prior ConditionTopic entries so re-runs don't accumulate
+  // stale generations. Sibling FunctionalPurposeTopic /
+  // PlacementRationaleTopic entries are preserved — they're outputs of
+  // step 5, which this step depends on.
+  {
+    let mut ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data = ctx.get_audit_mut(audit_id).ok_or_else(|| {
+      PipelineError::AuditNotFound {
+        audit_id: audit_id.to_string(),
+      }
+    })?;
+    audit_data.topic_metadata.retain(|_, m| {
+      !matches!(m, domain::TopicMetadata::ConditionTopic { .. })
+    });
+    domain::rebuild_feature_context(audit_data);
+
+    // Conditions are downstream of step 5: every condition is grounded in
+    // a non-pure subject's functional purpose. If step 5 produced nothing
+    // there is nothing to ground against — exit cleanly without spawning
+    // any LLM calls.
+    if audit_data.subject_purposes.is_empty() {
+      tracing::info!(
+        "No functional purposes found, skipping condition generation"
+      );
+      return Ok(());
+    }
+  }
+
+  // Reuse the DAG batches from behavior extraction to enumerate members
+  // in DAG-respecting order, then iterate each batch's members flat —
+  // step 6 is per-function, like step 5.
+  let batches = {
+    let ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data =
+      ctx
+        .get_audit(audit_id)
+        .ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
+    function_dag::build_batches(audit_data)
+  };
+
+  if batches.is_empty() {
+    tracing::info!(
+      "No in-scope functions found, skipping condition generation"
+    );
+    return Ok(());
+  }
+
+  // Render every eligible member up front under a single lock acquisition,
+  // counting featureless members for the reconciliation-gap report.
+  // Members without eligible subjects (no feature link, or no non-pure
+  // subjects) are dropped here so they don't take a parallelism slot.
+  let mut rendered_members: Vec<context::BatchForExtraction> = Vec::new();
+  let mut total_skipped_no_feature: usize = 0;
+  {
+    let ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data =
+      ctx
+        .get_audit(audit_id)
+        .ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
+    for batch in &batches {
+      for member in &batch.members {
+        if !context::member_has_feature_link(member, audit_data) {
+          total_skipped_no_feature += 1;
+          continue;
+        }
+        if let Some(rendered) =
+          context::render_batch_for_extraction(&[*member], audit_data)
+        {
+          if rendered.non_pure_subjects.is_empty() {
+            continue;
+          }
+          rendered_members.push(rendered);
+        }
+      }
+    }
+  }
+
+  let total_members = rendered_members.len();
+  tracing::info!(
+    "Generating conditions for {} member(s) (per-function, in parallel)",
+    total_members
+  );
+
+  // Per-member calls have no inter-member dependencies — each generates
+  // its own conditions from already-committed feature, behavior, and
+  // purpose+placement context. Spawn all LLM calls concurrently.
+  let mut handles = Vec::new();
+  for rendered in rendered_members {
+    handles.push(tokio::spawn(async move {
+      let result =
+        task::extract_conditions_from_batch(&rendered.json, &rendered.label)
+          .await;
+      (rendered.label, result)
+    }));
+  }
+
+  let mut all_entries: Vec<task::ParsedSubjectConditions> = Vec::new();
+  for handle in handles {
+    match handle.await {
+      Ok((_label, Ok(parsed))) => all_entries.extend(parsed.entries),
+      Ok((label, Err(e))) => tracing::error!(
+        "extract_conditions_from_batch failed for {}: {}",
+        label,
+        e
+      ),
+      Err(e) => {
+        tracing::error!("extract_conditions_from_batch panicked: {}", e)
+      }
+    }
+  }
+
+  let total_subjects = all_entries.len();
+  let total_conditions: usize =
+    all_entries.iter().map(|e| e.conditions.len()).sum();
+  {
+    let mut ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data = ctx.get_audit_mut(audit_id).ok_or_else(|| {
+      PipelineError::AuditNotFound {
+        audit_id: audit_id.to_string(),
+      }
+    })?;
+    for entry in all_entries {
+      for cond in entry.conditions {
+        let cond_topic = topic::new_adversarial_property_topic(
+          ids::allocate_adversarial_property_id(),
+        );
+        audit_data.topic_metadata.insert(
+          cond_topic,
+          domain::TopicMetadata::ConditionTopic {
+            topic: cond_topic,
+            description: cond.description,
+            subject_topic: entry.subject_topic,
+            kind: cond.kind,
+            evidence_topics: cond.evidence_topics,
+            author: Author::System,
+            created_at: None,
+          },
+        );
+      }
+    }
+    domain::rebuild_feature_context(audit_data);
+  }
+
+  if total_skipped_no_feature > 0 {
+    tracing::warn!(
+      "Skipped {} member(s) with no feature link \u{2014} reconciliation gap",
+      total_skipped_no_feature
+    );
+  }
+  tracing::info!(
+    "Completed condition generation: {} conditions across {} subject(s) in \
+     {} member(s)",
+    total_conditions,
+    total_subjects,
+    total_members
+  );
+
+  Ok(())
+}
+
 #[cfg(test)]
 mod merge_condensed_entry_tests {
   use super::*;
@@ -1618,5 +1819,3 @@ mod merge_condensed_entry_tests {
     assert_eq!(merged.match_source, MatchSource::Mechanical);
   }
 }
-
-

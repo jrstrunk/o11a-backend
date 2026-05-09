@@ -1500,13 +1500,11 @@ fn render_solidity_ast_snippet(
     }
   }
 
-  // Inline functional purpose and placement rationale on non-pure subject
-  // nodes when previous pipeline steps have produced them. Field
-  // availability is data-flow driven: step 5 writes
-  // `subject_purposes` / `subject_placements`. The conditions inline
-  // injection lands in Phase 3 of the conditions build plan once
-  // `audit_data.subject_conditions` exists; the hook is wired here so
-  // that addition is local.
+  // Inline functional purpose, placement rationale, and conditions on
+  // non-pure subject nodes when previous pipeline steps have produced
+  // them. Field availability is data-flow driven: each lookup is gated
+  // on presence in `audit_data`, so step 6's input naturally carries
+  // step 5's output and step 7+'s input naturally carries step 6's.
   if is_non_pure {
     if let Some(p_topic) = audit_data.subject_purposes.get(&topic)
       && let Some(TopicMetadata::FunctionalPurposeTopic { description, .. }) =
@@ -1521,8 +1519,34 @@ fn render_solidity_ast_snippet(
     {
       obj["placement_rationale"] = json!(description);
     }
-    // TODO (Phase 3, conditions build): inline `conditions` from
-    // `audit_data.subject_conditions` once that field exists.
+    // Inline conditions for this non-pure subject from the reverse index.
+    if let Some(cond_topics) = audit_data.subject_conditions.get(&topic) {
+      let conditions: Vec<serde_json::Value> = cond_topics
+        .iter()
+        .filter_map(|ct| {
+          if let Some(TopicMetadata::ConditionTopic {
+            topic: ct_id,
+            description,
+            kind,
+            evidence_topics,
+            ..
+          }) = audit_data.topic_metadata.get(ct)
+          {
+            Some(json!({
+              "topic": ct_id.id(),
+              "description": description,
+              "kind": kind,
+              "evidence_topics": evidence_topics.iter().map(|t| t.id()).collect::<Vec<_>>(),
+            }))
+          } else {
+            None
+          }
+        })
+        .collect();
+      if !conditions.is_empty() {
+        obj["conditions"] = json!(conditions);
+      }
+    }
   }
   obj
 }
@@ -7102,6 +7126,352 @@ mod batch_render_integration_tests {
       ident.get("semantic").is_none(),
       "identifier referencing a declaration without a semantic must not \
        carry an inline `semantic` field"
+    );
+  }
+
+  /// Recurse into `v` and find the first node whose `id` matches
+  /// `target_id`, returning its `conditions` array (if any) as a
+  /// `Vec<serde_json::Value>`.
+  fn find_conditions_inline(
+    v: &serde_json::Value,
+    target_id: &str,
+  ) -> Option<Vec<serde_json::Value>> {
+    match v {
+      serde_json::Value::Object(map) => {
+        if map.get("id").and_then(|v| v.as_str()) == Some(target_id)
+          && let Some(arr) = map.get("conditions")
+        {
+          return arr.as_array().cloned();
+        }
+        map
+          .values()
+          .find_map(|v| find_conditions_inline(v, target_id))
+      }
+      serde_json::Value::Array(arr) => arr
+        .iter()
+        .find_map(|v| find_conditions_inline(v, target_id)),
+      _ => None,
+    }
+  }
+
+  #[test]
+  fn render_inlines_conditions_on_non_pure_subjects() {
+    // Non-pure subject with ConditionTopic entries in subject_conditions
+    // must carry inline `conditions` array on the rendered node.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+
+    // Two conditions on the same subject.
+    let cond_a1 = topic::new_adversarial_property_topic(100);
+    let cond_a2 = topic::new_adversarial_property_topic(101);
+    let evidence = vec![topic::new_node_topic(&200)];
+    audit.topic_metadata.insert(
+      cond_a1,
+      TopicMetadata::ConditionTopic {
+        topic: cond_a1,
+        description: "caller can front-run the state read".to_string(),
+        subject_topic: assignment_topic,
+        kind: domain::ConditionKind::Manipulability,
+        evidence_topics: vec![],
+        author: crate::collaborator::models::Author::System,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      cond_a2,
+      TopicMetadata::ConditionTopic {
+        topic: cond_a2,
+        description: "stale balance used after concurrent withdrawal"
+          .to_string(),
+        subject_topic: assignment_topic,
+        kind: domain::ConditionKind::Staleness,
+        evidence_topics: evidence.clone(),
+        author: crate::collaborator::models::Author::System,
+        created_at: None,
+      },
+    );
+    // Populate the reverse index manually (normally rebuild_feature_context
+    // does this, but we're testing the renderer, not rebuild).
+    audit
+      .subject_conditions
+      .insert(assignment_topic, vec![cond_a1, cond_a2]);
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    let conditions = find_conditions_inline(&value, &assignment_topic.id())
+      .expect("non-pure subject must carry inline conditions");
+    assert_eq!(conditions.len(), 2);
+
+    // Verify first condition shape
+    let c1 = &conditions[0];
+    assert_eq!(c1["topic"].as_str(), Some(cond_a1.id().as_str()));
+    assert_eq!(
+      c1["description"].as_str(),
+      Some("caller can front-run the state read")
+    );
+    assert_eq!(c1["kind"].as_str(), Some("Manipulability"));
+    assert_eq!(c1["evidence_topics"].as_array().unwrap().len(), 0);
+
+    // Verify second condition shape
+    let c2 = &conditions[1];
+    assert_eq!(c2["topic"].as_str(), Some(cond_a2.id().as_str()));
+    assert_eq!(
+      c2["description"].as_str(),
+      Some("stale balance used after concurrent withdrawal")
+    );
+    assert_eq!(c2["kind"].as_str(), Some("Staleness"));
+    let ev = c2["evidence_topics"].as_array().unwrap();
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].as_str(), Some(evidence[0].id().as_str()));
+  }
+
+  #[test]
+  fn render_omits_conditions_when_subject_conditions_is_empty() {
+    // Non-pure subject with no conditions: the `conditions` field must
+    // not appear on the rendered node.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+    // subject_conditions is empty (default) — no ConditionTopic entries.
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    assert!(
+      find_conditions_inline(&value, &assignment_topic.id()).is_none(),
+      "non-pure subject without conditions must not carry inline `conditions`"
+    );
+  }
+
+  #[test]
+  fn render_conditions_gracefully_handles_orphan_index_entry() {
+    // If subject_conditions has an entry pointing at a topic that is
+    // missing from topic_metadata (e.g., after a partial rollback), the
+    // renderer should skip it without panicking. If all entries are
+    // orphans, the `conditions` field must be omitted entirely.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+    // Orphan: topic exists in subject_conditions but not in topic_metadata
+    let orphan_cond = topic::new_adversarial_property_topic(999);
+    audit
+      .subject_conditions
+      .insert(assignment_topic, vec![orphan_cond]);
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    // Orphan entry is filtered out; with no valid conditions left,
+    // the field must be absent.
+    assert!(
+      find_conditions_inline(&value, &assignment_topic.id()).is_none(),
+      "orphan condition topic in subject_conditions must not produce a conditions array"
+    );
+  }
+
+  #[test]
+  fn render_conditions_mixed_valid_and_orphan_only_emits_valid() {
+    // subject_conditions has both a valid ConditionTopic and an orphan.
+    // Only the valid one should appear in the output.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+
+    // Valid condition
+    let valid_cond = topic::new_adversarial_property_topic(100);
+    audit.topic_metadata.insert(
+      valid_cond,
+      TopicMetadata::ConditionTopic {
+        topic: valid_cond,
+        description: "valid observation".to_string(),
+        subject_topic: assignment_topic,
+        kind: domain::ConditionKind::Reachability,
+        evidence_topics: vec![],
+        author: crate::collaborator::models::Author::System,
+        created_at: None,
+      },
+    );
+    // Orphan — in subject_conditions but not in topic_metadata
+    let orphan_cond = topic::new_adversarial_property_topic(999);
+    audit
+      .subject_conditions
+      .insert(assignment_topic, vec![valid_cond, orphan_cond]);
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    let conditions = find_conditions_inline(&value, &assignment_topic.id())
+      .expect("valid condition should appear");
+    assert_eq!(conditions.len(), 1, "orphan must be filtered out");
+    assert_eq!(
+      conditions[0]["topic"].as_str(),
+      Some(valid_cond.id().as_str())
+    );
+    assert_eq!(
+      conditions[0]["description"].as_str(),
+      Some("valid observation")
     );
   }
 }

@@ -431,6 +431,12 @@ pub struct AuditData {
   /// Derived from `PlacementRationaleTopic.subject_topic`, rebuilt with
   /// `rebuild_feature_context`.
   pub subject_placements: BTreeMap<topic::Topic, topic::Topic>,
+  /// Reverse index: non-pure subject topic → A-prefixed condition topics.
+  /// Each subject has zero or more conditions; later writes append rather
+  /// than replace (a condition is its own topic, addressed by topic ID, so
+  /// duplicates would already be distinct topics). Derived from
+  /// `ConditionTopic.subject_topic`, rebuilt with `rebuild_feature_context`.
+  pub subject_conditions: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Impact analysis links between threats and features.
   pub threat_feature_links: Vec<ThreatFeatureLink>,
   /// Threats keyed by A-prefixed topic ID. Each belongs to one feature.
@@ -2660,6 +2666,18 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }
   }
 
+  // Rebuild subject_conditions: non-pure subject → A-prefixed condition topics
+  audit_data.subject_conditions.clear();
+  for (cond_topic, metadata) in &audit_data.topic_metadata {
+    if let TopicMetadata::ConditionTopic { subject_topic, .. } = metadata {
+      audit_data
+        .subject_conditions
+        .entry(*subject_topic)
+        .or_default()
+        .push(*cond_topic);
+    }
+  }
+
   // Build reverse index: doc_topic -> [requirement_topics]
   let mut doc_to_requirements: HashMap<topic::Topic, Vec<topic::Topic>> =
     HashMap::new();
@@ -3115,6 +3133,7 @@ pub fn new_audit_data(
     declaration_semantics: BTreeMap::new(),
     subject_purposes: BTreeMap::new(),
     subject_placements: BTreeMap::new(),
+    subject_conditions: BTreeMap::new(),
     threat_feature_links: Vec::new(),
     threats: BTreeMap::new(),
     invariants: BTreeMap::new(),
@@ -3430,7 +3449,10 @@ mod tests {
     let json = serde_json::to_string(&metadata).unwrap();
     let back: TopicMetadata = serde_json::from_str(&json).unwrap();
     assert_eq!(back.topic(), &cond_topic);
-    assert_eq!(back.description(), Some("Caller can front-run the state read."));
+    assert_eq!(
+      back.description(),
+      Some("Caller can front-run the state read.")
+    );
     assert_eq!(back.target_topic(), Some(&subject_topic));
     assert_eq!(back.author(), Some(Author::AgentLarge));
     assert!(back.created_at().is_none());
@@ -3466,5 +3488,127 @@ mod tests {
       assert_eq!(*kind, ConditionKind::Manipulability);
       assert_eq!(*evidence_topics, evidence);
     }
+  }
+
+  #[test]
+  fn rebuild_feature_context_populates_subject_conditions() {
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&10);
+    let subject_b = topic::new_node_topic(&20);
+
+    // Two conditions for subject_a, one for subject_b.
+    let cond_a1 = topic::new_adversarial_property_topic(1);
+    let cond_a2 = topic::new_adversarial_property_topic(2);
+    let cond_b1 = topic::new_adversarial_property_topic(3);
+
+    audit.topic_metadata.insert(
+      cond_a1,
+      TopicMetadata::ConditionTopic {
+        topic: cond_a1,
+        description: "first observation on a".to_string(),
+        subject_topic: subject_a,
+        kind: ConditionKind::Reachability,
+        evidence_topics: vec![],
+        author: Author::System,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      cond_a2,
+      TopicMetadata::ConditionTopic {
+        topic: cond_a2,
+        description: "second observation on a".to_string(),
+        subject_topic: subject_a,
+        kind: ConditionKind::Authorization,
+        evidence_topics: vec![topic::new_node_topic(&99)],
+        author: Author::System,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      cond_b1,
+      TopicMetadata::ConditionTopic {
+        topic: cond_b1,
+        description: "observation on b".to_string(),
+        subject_topic: subject_b,
+        kind: ConditionKind::Staleness,
+        evidence_topics: vec![],
+        author: Author::System,
+        created_at: None,
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+
+    // subject_a has two conditions
+    let a_conds = audit
+      .subject_conditions
+      .get(&subject_a)
+      .expect("subject_a should have conditions");
+    assert_eq!(a_conds.len(), 2);
+    assert!(a_conds.contains(&cond_a1));
+    assert!(a_conds.contains(&cond_a2));
+
+    // subject_b has one condition
+    let b_conds = audit
+      .subject_conditions
+      .get(&subject_b)
+      .expect("subject_b should have conditions");
+    assert_eq!(b_conds.len(), 1);
+    assert_eq!(b_conds[0], cond_b1);
+
+    // A subject with no conditions is absent from the index
+    let subject_c = topic::new_node_topic(&30);
+    assert!(!audit.subject_conditions.contains_key(&subject_c));
+  }
+
+  #[test]
+  fn rebuild_feature_context_clears_subject_conditions_before_rebuilding() {
+    // Calling rebuild_feature_context twice must not accumulate stale
+    // entries — the index is always rebuilt from scratch.
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&10);
+    let cond_a1 = topic::new_adversarial_property_topic(1);
+    audit.topic_metadata.insert(
+      cond_a1,
+      TopicMetadata::ConditionTopic {
+        topic: cond_a1,
+        description: "observation".to_string(),
+        subject_topic: subject_a,
+        kind: ConditionKind::Reachability,
+        evidence_topics: vec![],
+        author: Author::System,
+        created_at: None,
+      },
+    );
+
+    // First rebuild
+    rebuild_feature_context(&mut audit);
+    assert_eq!(
+      audit.subject_conditions.get(&subject_a).map(|v| v.len()),
+      Some(1)
+    );
+
+    // Remove the condition topic and rebuild — old entry must be gone
+    audit.topic_metadata.remove(&cond_a1);
+    rebuild_feature_context(&mut audit);
+    assert!(
+      !audit.subject_conditions.contains_key(&subject_a),
+      "subject_conditions must be cleared before rebuild; stale entry from previous rebuild should be gone"
+    );
+  }
+
+  #[test]
+  fn rebuild_feature_context_with_no_conditions_yields_empty_index() {
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    rebuild_feature_context(&mut audit);
+    assert!(
+      audit.subject_conditions.is_empty(),
+      "no ConditionTopic entries means empty subject_conditions"
+    );
   }
 }
