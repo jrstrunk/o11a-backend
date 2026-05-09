@@ -746,16 +746,29 @@ fn render_solidity_ast_snippet(
         "expression": recurse(expression),
         "arguments": arguments.iter().map(&recurse).collect::<Vec<_>>(),
       });
-      // Inline callee behaviors at the call site if the callee
-      // has behaviors.
+      // Inline callee data at the call site, when the callee can be
+      // statically resolved. Each field is omitted when its underlying
+      // list is empty so the rendered AST stays compact for calls
+      // that propagate nothing of interest.
       if let Some(callee_topic) = resolve_callee_topic(expression, audit_data) {
         let behaviors = crate::collaborator::agent::function_dag::behaviors_of(
           &callee_topic,
           audit_data,
         );
-
         if !behaviors.is_empty() {
           o["callee_behaviors"] = json!(behaviors);
+        }
+        let (callee_reads, callee_writes) =
+          collect_member_state_io(&callee_topic, audit_data);
+        if !callee_reads.is_empty() {
+          o["callee_state_reads"] = json!(callee_reads);
+        }
+        if !callee_writes.is_empty() {
+          o["callee_state_writes"] = json!(callee_writes);
+        }
+        let callee_reverts = collect_member_reverts(&callee_topic, audit_data);
+        if !callee_reverts.is_empty() {
+          o["callee_reverts"] = json!(callee_reverts);
         }
       }
       o
@@ -2557,6 +2570,16 @@ pub struct BatchForExtraction {
 ///   operand in both arrays.
 /// - `state_writes` — array of state-variable topic IDs mutated by this
 ///   function (sourced from `FunctionModProperties.mutations`).
+/// - `reverts` — array of `{ topic, kind, name?, message? }` for every
+///   `require` / `revert` statement directly inside this member.
+///   `kind` is `"require"` or `"revert"`. `name` is set when the
+///   revert names a custom error (`revert MyError(...)`); `message`
+///   is set when the call passes a string literal (`require(cond,
+///   "msg")` or bare `revert("msg")`). Sourced from
+///   `FunctionModProperties.reverts`. The same `{ topic, kind, name?,
+///   message? }` shape is also stamped inline as `callee_reverts` on
+///   `FunctionCall` AST nodes whose callee is statically resolvable
+///   (see `render_solidity_ast_snippet`).
 /// - `features` — array of all features whose behaviors include any of
 ///   this member's behaviors. Requirements deduped across features.
 ///   The array is empty before reconciliation has run (step 3) or for
@@ -2569,9 +2592,11 @@ pub struct BatchForExtraction {
 ///
 /// Inline metadata is also stamped onto reference nodes inside the
 /// member AST: `semantic` for any node with a `referenced_declaration`,
-/// `callee_behaviors` for `FunctionCall` nodes, and
-/// `functional_purpose` / `placement_rationale` / `conditions` on
-/// non-pure subject nodes (see `render_solidity_ast_snippet`).
+/// `callee_behaviors` / `callee_state_reads` / `callee_state_writes` /
+/// `callee_reverts` for `FunctionCall` nodes whose callee is
+/// statically resolvable, and `functional_purpose` /
+/// `placement_rationale` / `conditions` on non-pure subject nodes
+/// (see `render_solidity_ast_snippet`).
 ///
 /// Returns `None` if no member produced a renderable object (every
 /// member was unresolvable, lacked a feature, or had no non-pure
@@ -2679,6 +2704,7 @@ fn render_member_for_batch(
   let visibility = lookup_member_visibility(member, audit_data);
   let modifiers = collect_member_modifiers(node, audit_data);
   let (state_reads, state_writes) = collect_member_state_io(member, audit_data);
+  let reverts = collect_member_reverts(member, audit_data);
 
   let mut obj = json!({
     "topic": member.id(),
@@ -2688,6 +2714,7 @@ fn render_member_for_batch(
     "modifiers": modifiers,
     "state_reads": state_reads,
     "state_writes": state_writes,
+    "reverts": reverts,
     "definition": definition,
     "semantics": semantics,
     "called_function_behaviors": called_behaviors,
@@ -2797,12 +2824,12 @@ fn collect_member_state_io(
   let mut state_writes: Vec<String> = Vec::new();
   if let Some(props) = audit_data.function_properties.get(member) {
     let (reads, mutations) = match props {
-      crate::domain::FunctionModProperties::FunctionProperties {
+      domain::FunctionModProperties::FunctionProperties {
         reads,
         mutations,
         ..
       }
-      | crate::domain::FunctionModProperties::ModifierProperties {
+      | domain::FunctionModProperties::ModifierProperties {
         reads,
         mutations,
         ..
@@ -2828,6 +2855,100 @@ fn collect_member_state_io(
     }
   }
   (state_reads, state_writes)
+}
+
+/// Render `FunctionModProperties.reverts` for a function/modifier as a
+/// JSON array. Each entry is `{ topic, kind, name?, message? }` where
+///
+/// - `topic` is the require/revert statement node (matches an `id` in
+///   the rendered AST snippet so the LLM can locate the source site);
+/// - `kind` is `"require"` or `"revert"`;
+/// - `name` is the custom error's identifier when the revert names
+///   one (`revert MyError(args)` → `"MyError"`), looked up via
+///   `topic_metadata`;
+/// - `message` is the literal string passed to `require(cond, "msg")`
+///   or bare `revert("msg")`, extracted from the call's argument
+///   list. Hex string literals are surfaced verbatim.
+///
+/// Returns an empty Vec for non-function/modifier members or for
+/// members whose `FunctionModProperties` has no reverts.
+fn collect_member_reverts(
+  member: &topic::Topic,
+  audit_data: &AuditData,
+) -> Vec<serde_json::Value> {
+  let Some(props) = audit_data.function_properties.get(member) else {
+    return Vec::new();
+  };
+  let reverts = match props {
+    domain::FunctionModProperties::FunctionProperties { reverts, .. }
+    | domain::FunctionModProperties::ModifierProperties { reverts, .. } => {
+      reverts
+    }
+  };
+  reverts
+    .iter()
+    .map(|info| revert_info_to_json(info, audit_data))
+    .collect()
+}
+
+/// Convert a single `RevertInfo` to its JSON envelope shape. See
+/// `collect_member_reverts` for the field semantics.
+fn revert_info_to_json(
+  info: &domain::RevertInfo,
+  audit_data: &AuditData,
+) -> serde_json::Value {
+  let kind = match info.kind {
+    domain::RevertConstraintKind::Require => "require",
+    domain::RevertConstraintKind::Revert => "revert",
+  };
+  let mut obj = json!({
+    "topic": info.topic.id(),
+    "kind": kind,
+  });
+  if let Some(error_topic) = info.error_topic.as_ref() {
+    if let Some(name) = audit_data
+      .topic_metadata
+      .get(error_topic)
+      .and_then(|md| md.name())
+    {
+      obj["name"] = json!(name);
+    }
+  } else if let Some(message) = extract_revert_message(info, audit_data) {
+    obj["message"] = json!(message);
+  }
+  obj
+}
+
+/// For a `require(cond, "msg")` or bare `revert("msg")` whose
+/// `RevertInfo.topic` points at the `FunctionCall` AST node, pull the
+/// string literal out of the argument list. Returns `None` when the
+/// AST node isn't a recognised call, when the message argument is
+/// missing, or when the argument isn't a string/hex-string literal.
+fn extract_revert_message(
+  info: &domain::RevertInfo,
+  audit_data: &AuditData,
+) -> Option<String> {
+  let Some(Node::Solidity(ASTNode::FunctionCall { arguments, .. })) =
+    audit_data.nodes.get(&info.topic)
+  else {
+    return None;
+  };
+  let arg_index = match info.kind {
+    domain::RevertConstraintKind::Require => 1,
+    domain::RevertConstraintKind::Revert => 0,
+  };
+  let arg = arguments.get(arg_index)?;
+  let resolved = arg.resolve(&audit_data.nodes);
+  match resolved {
+    ASTNode::Literal {
+      kind:
+        crate::solidity::ast::LiteralKind::String
+        | crate::solidity::ast::LiteralKind::HexString,
+      value,
+      ..
+    } => value.clone(),
+    _ => None,
+  }
 }
 
 /// Collect a flat map of declaration topic → {name, semantic} for every
@@ -7496,6 +7617,493 @@ mod batch_render_integration_tests {
     assert_eq!(
       conditions[0]["description"].as_str(),
       Some("valid assertion")
+    );
+  }
+
+  // =====================================================================
+  // Reverts (envelope) and inline callee data on FunctionCall nodes
+  // =====================================================================
+
+  fn make_string_literal(node_id: i32, value: &str) -> ASTNode {
+    ASTNode::Literal {
+      node_id,
+      src_location: loc(),
+      hex_value: String::new(),
+      kind: crate::solidity::ast::LiteralKind::String,
+      type_descriptions: crate::solidity::ast::TypeDescriptions {
+        type_identifier: String::new(),
+        type_string: String::new(),
+      },
+      value: Some(value.to_string()),
+    }
+  }
+
+  fn make_identifier_node(node_id: i32, name: &str, ref_decl: i32) -> ASTNode {
+    ASTNode::Identifier {
+      node_id,
+      src_location: loc(),
+      name: name.to_string(),
+      overloaded_declarations: vec![],
+      referenced_declaration: ref_decl,
+    }
+  }
+
+  fn make_function_call_node(
+    node_id: i32,
+    expression: ASTNode,
+    arguments: Vec<ASTNode>,
+  ) -> ASTNode {
+    ASTNode::FunctionCall {
+      node_id,
+      src_location: loc(),
+      arguments,
+      try_call: false,
+      type_descriptions: crate::solidity::ast::TypeDescriptions {
+        type_identifier: String::new(),
+        type_string: String::new(),
+      },
+      name_locations: vec![],
+      names: vec![],
+      referenced_return_declarations: vec![],
+      call_purity: crate::domain::CallKind::NonPure,
+      expression: Box::new(expression),
+    }
+  }
+
+  /// Insert a state-variable named topic into the audit so renderer
+  /// filters keep it as a state read/write.
+  fn install_state_var(
+    audit: &mut domain::AuditData,
+    topic: topic::Topic,
+    name: &str,
+    container: domain::ProjectPath,
+    component: topic::Topic,
+  ) {
+    audit.topic_metadata.insert(
+      topic,
+      TopicMetadata::NamedTopic {
+        topic,
+        scope: domain::Scope::Component {
+          container,
+          component,
+        },
+        kind: NamedTopicKind::StateVariable(domain::VariableMutability::Mutable),
+        name: name.to_string(),
+        visibility: NamedTopicVisibility::Public,
+        is_mutable: true,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+  }
+
+  #[test]
+  fn envelope_reverts_carries_kind_name_and_message_for_each_form() {
+    // Body has three reverts:
+    //   1. require(cond, "msg")            → kind=require, message="msg"
+    //   2. revert MyError(args)            → kind=revert,  name="MyError"
+    //   3. revert("oops")                  → kind=revert,  message="oops"
+    // The envelope renders all three in `reverts`. The actual
+    // statements live inside the body via FunctionCall / Identifier
+    // sub-nodes, but `extract_revert_message` reads the args directly
+    // from `audit.nodes` keyed by the RevertInfo topic.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    // --- require(cond, "msg") ---
+    let require_call_id = 50;
+    let require_call_topic = topic::new_node_topic(&require_call_id);
+    let require_call = make_function_call_node(
+      require_call_id,
+      make_identifier_node(51, "require", 0),
+      vec![
+        make_identifier_node(52, "cond", 1000),
+        make_string_literal(53, "msg"),
+      ],
+    );
+    audit
+      .nodes
+      .insert(require_call_topic, Node::Solidity(require_call.clone()));
+
+    // --- revert MyError(args) ---
+    let revert_stmt_id = 60;
+    let revert_stmt_topic = topic::new_node_topic(&revert_stmt_id);
+    let error_decl_id = 70;
+    let error_decl_topic = topic::new_node_topic(&error_decl_id);
+    audit.topic_metadata.insert(
+      error_decl_topic,
+      TopicMetadata::NamedTopic {
+        topic: error_decl_topic,
+        scope: domain::Scope::Component {
+          container: container.clone(),
+          component,
+        },
+        kind: NamedTopicKind::Error,
+        name: "MyError".to_string(),
+        visibility: NamedTopicVisibility::Internal,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+    let revert_stmt = ASTNode::RevertStatement {
+      node_id: revert_stmt_id,
+      src_location: loc(),
+      error_call: Box::new(make_function_call_node(
+        61,
+        make_identifier_node(62, "MyError", error_decl_id),
+        vec![],
+      )),
+    };
+    audit
+      .nodes
+      .insert(revert_stmt_topic, Node::Solidity(revert_stmt.clone()));
+
+    // --- revert("oops") ---
+    let bare_revert_id = 80;
+    let bare_revert_topic = topic::new_node_topic(&bare_revert_id);
+    let bare_revert = make_function_call_node(
+      bare_revert_id,
+      make_identifier_node(81, "revert", 0),
+      vec![make_string_literal(82, "oops")],
+    );
+    audit
+      .nodes
+      .insert(bare_revert_topic, Node::Solidity(bare_revert.clone()));
+
+    let body = vec![
+      ASTNode::ExpressionStatement {
+        node_id: 40,
+        src_location: loc(),
+        expression: Box::new(require_call),
+      },
+      revert_stmt,
+      ASTNode::ExpressionStatement {
+        node_id: 41,
+        src_location: loc(),
+        expression: Box::new(bare_revert),
+      },
+    ];
+    let member = topic::new_node_topic(&100);
+    install_function(
+      &mut audit,
+      member,
+      "f",
+      container,
+      component,
+      200,
+      body,
+    );
+    audit.function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![
+          domain::RevertInfo {
+            topic: require_call_topic,
+            kind: domain::RevertConstraintKind::Require,
+            error_topic: None,
+          },
+          domain::RevertInfo {
+            topic: revert_stmt_topic,
+            kind: domain::RevertConstraintKind::Revert,
+            error_topic: Some(error_decl_topic),
+          },
+          domain::RevertInfo {
+            topic: bare_revert_topic,
+            kind: domain::RevertConstraintKind::Revert,
+            error_topic: None,
+          },
+        ],
+        calls: vec![],
+        mutations: vec![],
+        reads: vec![],
+        events_emitted: vec![],
+      },
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+    let reverts = value["subject"]["reverts"]
+      .as_array()
+      .expect("envelope carries a reverts array");
+    assert_eq!(reverts.len(), 3, "all three reverts surface; got {:?}", reverts);
+
+    assert_eq!(reverts[0]["kind"], "require");
+    assert_eq!(reverts[0]["message"], "msg");
+    assert!(reverts[0].get("name").is_none());
+
+    assert_eq!(reverts[1]["kind"], "revert");
+    assert_eq!(reverts[1]["name"], "MyError");
+    assert!(reverts[1].get("message").is_none());
+
+    assert_eq!(reverts[2]["kind"], "revert");
+    assert_eq!(reverts[2]["message"], "oops");
+    assert!(reverts[2].get("name").is_none());
+  }
+
+  #[test]
+  fn envelope_reverts_omits_message_for_bare_require_without_string() {
+    // `require(cond)` — no message argument. The renderer must emit
+    // `{topic, kind:"require"}` and nothing else.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let require_call_id = 50;
+    let require_call_topic = topic::new_node_topic(&require_call_id);
+    let require_call = make_function_call_node(
+      require_call_id,
+      make_identifier_node(51, "require", 0),
+      vec![make_identifier_node(52, "cond", 1000)],
+    );
+    audit
+      .nodes
+      .insert(require_call_topic, Node::Solidity(require_call.clone()));
+
+    let body = vec![ASTNode::ExpressionStatement {
+      node_id: 40,
+      src_location: loc(),
+      expression: Box::new(require_call),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+    audit.function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![domain::RevertInfo {
+          topic: require_call_topic,
+          kind: domain::RevertConstraintKind::Require,
+          error_topic: None,
+        }],
+        calls: vec![],
+        mutations: vec![],
+        reads: vec![],
+        events_emitted: vec![],
+      },
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+    let reverts = value["subject"]["reverts"].as_array().expect("array");
+    assert_eq!(reverts.len(), 1);
+    assert_eq!(reverts[0]["kind"], "require");
+    assert!(reverts[0].get("message").is_none());
+    assert!(reverts[0].get("name").is_none());
+  }
+
+  /// Recursively search a JSON value for the first `function_call`
+  /// object whose `id` matches `target_id`. Used to inspect inline
+  /// callee_* fields without depending on the AST shape around it.
+  fn find_function_call_node(
+    value: &serde_json::Value,
+    target_id: &str,
+  ) -> Option<serde_json::Value> {
+    match value {
+      serde_json::Value::Object(map) => {
+        if map.get("type").and_then(|v| v.as_str()) == Some("function_call")
+          && map.get("id").and_then(|v| v.as_str()) == Some(target_id)
+        {
+          return Some(serde_json::Value::Object(map.clone()));
+        }
+        map.values().find_map(|v| find_function_call_node(v, target_id))
+      }
+      serde_json::Value::Array(arr) => arr
+        .iter()
+        .find_map(|v| find_function_call_node(v, target_id)),
+      _ => None,
+    }
+  }
+
+  #[test]
+  fn render_inlines_callee_state_io_and_reverts_at_call_site() {
+    // Caller `swap` calls `_update`. `_update` reads stateA, writes
+    // stateB, and has one require revert. The FunctionCall node in
+    // the rendered definition must carry all three inline fields,
+    // mirroring the existing `callee_behaviors` pattern.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    // State variables touched by the callee.
+    let state_a = topic::new_node_topic(&10);
+    let state_b = topic::new_node_topic(&11);
+    install_state_var(
+      &mut audit,
+      state_a,
+      "stateA",
+      container.clone(),
+      component,
+    );
+    install_state_var(
+      &mut audit,
+      state_b,
+      "stateB",
+      container.clone(),
+      component,
+    );
+
+    // Callee `_update` with reverts/reads/writes set.
+    let callee = topic::new_node_topic(&50);
+    install_simple_function(
+      &mut audit,
+      callee,
+      "_update",
+      container.clone(),
+      component,
+      300,
+      vec![],
+    );
+    let require_call_id = 90;
+    let require_call_topic = topic::new_node_topic(&require_call_id);
+    let require_call = make_function_call_node(
+      require_call_id,
+      make_identifier_node(91, "require", 0),
+      vec![
+        make_identifier_node(92, "cond", 1000),
+        make_string_literal(93, "INSUFFICIENT"),
+      ],
+    );
+    audit
+      .nodes
+      .insert(require_call_topic, Node::Solidity(require_call));
+    audit.function_properties.insert(
+      callee,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![domain::RevertInfo {
+          topic: require_call_topic,
+          kind: domain::RevertConstraintKind::Require,
+          error_topic: None,
+        }],
+        calls: vec![],
+        mutations: vec![state_b],
+        reads: vec![state_a],
+        events_emitted: vec![],
+      },
+    );
+
+    // Caller body: just a call to `_update()`. The FunctionCall node
+    // gets stamped with the inline callee_* fields by the renderer.
+    let call_node_id = 60;
+    let body = vec![make_function_call_node(
+      call_node_id,
+      make_identifier_node(61, "_update", 50),
+      vec![],
+    )];
+    let caller = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, caller, "swap", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[caller], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+    let call_topic_id = topic::new_node_topic(&call_node_id).id();
+    let call = find_function_call_node(&value, &call_topic_id)
+      .expect("expected the rendered _update() FunctionCall node");
+
+    let reads = call
+      .get("callee_state_reads")
+      .and_then(|v| v.as_array())
+      .expect("callee_state_reads stamped on call site");
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0], state_a.id().as_str());
+
+    let writes = call
+      .get("callee_state_writes")
+      .and_then(|v| v.as_array())
+      .expect("callee_state_writes stamped on call site");
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0], state_b.id().as_str());
+
+    let reverts = call
+      .get("callee_reverts")
+      .and_then(|v| v.as_array())
+      .expect("callee_reverts stamped on call site");
+    assert_eq!(reverts.len(), 1);
+    assert_eq!(reverts[0]["kind"], "require");
+    assert_eq!(reverts[0]["message"], "INSUFFICIENT");
+  }
+
+  #[test]
+  fn render_omits_callee_state_io_and_reverts_when_callee_has_none() {
+    // Callee with no reads, writes, or reverts. The inline fields
+    // must be omitted from the call site so the rendered AST stays
+    // compact for calls that propagate nothing.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let callee = topic::new_node_topic(&50);
+    install_simple_function(
+      &mut audit,
+      callee,
+      "noop",
+      container.clone(),
+      component,
+      300,
+      vec![],
+    );
+    // function_properties already inserted by install_simple_function
+    // with empty reverts/reads/mutations.
+
+    let call_node_id = 60;
+    let body = vec![make_function_call_node(
+      call_node_id,
+      make_identifier_node(61, "noop", 50),
+      vec![],
+    )];
+    let caller = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, caller, "swap", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[caller], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+    let call_topic_id = topic::new_node_topic(&call_node_id).id();
+    let call = find_function_call_node(&value, &call_topic_id)
+      .expect("expected rendered FunctionCall node");
+
+    assert!(
+      call.get("callee_state_reads").is_none(),
+      "no reads → field must be absent",
+    );
+    assert!(
+      call.get("callee_state_writes").is_none(),
+      "no writes → field must be absent",
+    );
+    assert!(
+      call.get("callee_reverts").is_none(),
+      "no reverts → field must be absent",
     );
   }
 }
