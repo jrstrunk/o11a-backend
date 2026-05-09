@@ -2550,9 +2550,11 @@ pub struct BatchForExtraction {
 /// - `modifiers` — array of `{ topic, name }` for each modifier on the
 ///   function signature.
 /// - `state_reads` — array of state-variable topic IDs read by this
-///   function. **Currently always empty** because `FunctionModProperties`
-///   tracks mutations (writes) but not reads; populated when read
-///   tracking is added (TODO in `FunctionModProperties`).
+///   function (sourced from `FunctionModProperties.reads`). Pure
+///   write-only statements (`x = expr;`, `delete x;`) are excluded
+///   from this list — they appear only in `state_writes`. Compound
+///   assignments (`x += y`) and `++`/`--` correctly surface the
+///   operand in both arrays.
 /// - `state_writes` — array of state-variable topic IDs mutated by this
 ///   function (sourced from `FunctionModProperties.mutations`).
 /// - `features` — array of all features whose behaviors include any of
@@ -2643,8 +2645,12 @@ pub fn render_batch_for_extraction(
 /// Render one batch member as a JSON object with its definition,
 /// scoped semantics, called-function behaviors, signature-level facets
 /// (visibility, modifiers, state_reads, state_writes), and prior
-/// behaviors when available. Returns `None` if the member's AST node
-/// cannot be resolved or the topic is not a function/modifier.
+/// behaviors when available. `state_reads` and `state_writes` are
+/// disjoint for pure write-only statements (`x = expr;`, `delete x;`)
+/// — see `collect_member_state_io` — but compound assignments (`x +=`)
+/// and `++`/`--` correctly surface the operand in both lists. Returns
+/// `None` if the member's AST node cannot be resolved or the topic is
+/// not a function/modifier.
 ///
 /// Inline metadata (semantic / callee_behaviors / functional_purpose /
 /// placement_rationale / conditions) is injected by
@@ -2774,35 +2780,44 @@ fn collect_member_modifiers(
 
 /// Return `(state_reads, state_writes)` topic-id arrays for a member.
 ///
-/// **`state_reads` is currently always empty.** The
-/// `FunctionModProperties` shape tracks `mutations` (writes), `calls`,
-/// `reverts`, and `events_emitted`, but not state-variable reads.
-/// Adding a `reads` field is a separate refactor; this renderer emits
-/// the field as `[]` so the LLM-facing schema is stable and so a
-/// future `reads` walker can populate it without touching call sites.
-/// `state_writes` is sourced from
-/// `FunctionModProperties.mutations`.
+/// Both arrays are filtered down to declarations that look like state
+/// variables (Component-scoped NamedTopic). `state_reads` is sourced
+/// from `FunctionModProperties.reads` and `state_writes` from
+/// `FunctionModProperties.mutations`. The analyzer's first-pass
+/// walker excludes the LHS base of pure assignment and `delete` from
+/// `reads`, so write-only statements (`x = expr;`, `delete x;`)
+/// surface only in `state_writes`. Source order is preserved and
+/// duplicates are not dropped — same behavior as `state_writes`
+/// today.
 fn collect_member_state_io(
   member: &topic::Topic,
   audit_data: &AuditData,
 ) -> (Vec<String>, Vec<String>) {
-  let state_reads: Vec<String> = Vec::new();
+  let mut state_reads: Vec<String> = Vec::new();
   let mut state_writes: Vec<String> = Vec::new();
   if let Some(props) = audit_data.function_properties.get(member) {
-    let mutations = match props {
+    let (reads, mutations) = match props {
       crate::domain::FunctionModProperties::FunctionProperties {
+        reads,
         mutations,
         ..
       }
       | crate::domain::FunctionModProperties::ModifierProperties {
+        reads,
         mutations,
         ..
-      } => mutations,
+      } => (reads, mutations),
     };
+    for state_var in reads {
+      if let Some(TopicMetadata::NamedTopic {
+        kind: NamedTopicKind::StateVariable(_),
+        ..
+      }) = audit_data.topic_metadata.get(state_var)
+      {
+        state_reads.push(state_var.id());
+      }
+    }
     for state_var in mutations {
-      // Only include declarations that actually look like state
-      // variables (Component-scoped NamedTopic). This excludes any
-      // accidental locals that ended up in the mutations list.
       if let Some(TopicMetadata::NamedTopic {
         kind: NamedTopicKind::StateVariable(_),
         ..
@@ -5939,6 +5954,7 @@ mod functional_property_render_tests {
         reverts: vec![],
         calls: vec![],
         mutations: vec![state_var],
+        reads: vec![],
         events_emitted: vec![],
       },
     );
@@ -6016,6 +6032,7 @@ mod functional_property_render_tests {
         reverts: vec![],
         calls: vec![in_scope_callee, out_of_scope_callee],
         mutations: vec![],
+        reads: vec![],
         events_emitted: vec![],
       },
     );
@@ -6219,6 +6236,7 @@ mod batch_render_integration_tests {
         reverts: vec![],
         calls: vec![],
         mutations: vec![],
+        reads: vec![],
         events_emitted: vec![],
       },
     );
@@ -6351,6 +6369,7 @@ mod batch_render_integration_tests {
         reverts: vec![],
         calls: vec![],
         mutations: vec![],
+        reads: vec![],
         events_emitted: vec![],
       },
     );
@@ -6430,6 +6449,7 @@ mod batch_render_integration_tests {
         reverts: vec![],
         calls: vec![],
         mutations: vec![],
+        reads: vec![],
         events_emitted: vec![],
       },
     );

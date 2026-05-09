@@ -2288,6 +2288,15 @@ pub enum FunctionModProperties {
     reverts: Vec<RevertInfo>,
     calls: Vec<topic::Topic>,
     mutations: Vec<topic::Topic>,
+    /// Variable references whose value is consumed (read) by this
+    /// function. The LHS base of a pure assignment (`x = ...`) and of
+    /// `delete x` are excluded so write-only statements appear only
+    /// in `mutations`; compound assignments (`x +=`) and `++`/`--`
+    /// surface the operand in both. Populated alongside `mutations`
+    /// by the first-pass reference walker; consumers (e.g. the
+    /// agent-context renderer) filter to state-variable kind.
+    #[serde(default)]
+    reads: Vec<topic::Topic>,
     /// Events this function emits, sorted ascending by topic ID and
     /// deduped. Populated by the first-pass `EmitStatement` walker.
     #[serde(default)]
@@ -2297,6 +2306,11 @@ pub enum FunctionModProperties {
     reverts: Vec<RevertInfo>,
     calls: Vec<topic::Topic>,
     mutations: Vec<topic::Topic>,
+    /// Variable references whose value is consumed (read) by this
+    /// modifier. Same shape and semantics as
+    /// `FunctionProperties::reads`.
+    #[serde(default)]
+    reads: Vec<topic::Topic>,
     /// Events this modifier emits, sorted ascending by topic ID and
     /// deduped. Populated by the first-pass `EmitStatement` walker.
     #[serde(default)]
@@ -3413,17 +3427,22 @@ mod tests {
 
   #[test]
   fn function_mod_properties_events_emitted_deserializes_legacy_payload() {
-    // Payloads written before `events_emitted` was added must still
-    // deserialize, with `events_emitted = []`. Tested for both
-    // variants since they gained the field together — a serde-default
-    // regression on either is symmetric tech debt.
+    // Payloads written before `events_emitted` and `reads` were added
+    // must still deserialize, with both defaulting to `[]`. Tested for
+    // both variants since they gain optional fields together — a
+    // serde-default regression on either is symmetric tech debt.
     let legacy_function =
       r#"{"FunctionProperties":{"reverts":[],"calls":[],"mutations":[]}}"#;
     match serde_json::from_str::<FunctionModProperties>(legacy_function)
       .unwrap()
     {
-      FunctionModProperties::FunctionProperties { events_emitted, .. } => {
+      FunctionModProperties::FunctionProperties {
+        events_emitted,
+        reads,
+        ..
+      } => {
         assert!(events_emitted.is_empty());
+        assert!(reads.is_empty());
       }
       _ => panic!("expected FunctionProperties"),
     }
@@ -3433,8 +3452,13 @@ mod tests {
     match serde_json::from_str::<FunctionModProperties>(legacy_modifier)
       .unwrap()
     {
-      FunctionModProperties::ModifierProperties { events_emitted, .. } => {
+      FunctionModProperties::ModifierProperties {
+        events_emitted,
+        reads,
+        ..
+      } => {
         assert!(events_emitted.is_empty());
+        assert!(reads.is_empty());
       }
       _ => panic!("expected ModifierProperties"),
     }

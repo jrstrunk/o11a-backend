@@ -326,12 +326,14 @@ fn extract_function_property_edges(
         mutations,
         reverts,
         events_emitted,
+        ..
       }
       | FunctionModProperties::ModifierProperties {
         calls,
         mutations,
         reverts,
         events_emitted,
+        ..
       } => (calls, mutations, reverts, events_emitted),
     };
 
@@ -1444,6 +1446,7 @@ mod tests {
         reverts,
         calls,
         mutations,
+        reads: vec![],
         events_emitted: events,
       },
     );

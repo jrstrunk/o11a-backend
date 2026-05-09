@@ -171,6 +171,13 @@ pub enum FirstPassDeclaration {
     reverts: Vec<FirstPassRevert>,
     function_calls: Vec<i32>,
     variable_mutations: Vec<ReferencedNode>,
+    /// References to variable declarations whose value is consumed
+    /// (read). The LHS base of a pure assignment (`x = ...`) and of
+    /// `delete x` are deliberately excluded so the same variable does
+    /// not appear in both `variable_reads` and `variable_mutations`
+    /// for a write-only statement; compound assignments and ++/--
+    /// remain in both because they read before they write.
+    variable_reads: Vec<ReferencedNode>,
     /// Node IDs of events emitted by this function/modifier (from
     /// `EmitStatement` AST nodes). Unsorted; sort/dedup happens in
     /// second_pass.
@@ -354,6 +361,9 @@ pub enum InScopeDeclaration {
     reverts: Vec<FirstPassRevert>,
     function_calls: Vec<i32>,
     variable_mutations: Vec<ReferencedNode>,
+    /// See `FirstPassDeclaration::FunctionMod::variable_reads` for the
+    /// semantics — copied verbatim from the first-pass output.
+    variable_reads: Vec<ReferencedNode>,
     events_emitted: Vec<i32>,
   },
   Contract {
@@ -739,6 +749,7 @@ fn process_first_pass_ast_nodes(
         let mut reverts = Vec::new();
         let mut function_calls = Vec::new();
         let mut variable_mutations = Vec::new();
+        let mut variable_reads = Vec::new();
         let mut events_emitted = Vec::new();
 
         // Process entire function node to find references and reverts
@@ -749,6 +760,7 @@ fn process_first_pass_ast_nodes(
           &mut reverts,
           &mut function_calls,
           &mut variable_mutations,
+          &mut variable_reads,
           &mut events_emitted,
         );
 
@@ -763,6 +775,7 @@ fn process_first_pass_ast_nodes(
             reverts,
             function_calls,
             variable_mutations,
+            variable_reads,
             events_emitted,
           },
         );
@@ -790,6 +803,7 @@ fn process_first_pass_ast_nodes(
         let mut reverts = Vec::new();
         let mut function_calls = Vec::new();
         let mut variable_mutations = Vec::new();
+        let mut variable_reads = Vec::new();
         let mut events_emitted = Vec::new();
 
         // Process entire modifier node to find references and reverts
@@ -800,6 +814,7 @@ fn process_first_pass_ast_nodes(
           &mut reverts,
           &mut function_calls,
           &mut variable_mutations,
+          &mut variable_reads,
           &mut events_emitted,
         );
 
@@ -815,6 +830,7 @@ fn process_first_pass_ast_nodes(
             reverts,
             function_calls,
             variable_mutations,
+            variable_reads,
             events_emitted,
           },
         );
@@ -1563,6 +1579,7 @@ fn process_second_pass_nodes(
           reverts: first_pass_reverts,
           function_calls,
           variable_mutations,
+          variable_reads,
           events_emitted: first_pass_events,
           ..
         } if transitive_topic.is_none() => {
@@ -1588,6 +1605,10 @@ fn process_second_pass_nodes(
             .iter()
             .map(|ref_node| topic::new_node_topic(&ref_node.referenced_node))
             .collect();
+          let read_topics: Vec<topic::Topic> = variable_reads
+            .iter()
+            .map(|ref_node| topic::new_node_topic(&ref_node.referenced_node))
+            .collect();
           let mut event_topics: Vec<topic::Topic> = first_pass_events
             .iter()
             .map(|&id| topic::new_node_topic(&id))
@@ -1603,6 +1624,7 @@ fn process_second_pass_nodes(
                   reverts,
                   calls: call_topics,
                   mutations: mutation_topics,
+                  reads: read_topics,
                   events_emitted: event_topics,
                 },
               );
@@ -1614,6 +1636,7 @@ fn process_second_pass_nodes(
                   reverts,
                   calls: call_topics,
                   mutations: mutation_topics,
+                  reads: read_topics,
                   events_emitted: event_topics,
                 },
               );
@@ -2243,6 +2266,7 @@ fn collect_references_and_statements(
   reverts: &mut Vec<FirstPassRevert>,
   function_calls: &mut Vec<i32>,
   variable_mutations: &mut Vec<ReferencedNode>,
+  variable_reads: &mut Vec<ReferencedNode>,
   events_emitted: &mut Vec<i32>,
 ) {
   // Update current_containing_block when entering a block-like node.
@@ -2267,6 +2291,10 @@ fn collect_references_and_statements(
           statement_node: block_id,
           referenced_node: *referenced_declaration,
         });
+        variable_reads.push(ReferencedNode {
+          statement_node: block_id,
+          referenced_node: *referenced_declaration,
+        });
       }
     }
 
@@ -2277,6 +2305,10 @@ fn collect_references_and_statements(
     } => {
       if let Some(block_id) = containing_block {
         referenced_nodes.push(ReferencedNode {
+          statement_node: block_id,
+          referenced_node: *referenced_declaration,
+        });
+        variable_reads.push(ReferencedNode {
           statement_node: block_id,
           referenced_node: *referenced_declaration,
         });
@@ -2357,6 +2389,7 @@ fn collect_references_and_statements(
         reverts,
         function_calls,
         variable_mutations,
+        variable_reads,
         events_emitted,
       );
       return;
@@ -2381,28 +2414,72 @@ fn collect_references_and_statements(
         reverts,
         function_calls,
         variable_mutations,
+        variable_reads,
         events_emitted,
       );
       return;
     }
 
     // Mutations - Assignments (including compound assignments like +=, -=, etc.)
+    //
+    // For pure `=`: the LHS base is a write target only, not a read.
+    // We recurse manually: the LHS is walked through
+    // `walk_write_target_for_reads` (suppresses pushing the base
+    // declaration into `variable_reads` while still letting nested
+    // index/expression sub-trees flow as reads) and the RHS is walked
+    // normally. We then `return` to skip the default child-recursion.
+    //
+    // For compound assignments (`+=`, `-=`, etc.): the LHS IS read
+    // before being written, so we fall through to the default child
+    // walk and the LHS lands in both `variable_mutations` and
+    // `variable_reads` — matching Solidity's semantics.
     ASTNode::Assignment {
       node_id,
       left_hand_side,
+      right_hand_side,
+      operator,
       ..
     } => {
-      if let Some(referenced_declaration) =
-        extract_base_variable_reference(left_hand_side)
+      for referenced_declaration in
+        extract_base_variable_references(left_hand_side)
       {
         variable_mutations.push(ReferencedNode {
           statement_node: *node_id,
           referenced_node: referenced_declaration,
         });
       }
+      if matches!(operator, ast::AssignmentOperator::Assign) {
+        walk_write_target_for_reads(
+          left_hand_side,
+          containing_block,
+          referenced_nodes,
+          reverts,
+          function_calls,
+          variable_mutations,
+          variable_reads,
+          events_emitted,
+        );
+        collect_references_and_statements(
+          right_hand_side,
+          containing_block,
+          referenced_nodes,
+          reverts,
+          function_calls,
+          variable_mutations,
+          variable_reads,
+          events_emitted,
+        );
+        return;
+      }
     }
 
     // Mutations - Unary operations (++, --, delete)
+    //
+    // `++`/`--` read-then-write the operand, so the default child
+    // walk correctly puts the operand into both `variable_mutations`
+    // and `variable_reads`. `delete x` is a write only — the operand
+    // is walked through the write-target helper and `return`s to
+    // skip the default recursion.
     ASTNode::UnaryOperation {
       node_id,
       operator,
@@ -2422,6 +2499,19 @@ fn collect_references_and_statements(
           referenced_node: referenced_declaration,
         });
       }
+      if matches!(operator, ast::UnaryOperator::Delete) {
+        walk_write_target_for_reads(
+          sub_expression,
+          containing_block,
+          referenced_nodes,
+          reverts,
+          function_calls,
+          variable_mutations,
+          variable_reads,
+          events_emitted,
+        );
+        return;
+      }
     }
 
     _ => (),
@@ -2437,8 +2527,140 @@ fn collect_references_and_statements(
       reverts,
       function_calls,
       variable_mutations,
+      variable_reads,
       events_emitted,
     );
+  }
+}
+
+/// Walk the LHS of a pure `=` assignment (or the operand of `delete`)
+/// in a mode that preserves all bookkeeping except the read of the
+/// declared write target. Concretely, this skips pushing the leftmost
+/// base variable (Identifier / IdentifierPath) and the
+/// `referenced_declaration` of MemberAccess into `variable_reads`,
+/// while index expressions and any sub-expressions still flow through
+/// the normal walker as reads. `referenced_nodes` is unchanged from the
+/// normal walk so general reference tracking is unaffected.
+#[allow(clippy::too_many_arguments)]
+fn walk_write_target_for_reads(
+  node: &ASTNode,
+  containing_block: Option<i32>,
+  referenced_nodes: &mut Vec<ReferencedNode>,
+  reverts: &mut Vec<FirstPassRevert>,
+  function_calls: &mut Vec<i32>,
+  variable_mutations: &mut Vec<ReferencedNode>,
+  variable_reads: &mut Vec<ReferencedNode>,
+  events_emitted: &mut Vec<i32>,
+) {
+  match node {
+    ASTNode::Identifier {
+      referenced_declaration,
+      ..
+    }
+    | ASTNode::IdentifierPath {
+      referenced_declaration,
+      ..
+    } => {
+      // Base variable of the write target. Still bookkeep as a generic
+      // reference, but do NOT count as a read.
+      if let Some(block_id) = containing_block {
+        referenced_nodes.push(ReferencedNode {
+          statement_node: block_id,
+          referenced_node: *referenced_declaration,
+        });
+      }
+    }
+    ASTNode::MemberAccess {
+      referenced_declaration,
+      expression,
+      ..
+    } => {
+      // The accessed field is the write target — still a generic
+      // reference, but not a read.
+      if let (Some(block_id), Some(rd)) =
+        (containing_block, referenced_declaration)
+      {
+        referenced_nodes.push(ReferencedNode {
+          statement_node: block_id,
+          referenced_node: *rd,
+        });
+      }
+      // Recurse into the receiving expression with the same filter so
+      // chained accesses (e.g., `s.a.b = ...`) keep suppressing the
+      // base from `variable_reads`.
+      walk_write_target_for_reads(
+        expression,
+        containing_block,
+        referenced_nodes,
+        reverts,
+        function_calls,
+        variable_mutations,
+        variable_reads,
+        events_emitted,
+      );
+    }
+    ASTNode::IndexAccess {
+      base_expression,
+      index_expression,
+      ..
+    } => {
+      // The base of the index is part of the write target; the index
+      // itself IS read at evaluation time.
+      walk_write_target_for_reads(
+        base_expression,
+        containing_block,
+        referenced_nodes,
+        reverts,
+        function_calls,
+        variable_mutations,
+        variable_reads,
+        events_emitted,
+      );
+      if let Some(index) = index_expression {
+        collect_references_and_statements(
+          index,
+          containing_block,
+          referenced_nodes,
+          reverts,
+          function_calls,
+          variable_mutations,
+          variable_reads,
+          events_emitted,
+        );
+      }
+    }
+    // Tuple destructuring: `(a, b, ...) = ...`. Each component is its
+    // own write target — recurse with the same suppression so each
+    // base Identifier / IndexAccess base / MemberAccess base is kept
+    // out of `variable_reads` (and any nested index expressions still
+    // flow as reads).
+    ASTNode::TupleExpression { components, .. } => {
+      for component in components {
+        walk_write_target_for_reads(
+          component,
+          containing_block,
+          referenced_nodes,
+          reverts,
+          function_calls,
+          variable_mutations,
+          variable_reads,
+          events_emitted,
+        );
+      }
+    }
+    // Function-call / other less-common LHS forms — fall back to a
+    // normal walk so any nested expressions (e.g. arguments) still
+    // contribute references and reads.
+    _ => collect_references_and_statements(
+      node,
+      containing_block,
+      referenced_nodes,
+      reverts,
+      function_calls,
+      variable_mutations,
+      variable_reads,
+      events_emitted,
+    ),
   }
 }
 
@@ -2458,6 +2680,7 @@ fn walk_call_skipping_callee(
   reverts: &mut Vec<FirstPassRevert>,
   function_calls: &mut Vec<i32>,
   variable_mutations: &mut Vec<ReferencedNode>,
+  variable_reads: &mut Vec<ReferencedNode>,
   events_emitted: &mut Vec<i32>,
 ) {
   let ASTNode::FunctionCall {
@@ -2484,6 +2707,7 @@ fn walk_call_skipping_callee(
     reverts,
     function_calls,
     variable_mutations,
+    variable_reads,
     events_emitted,
   );
   for arg in arguments {
@@ -2494,6 +2718,7 @@ fn walk_call_skipping_callee(
       reverts,
       function_calls,
       variable_mutations,
+      variable_reads,
       events_emitted,
     );
   }
@@ -2526,6 +2751,22 @@ fn extract_referenced_declaration(expr: &ASTNode) -> Option<i32> {
 /// member access chains (e.g., someStruct.field), and index access chains
 /// (e.g., arr[i], mapping[key]).
 ///
+/// Like `extract_base_variable_reference` but flattens
+/// `TupleExpression` so each component of a tuple-destructuring write
+/// target (`(a, b) = func()`, `(a, arr[i], s.field) = ...`) yields
+/// its own base reference. Returns an empty Vec when no base can be
+/// resolved. Recursive so nested tuples (`((a, b), c) = ...`) are
+/// handled.
+fn extract_base_variable_references(node: &ASTNode) -> Vec<i32> {
+  match node {
+    ASTNode::TupleExpression { components, .. } => components
+      .iter()
+      .flat_map(extract_base_variable_references)
+      .collect(),
+    other => extract_base_variable_reference(other).into_iter().collect(),
+  }
+}
+
 /// Returns the referenced_declaration of the base variable, or None if it cannot
 /// be determined (e.g., for complex expressions or when the reference is missing).
 fn extract_base_variable_reference(node: &ASTNode) -> Option<i32> {
@@ -2757,6 +2998,7 @@ fn process_tree_shake_declarations(
       reverts,
       function_calls,
       variable_mutations,
+      variable_reads,
       events_emitted,
       ..
     } => {
@@ -2798,6 +3040,7 @@ fn process_tree_shake_declarations(
         reverts: reverts.clone(),
         function_calls: filtered_function_calls,
         variable_mutations: variable_mutations.clone(),
+        variable_reads: variable_reads.clone(),
         events_emitted: events_emitted.clone(),
       }
     }
@@ -4739,6 +4982,7 @@ mod tests {
     reverts: Vec<FirstPassRevert>,
     function_calls: Vec<i32>,
     variable_mutations: Vec<ReferencedNode>,
+    variable_reads: Vec<ReferencedNode>,
     events_emitted: Vec<i32>,
   }
 
@@ -4751,6 +4995,7 @@ mod tests {
       reverts: Vec::new(),
       function_calls: Vec::new(),
       variable_mutations: Vec::new(),
+      variable_reads: Vec::new(),
       events_emitted: Vec::new(),
     };
     collect_references_and_statements(
@@ -4760,6 +5005,7 @@ mod tests {
       &mut out.reverts,
       &mut out.function_calls,
       &mut out.variable_mutations,
+      &mut out.variable_reads,
       &mut out.events_emitted,
     );
     out
@@ -5103,6 +5349,310 @@ mod tests {
     assert_eq!(reverts.len(), 2);
     assert_eq!(reverts[0].error_node, Some(100));
     assert_eq!(reverts[1].error_node, Some(200));
+  }
+
+  // =========================================================================
+  // variable_reads Tests
+  //
+  // These lock in the per-ref-site dedup contract for `variable_reads`:
+  // one push per AST reference site (no double-pushing), but two
+  // distinct sites of the same declaration produce two entries.
+  // They also pin the suppression of the LHS base for pure `=` and
+  // `delete`, and the read-then-write behavior of compound assignment
+  // and `++`/`--`.
+  // =========================================================================
+
+  fn make_assign(
+    node_id: i32,
+    lhs: ASTNode,
+    rhs: ASTNode,
+    operator: ast::AssignmentOperator,
+  ) -> ASTNode {
+    ASTNode::Assignment {
+      node_id,
+      src_location: dummy_src_location(),
+      left_hand_side: Box::new(lhs),
+      operator,
+      right_hand_side: Box::new(rhs),
+    }
+  }
+
+  #[test]
+  fn variable_reads_pushes_once_per_ref_site() {
+    // A bare identifier read records one entry in variable_reads.
+    let id = make_identifier(2, "x", 99);
+    let body = make_block(1, vec![id]);
+    let out = run_visitor_full(&body, Some(1));
+    let reads: Vec<i32> =
+      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    assert_eq!(reads, vec![99]);
+  }
+
+  #[test]
+  fn variable_reads_two_distinct_sites_produce_two_entries() {
+    // The walker does not implicitly dedup — it must record one entry
+    // per reference site. `x` referenced twice must yield two entries.
+    let body = make_block(
+      1,
+      vec![
+        make_identifier(2, "x", 99),
+        make_identifier(3, "x", 99),
+      ],
+    );
+    let out = run_visitor_full(&body, Some(1));
+    let xs: Vec<i32> = out
+      .variable_reads
+      .iter()
+      .map(|r| r.referenced_node)
+      .filter(|&id| id == 99)
+      .collect();
+    assert_eq!(xs, vec![99, 99]);
+  }
+
+  #[test]
+  fn variable_reads_suppresses_lhs_base_of_pure_assignment() {
+    // `x = x + 1`: only the RHS `x` is a read. The LHS base must be
+    // suppressed by walk_write_target_for_reads so the same variable
+    // isn't accidentally counted as both read and written.
+    let assign = make_assign(
+      10,
+      make_identifier(11, "x", 99),
+      make_identifier(12, "x", 99),
+      ast::AssignmentOperator::Assign,
+    );
+    let body = make_block(1, vec![assign]);
+    let out = run_visitor_full(&body, Some(1));
+    let reads: Vec<i32> = out
+      .variable_reads
+      .iter()
+      .map(|r| r.referenced_node)
+      .filter(|&id| id == 99)
+      .collect();
+    assert_eq!(reads, vec![99], "LHS x must not appear in variable_reads");
+    assert_eq!(out.variable_mutations.len(), 1);
+    assert_eq!(out.variable_mutations[0].referenced_node, 99);
+  }
+
+  #[test]
+  fn variable_reads_suppresses_delete_operand() {
+    // `delete x`: x is a write only. variable_reads must not contain
+    // x; variable_mutations must.
+    let delete = ASTNode::UnaryOperation {
+      node_id: 10,
+      src_location: dummy_src_location(),
+      operator: ast::UnaryOperator::Delete,
+      sub_expression: Box::new(make_identifier(11, "x", 99)),
+      prefix: true,
+    };
+    let body = make_block(1, vec![delete]);
+    let out = run_visitor_full(&body, Some(1));
+    assert!(
+      out
+        .variable_reads
+        .iter()
+        .all(|r| r.referenced_node != 99),
+      "delete operand must not appear in variable_reads; got {:?}",
+      out.variable_reads,
+    );
+    assert_eq!(out.variable_mutations.len(), 1);
+    assert_eq!(out.variable_mutations[0].referenced_node, 99);
+  }
+
+  #[test]
+  fn variable_reads_includes_compound_assignment_lhs() {
+    // `x += 1`: x is read AND written. variable_reads must contain x
+    // exactly once (the LHS site); variable_mutations also has x.
+    let assign = make_assign(
+      10,
+      make_identifier(11, "x", 99),
+      make_identifier(12, "y", 100),
+      ast::AssignmentOperator::AddAssign,
+    );
+    let body = make_block(1, vec![assign]);
+    let out = run_visitor_full(&body, Some(1));
+    let xs: Vec<i32> = out
+      .variable_reads
+      .iter()
+      .map(|r| r.referenced_node)
+      .filter(|&id| id == 99)
+      .collect();
+    assert_eq!(xs, vec![99], "compound `+=` LHS must be a read");
+    assert_eq!(out.variable_mutations.len(), 1);
+    assert_eq!(out.variable_mutations[0].referenced_node, 99);
+  }
+
+  fn make_tuple(node_id: i32, components: Vec<ASTNode>) -> ASTNode {
+    ASTNode::TupleExpression {
+      node_id,
+      src_location: dummy_src_location(),
+      components,
+    }
+  }
+
+  fn make_index_access(
+    node_id: i32,
+    base: ASTNode,
+    index: Option<ASTNode>,
+  ) -> ASTNode {
+    ASTNode::IndexAccess {
+      node_id,
+      src_location: dummy_src_location(),
+      base_expression: Box::new(base),
+      index_expression: index.map(Box::new),
+    }
+  }
+
+  #[test]
+  fn variable_reads_suppresses_tuple_destructuring_lhs_bases() {
+    // `(a, b) = func()`. Both `a` and `b` are write targets, so
+    // neither must appear in variable_reads. Both must appear in
+    // variable_mutations so the analyzer doesn't silently drop tuple
+    // writes.
+    let lhs = make_tuple(
+      20,
+      vec![make_identifier(21, "a", 99), make_identifier(22, "b", 100)],
+    );
+    let rhs = make_function_call(30, make_identifier(31, "func", 200));
+    let assign = make_assign(10, lhs, rhs, ast::AssignmentOperator::Assign);
+    let body = make_block(1, vec![assign]);
+    let out = run_visitor_full(&body, Some(1));
+
+    let reads: Vec<i32> =
+      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    assert!(
+      !reads.contains(&99) && !reads.contains(&100),
+      "tuple LHS bases must not appear in variable_reads; got {:?}",
+      reads,
+    );
+
+    let muts: Vec<i32> = out
+      .variable_mutations
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
+    assert!(
+      muts.contains(&99) && muts.contains(&100),
+      "both tuple LHS bases must appear in variable_mutations; got {:?}",
+      muts,
+    );
+  }
+
+  #[test]
+  fn variable_reads_in_tuple_destructuring_keeps_index_expressions_as_reads() {
+    // `(a, arr[i]) = func()`. `a` and `arr` are write targets; `i`
+    // is a normal read.
+    let element_index = make_index_access(
+      23,
+      make_identifier(24, "arr", 100),
+      Some(make_identifier(25, "i", 300)),
+    );
+    let lhs = make_tuple(20, vec![make_identifier(21, "a", 99), element_index]);
+    let rhs = make_function_call(30, make_identifier(31, "func", 200));
+    let assign = make_assign(10, lhs, rhs, ast::AssignmentOperator::Assign);
+    let body = make_block(1, vec![assign]);
+    let out = run_visitor_full(&body, Some(1));
+
+    let reads: Vec<i32> =
+      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    assert!(
+      !reads.contains(&99),
+      "`a` is a write target, must not be a read; got {:?}",
+      reads,
+    );
+    assert!(
+      !reads.contains(&100),
+      "`arr` is the IndexAccess base of a write target, must not be a \
+       read; got {:?}",
+      reads,
+    );
+    assert!(
+      reads.contains(&300),
+      "`i` is the index expression and must remain a read; got {:?}",
+      reads,
+    );
+
+    let muts: Vec<i32> = out
+      .variable_mutations
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
+    assert!(
+      muts.contains(&99) && muts.contains(&100),
+      "tuple destructuring must record both element bases as \
+       mutations; got {:?}",
+      muts,
+    );
+  }
+
+  #[test]
+  fn variable_reads_handles_nested_tuple_destructuring() {
+    // `((a, b), c) = func()`. All three bases are write targets;
+    // none must appear in variable_reads. All three must appear in
+    // variable_mutations.
+    let inner = make_tuple(
+      22,
+      vec![make_identifier(23, "a", 99), make_identifier(24, "b", 100)],
+    );
+    let lhs = make_tuple(20, vec![inner, make_identifier(21, "c", 101)]);
+    let rhs = make_function_call(30, make_identifier(31, "func", 200));
+    let assign = make_assign(10, lhs, rhs, ast::AssignmentOperator::Assign);
+    let body = make_block(1, vec![assign]);
+    let out = run_visitor_full(&body, Some(1));
+
+    let reads: Vec<i32> =
+      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    for id in [99, 100, 101] {
+      assert!(
+        !reads.contains(&id),
+        "nested tuple base {} must not be a read; got {:?}",
+        id,
+        reads,
+      );
+    }
+
+    let muts: Vec<i32> = out
+      .variable_mutations
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
+    for id in [99, 100, 101] {
+      assert!(
+        muts.contains(&id),
+        "nested tuple base {} must appear in variable_mutations; got \
+         {:?}",
+        id,
+        muts,
+      );
+    }
+  }
+
+  #[test]
+  fn variable_reads_suppresses_member_access_write_target_chain() {
+    // `s.field = 1`: neither `s` nor `field` should land in
+    // variable_reads — the whole chain is the write target.
+    let lhs = make_member_access(
+      11,
+      make_identifier(12, "s", 99),
+      "field",
+      Some(50),
+    );
+    let rhs = make_identifier(13, "ONE", 200);
+    let assign = make_assign(10, lhs, rhs, ast::AssignmentOperator::Assign);
+    let body = make_block(1, vec![assign]);
+    let out = run_visitor_full(&body, Some(1));
+    let reads: Vec<i32> =
+      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    assert!(
+      !reads.contains(&99),
+      "MemberAccess base `s` must not be a read; got {:?}",
+      reads,
+    );
+    assert!(
+      !reads.contains(&50),
+      "MemberAccess field must not be a read; got {:?}",
+      reads,
+    );
+    assert!(reads.contains(&200), "RHS still flows as a read");
   }
 
   // =========================================================================
