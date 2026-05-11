@@ -2332,15 +2332,36 @@ fn collect_references_and_statements(
       }
     }
 
-    // Function calls - check for require()/revert()
+    // Function calls. The call-target expression — the callee — is
+    // fully handled in this arm and then we `return`. Two reasons:
+    //
+    // 1. The callee is classified into `reverts` (for `require` /
+    //    bare `revert("...")`) or `function_calls` (everything else
+    //    resolvable) directly here, regardless of whether the call
+    //    expression is an Identifier, MemberAccess, IdentifierPath,
+    //    or FunctionCallOptions wrapping one of those — so external
+    //    calls like `obj.foo()` and `Lib.foo()` are captured, not
+    //    just internal `foo()`.
+    // 2. Letting the generic recursion descend into the call
+    //    expression would re-visit the Identifier / MemberAccess
+    //    arms, which push the *callee* into `variable_reads`.
+    //    Function callees are not variable reads, so we suppress that
+    //    visit and instead walk only the non-callee parts of the
+    //    expression (MemberAccess receiver, FunctionCallOptions
+    //    options, NewExpression type name) via
+    //    `walk_call_expression_receiver_parts` below.
+    //
+    // Arguments are walked here too so the early `return` doesn't
+    // drop their reference contributions.
     ASTNode::FunctionCall {
       node_id,
       expression,
+      arguments,
       referenced_return_declarations,
       try_call,
       ..
     } => {
-      // Add references to the function's return parameter declarations
+      // Return-parameter declaration references (existing behavior).
       if let Some(block_id) = containing_block {
         for &return_decl_id in referenced_return_declarations {
           referenced_nodes.push(ReferencedNode {
@@ -2350,39 +2371,88 @@ fn collect_references_and_statements(
         }
       }
 
-      if let ASTNode::Identifier {
-        name,
-        referenced_declaration,
-        ..
-      } = expression.as_ref()
+      // `require(...)` and bare `revert("...")` — both appear as a
+      // top-level Identifier callee whose name is a reserved keyword.
+      // Classified into `reverts`; arguments still walked so any
+      // references inside survive.
+      if let ASTNode::Identifier { name, .. } = expression.as_ref()
+        && (name == "require" || name == "revert")
       {
-        if name == "require" {
-          reverts.push(FirstPassRevert {
-            statement_node: *node_id,
-            kind: RevertConstraintKind::Require,
-            error_node: None,
-          });
-        } else if name == "revert" {
-          // Bare `revert("string")` — no custom error declaration.
-          reverts.push(FirstPassRevert {
-            statement_node: *node_id,
-            kind: RevertConstraintKind::Revert,
-            error_node: None,
-          });
-        } else {
-          // For other function calls, extract the function reference.
-          // `try_call` (set by the Solidity compiler on the outer
-          // FunctionCall) marks this site as the `external_call` of a
-          // `TryStatement` — reverts from the callee are caught and do
-          // not propagate, so downstream consumers (transitive-revert
-          // fold, agent-context renderer) gate propagation on this flag.
-          function_calls.push(FirstPassCall {
-            call_node: *node_id,
-            callee_node: *referenced_declaration,
-            in_try_block: *try_call,
+        reverts.push(FirstPassRevert {
+          statement_node: *node_id,
+          kind: if name == "require" {
+            RevertConstraintKind::Require
+          } else {
+            RevertConstraintKind::Revert
+          },
+          error_node: None,
+        });
+        for arg in arguments {
+          collect_references_and_statements(
+            arg,
+            containing_block,
+            referenced_nodes,
+            reverts,
+            function_calls,
+            variable_mutations,
+            variable_reads,
+            events_emitted,
+          );
+        }
+        return;
+      }
+
+      // Regular callable. `try_call` — set by the Solidity compiler on
+      // this outer FunctionCall — marks the site as the
+      // `external_call` of a `TryStatement`; reverts from the callee
+      // are caught and do not propagate. Downstream consumers
+      // (transitive-revert fold, agent-context renderer) gate
+      // propagation on this flag.
+      if let Some(callee_node) = callee_from_call_expression(expression) {
+        function_calls.push(FirstPassCall {
+          call_node: *node_id,
+          callee_node,
+          in_try_block: *try_call,
+        });
+        // Preserve the cross-reference signal: function callees still
+        // flow into `referenced_nodes`. The push is explicit because
+        // we suppress the generic recursion that would have visited
+        // the expression — that recursion also pushes to
+        // `variable_reads`, which is the bug this restructure fixes.
+        if let Some(block_id) = containing_block {
+          referenced_nodes.push(ReferencedNode {
+            statement_node: block_id,
+            referenced_node: callee_node,
           });
         }
       }
+
+      // Walk the non-callee parts of the expression (MemberAccess
+      // receiver, FunctionCallOptions options, NewExpression type
+      // name) and then the arguments.
+      walk_call_expression_receiver_parts(
+        expression,
+        containing_block,
+        referenced_nodes,
+        reverts,
+        function_calls,
+        variable_mutations,
+        variable_reads,
+        events_emitted,
+      );
+      for arg in arguments {
+        collect_references_and_statements(
+          arg,
+          containing_block,
+          referenced_nodes,
+          reverts,
+          function_calls,
+          variable_mutations,
+          variable_reads,
+          events_emitted,
+        );
+      }
+      return;
     }
 
     // RevertStatement: `revert MyError(args)` or `revert C.MyError(args)`.
@@ -2770,6 +2840,158 @@ fn extract_referenced_declaration(expr: &ASTNode) -> Option<i32> {
       ..
     } => Some(*referenced_declaration),
     _ => None,
+  }
+}
+
+/// Resolve a `FunctionCall.expression` to the callee's
+/// `referenced_declaration` node id. Returns `None` for expression
+/// kinds that are not direct callables (TypeConversion, NewExpression,
+/// or a MemberAccess whose member couldn't be resolved). For
+/// `FunctionCallOptions` the unwrapping is recursive — `obj.foo{...}()`
+/// nests a MemberAccess inside a FunctionCallOptions inside the outer
+/// FunctionCall, and the callee identity lives on the innermost shape.
+///
+/// NewExpression is intentionally not handled: `new C(...)`'s
+/// `type_name` resolves through `UserDefinedTypeName` to the contract
+/// declaration topic, not the constructor function topic that
+/// `function_properties` indexes. Capturing the contract topic in
+/// `function_calls` would muddy that field's "functions/modifiers
+/// called by this function" semantics. Constructor-call tracking is
+/// out of scope for this work — see `transitive-revert-effects.md`.
+fn callee_from_call_expression(expr: &ASTNode) -> Option<i32> {
+  match expr {
+    ASTNode::Identifier {
+      referenced_declaration,
+      ..
+    }
+    | ASTNode::IdentifierPath {
+      referenced_declaration,
+      ..
+    } => Some(*referenced_declaration),
+    ASTNode::MemberAccess {
+      referenced_declaration: Some(referenced_declaration),
+      ..
+    } => Some(*referenced_declaration),
+    ASTNode::FunctionCallOptions { expression, .. } => {
+      callee_from_call_expression(expression)
+    }
+    // TODO: constructor calls (`new C(...)`) — out of scope, see
+    // transitive-revert-effects.md. Adding NewExpression here without
+    // resolving contract→constructor would put the contract topic
+    // (not a function) into `function_calls`.
+    _ => None,
+  }
+}
+
+/// Walk only the *non-callee* children of a `FunctionCall.expression`.
+/// The callee identity itself is bookkept by the FunctionCall arm into
+/// `function_calls` and `referenced_nodes` directly; what this helper
+/// covers is everything else hanging off the expression that still
+/// carries references or reads:
+///
+/// - `MemberAccess { expression, .. }` — the receiver (e.g. `obj` in
+///   `obj.foo()`). Walked through the normal walker so it flows into
+///   `variable_reads` / `referenced_nodes` like any value expression.
+///   The MemberAccess's own `referenced_declaration` (the callee
+///   `foo`) is deliberately not re-visited — it is already in
+///   `function_calls`.
+/// - `FunctionCallOptions { expression, options, .. }` — recurse for
+///   the nested expression (typically a MemberAccess for
+///   `obj.foo{...}()`) and walk each option value
+///   (`{value: x, gas: y}`) through the normal walker so the option
+///   args contribute references.
+/// - `NewExpression { type_name, .. }` — walk the type name through
+///   the normal walker so the inner contract reference flows into
+///   `referenced_nodes`. Preserves prior behavior for `new C(...)`
+///   even though the callee itself isn't captured.
+/// - `Identifier` / `IdentifierPath` — nothing to walk. They have no
+///   sub-parts beyond the callee identifier the FunctionCall arm has
+///   already classified.
+/// - Anything else — defensively fall through to a normal walk so
+///   pathological-but-legal call shapes still contribute references.
+#[allow(clippy::too_many_arguments)]
+fn walk_call_expression_receiver_parts(
+  expr: &ASTNode,
+  containing_block: Option<i32>,
+  referenced_nodes: &mut Vec<ReferencedNode>,
+  reverts: &mut Vec<FirstPassRevert>,
+  function_calls: &mut Vec<FirstPassCall>,
+  variable_mutations: &mut Vec<ReferencedNode>,
+  variable_reads: &mut Vec<ReferencedNode>,
+  events_emitted: &mut Vec<i32>,
+) {
+  match expr {
+    ASTNode::MemberAccess { expression, .. } => {
+      collect_references_and_statements(
+        expression,
+        containing_block,
+        referenced_nodes,
+        reverts,
+        function_calls,
+        variable_mutations,
+        variable_reads,
+        events_emitted,
+      );
+    }
+    ASTNode::FunctionCallOptions {
+      expression, options, ..
+    } => {
+      walk_call_expression_receiver_parts(
+        expression,
+        containing_block,
+        referenced_nodes,
+        reverts,
+        function_calls,
+        variable_mutations,
+        variable_reads,
+        events_emitted,
+      );
+      for option in options {
+        collect_references_and_statements(
+          option,
+          containing_block,
+          referenced_nodes,
+          reverts,
+          function_calls,
+          variable_mutations,
+          variable_reads,
+          events_emitted,
+        );
+      }
+    }
+    ASTNode::NewExpression { type_name, .. } => {
+      collect_references_and_statements(
+        type_name,
+        containing_block,
+        referenced_nodes,
+        reverts,
+        function_calls,
+        variable_mutations,
+        variable_reads,
+        events_emitted,
+      );
+    }
+    ASTNode::Identifier { .. } | ASTNode::IdentifierPath { .. } => {
+      // The callee identifier itself — already classified into
+      // function_calls and referenced_nodes by the FunctionCall arm.
+      // Walking it again here would re-add to variable_reads via the
+      // Identifier arm.
+    }
+    _ => {
+      // Defensive: pathological-but-legal expression shape (e.g., a
+      // TypeConversion used as a callable). Fall back to the normal
+      // walker so any nested references survive.
+      collect_references_and_statements(
+        expr,
+        containing_block,
+        referenced_nodes,
+        reverts,
+        function_calls,
+        variable_mutations,
+        variable_reads,
+        events_emitted,
+      );
+    }
   }
 }
 
@@ -5381,6 +5603,277 @@ mod tests {
     assert_eq!(reverts.len(), 2);
     assert_eq!(reverts[0].error_node, Some(100));
     assert_eq!(reverts[1].error_node, Some(200));
+  }
+
+  // =========================================================================
+  // FunctionCall callee-shape Tests
+  //
+  // These lock in the contract that `FunctionCall.expression` is fully
+  // owned by the FunctionCall arm — every resolvable call shape
+  // (Identifier, MemberAccess, IdentifierPath, FunctionCallOptions
+  // wrapping any of those) pushes one entry into `function_calls`
+  // tagged with the site's `in_try_block` flag, and the callee never
+  // pollutes `variable_reads`. `try_call`'s wiring through
+  // `FirstPassCall.in_try_block` is verified here.
+  // =========================================================================
+
+  fn make_function_call_try(
+    node_id: i32,
+    expression: ASTNode,
+    arguments: Vec<ASTNode>,
+  ) -> ASTNode {
+    ASTNode::FunctionCall {
+      node_id,
+      src_location: dummy_src_location(),
+      arguments,
+      expression: Box::new(expression),
+      name_locations: Vec::new(),
+      names: Vec::new(),
+      try_call: true,
+      type_descriptions: ast::TypeDescriptions {
+        type_identifier: String::new(),
+        type_string: String::new(),
+      },
+      referenced_return_declarations: Vec::new(),
+      call_purity: domain::CallKind::NonPure,
+    }
+  }
+
+  fn make_function_call_options(
+    node_id: i32,
+    inner_expression: ASTNode,
+    options: Vec<ASTNode>,
+  ) -> ASTNode {
+    ASTNode::FunctionCallOptions {
+      node_id,
+      src_location: dummy_src_location(),
+      expression: Box::new(inner_expression),
+      options,
+    }
+  }
+
+  fn make_user_defined_type_name(node_id: i32, ref_decl: i32) -> ASTNode {
+    ASTNode::UserDefinedTypeName {
+      node_id,
+      src_location: dummy_src_location(),
+      // `path_node` is not consulted by the call-site walk; the inner
+      // IdentifierPath shape would normally hold name parts. A no-op
+      // placeholder (an empty IdentifierPath pointing at the same
+      // declaration) suffices for the tests in this section.
+      path_node: Box::new(make_identifier_path(node_id + 1, "C", ref_decl)),
+      referenced_declaration: ref_decl,
+    }
+  }
+
+  fn make_new_expression(node_id: i32, type_name: ASTNode) -> ASTNode {
+    ASTNode::NewExpression {
+      node_id,
+      src_location: dummy_src_location(),
+      type_name: Box::new(type_name),
+    }
+  }
+
+  #[test]
+  fn member_access_callee_lands_in_function_calls_not_variable_reads() {
+    // `obj.foo()`. Pre-fix the analyzer only captured `Identifier`
+    // callees, so `foo` was missing from `function_calls`. The
+    // generic recursion also pushed `foo` into `variable_reads` via
+    // the MemberAccess arm, which is wrong (functions are not
+    // variables — masked today by the consumer's StateVariable
+    // filter but the data is wrong). This test pins both fixes.
+    let obj = make_identifier(10, "obj", 100);
+    let member = make_member_access(11, obj, "foo", Some(200));
+    let call = make_function_call(12, member);
+    let body = make_block(1, vec![call]);
+    let out = run_visitor_full(&body, Some(1));
+
+    assert_eq!(out.function_calls.len(), 1);
+    assert_eq!(out.function_calls[0].call_node, 12);
+    assert_eq!(out.function_calls[0].callee_node, 200);
+    assert!(!out.function_calls[0].in_try_block);
+
+    let reads: Vec<i32> =
+      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    assert!(
+      !reads.contains(&200),
+      "callee `foo` must not appear in variable_reads; got {:?}",
+      reads,
+    );
+    assert!(
+      reads.contains(&100),
+      "receiver `obj` must appear in variable_reads; got {:?}",
+      reads,
+    );
+  }
+
+  #[test]
+  fn member_access_callee_on_contract_identifier_lands_in_function_calls() {
+    // `Lib.foo()` — receiver is a contract Identifier, callee is
+    // resolved via MemberAccess. `Lib` itself still flows through the
+    // normal walker so it's in `referenced_nodes`; `foo` is the
+    // callee in `function_calls`.
+    let lib = make_identifier(10, "Lib", 100);
+    let member = make_member_access(11, lib, "foo", Some(200));
+    let call = make_function_call(12, member);
+    let body = make_block(1, vec![call]);
+    let out = run_visitor_full(&body, Some(1));
+
+    assert_eq!(out.function_calls.len(), 1);
+    assert_eq!(out.function_calls[0].callee_node, 200);
+
+    let refs: Vec<i32> = out
+      .referenced_nodes
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
+    assert!(refs.contains(&100), "Lib should be referenced; got {:?}", refs);
+    assert!(refs.contains(&200), "foo should be referenced; got {:?}", refs);
+  }
+
+  #[test]
+  fn function_call_options_wrapping_member_access_lands_in_function_calls() {
+    // `obj.foo{value: x}()`. The outer FunctionCall.expression is a
+    // FunctionCallOptions whose `.expression` is the MemberAccess
+    // (obj.foo) and whose `.options` carry the option args. The
+    // callee `foo` must be in `function_calls`; the option arg `x`
+    // and receiver `obj` must flow through as reads.
+    let obj = make_identifier(10, "obj", 100);
+    let member = make_member_access(11, obj, "foo", Some(200));
+    let value_arg = make_identifier(12, "x", 300);
+    let options = make_function_call_options(13, member, vec![value_arg]);
+    let call = make_function_call(14, options);
+    let body = make_block(1, vec![call]);
+    let out = run_visitor_full(&body, Some(1));
+
+    assert_eq!(out.function_calls.len(), 1);
+    assert_eq!(out.function_calls[0].call_node, 14);
+    assert_eq!(out.function_calls[0].callee_node, 200);
+
+    let reads: Vec<i32> =
+      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    assert!(
+      !reads.contains(&200),
+      "callee `foo` must not be in variable_reads; got {:?}",
+      reads,
+    );
+    assert!(reads.contains(&100), "`obj` must be read; got {:?}", reads);
+    assert!(reads.contains(&300), "`x` must be read; got {:?}", reads);
+  }
+
+  #[test]
+  fn try_call_member_access_marks_in_try_block_true() {
+    // `try obj.foo() { ... } catch { ... }` — the Solidity compiler
+    // sets `try_call: true` on the outer FunctionCall. That flag must
+    // surface on the `FirstPassCall` entry so the transitive-revert
+    // fold can drop this edge from the propagation graph.
+    let obj = make_identifier(10, "obj", 100);
+    let member = make_member_access(11, obj, "foo", Some(200));
+    let call = make_function_call_try(12, member, vec![]);
+    let body = make_block(1, vec![call]);
+    let out = run_visitor_full(&body, Some(1));
+
+    assert_eq!(out.function_calls.len(), 1);
+    assert_eq!(out.function_calls[0].call_node, 12);
+    assert_eq!(out.function_calls[0].callee_node, 200);
+    assert!(
+      out.function_calls[0].in_try_block,
+      "try-call site must mark in_try_block=true",
+    );
+  }
+
+  #[test]
+  fn chained_calls_yield_one_entry_per_call_site() {
+    // `a.b().c()`. The outer FunctionCall calls `c` on the result of
+    // the inner FunctionCall, which calls `b` on `a`. The walker
+    // visits both FunctionCall nodes; both contribute one entry to
+    // `function_calls`.
+    let a = make_identifier(10, "a", 100);
+    let a_b = make_member_access(11, a, "b", Some(200));
+    let inner_call = make_function_call(12, a_b);
+    let inner_call_c = make_member_access(13, inner_call, "c", Some(300));
+    let outer_call = make_function_call(14, inner_call_c);
+    let body = make_block(1, vec![outer_call]);
+    let out = run_visitor_full(&body, Some(1));
+
+    let callees: Vec<i32> =
+      out.function_calls.iter().map(|c| c.callee_node).collect();
+    assert!(callees.contains(&200), "`b` must be called; got {:?}", callees);
+    assert!(callees.contains(&300), "`c` must be called; got {:?}", callees);
+    assert_eq!(out.function_calls.len(), 2);
+  }
+
+  #[test]
+  fn new_expression_does_not_appear_in_function_calls() {
+    // `new MyContract(arg)` — constructor calls are intentionally not
+    // tracked in v1 (see transitive-revert-effects.md). The
+    // NewExpression's type_name still flows through the normal walker
+    // so the contract reference contributes to `referenced_nodes`,
+    // and the argument expression flows in as a read. The callee
+    // slot stays empty — locking down the intentional gap so a
+    // future contributor sees the omission rather than silently
+    // wiring it up.
+    let type_name = make_user_defined_type_name(10, 100);
+    let new_expr = make_new_expression(12, type_name);
+    let arg = make_identifier(13, "arg", 200);
+    let call = make_function_call_with_args(14, new_expr, vec![arg]);
+    let body = make_block(1, vec![call]);
+    let out = run_visitor_full(&body, Some(1));
+
+    assert!(
+      out.function_calls.is_empty(),
+      "constructor calls are out of scope; got {:?}",
+      out.function_calls,
+    );
+
+    let refs: Vec<i32> = out
+      .referenced_nodes
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
+    assert!(
+      refs.contains(&100),
+      "contract reference must reach referenced_nodes via type_name walk; got {:?}",
+      refs,
+    );
+
+    let reads: Vec<i32> =
+      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    assert!(reads.contains(&200), "arg must be read; got {:?}", reads);
+  }
+
+  #[test]
+  fn identifier_callee_no_longer_pollutes_variable_reads() {
+    // `foo()` — internal call. Pre-fix the generic recursion into
+    // `expression` re-visited the Identifier arm and pushed `foo`
+    // into `variable_reads`. Post-fix the FunctionCall arm owns the
+    // callee classification and skips the variable_reads push.
+    let call = make_function_call(10, make_identifier(11, "foo", 100));
+    let body = make_block(1, vec![call]);
+    let out = run_visitor_full(&body, Some(1));
+
+    assert_eq!(out.function_calls.len(), 1);
+    assert_eq!(out.function_calls[0].callee_node, 100);
+
+    let reads: Vec<i32> =
+      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    assert!(
+      !reads.contains(&100),
+      "callee `foo` must not be in variable_reads; got {:?}",
+      reads,
+    );
+
+    // `foo` still in referenced_nodes — the cross-reference signal
+    // is preserved via an explicit push from the FunctionCall arm.
+    let refs: Vec<i32> = out
+      .referenced_nodes
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
+    assert!(
+      refs.contains(&100),
+      "callee `foo` must still appear in referenced_nodes; got {:?}",
+      refs,
+    );
   }
 
   // =========================================================================
