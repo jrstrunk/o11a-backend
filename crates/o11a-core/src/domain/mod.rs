@@ -215,6 +215,22 @@ pub enum RevertConstraintKind {
   Revert,
 }
 
+/// A single call site recorded on `FunctionModProperties.calls`.
+///
+/// `site` is the FunctionCall expression node; `callee` is the resolved
+/// callee declaration. `in_try_block` mirrors Solidity's `tryCall` flag
+/// — true iff this call expression is the `external_call` of a
+/// `TryStatement`, in which case reverts originating from the callee
+/// (or transitively through it) are caught by the wrapping try/catch
+/// and do not propagate into the caller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallInfo {
+  pub site: topic::Topic,
+  pub callee: topic::Topic,
+  #[serde(default)]
+  pub in_try_block: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FunctionKind {
   Constructor,
@@ -2286,7 +2302,7 @@ pub fn resolve_transitive_topic(
 pub enum FunctionModProperties {
   FunctionProperties {
     reverts: Vec<RevertInfo>,
-    calls: Vec<topic::Topic>,
+    calls: Vec<CallInfo>,
     mutations: Vec<topic::Topic>,
     /// Variable references whose value is consumed (read) by this
     /// function. The LHS base of a pure assignment (`x = ...`) and of
@@ -2304,7 +2320,7 @@ pub enum FunctionModProperties {
   },
   ModifierProperties {
     reverts: Vec<RevertInfo>,
-    calls: Vec<topic::Topic>,
+    calls: Vec<CallInfo>,
     mutations: Vec<topic::Topic>,
     /// Variable references whose value is consumed (read) by this
     /// modifier. Same shape and semantics as

@@ -139,6 +139,19 @@ pub struct FirstPassRevert {
   pub error_node: Option<i32>,
 }
 
+/// One entry per function call expression encountered by the first-pass
+/// walker. `call_node` is the FunctionCall AST node (the site);
+/// `callee_node` is its `referenced_declaration`. `in_try_block` is the
+/// Solidity `tryCall` flag — true iff this call is the `external_call`
+/// of an enclosing `TryStatement`, which means callee reverts are
+/// caught and do not propagate into the surrounding function.
+#[derive(Debug, Clone)]
+pub struct FirstPassCall {
+  pub call_node: i32,
+  pub callee_node: i32,
+  pub in_try_block: bool,
+}
+
 // ============================================================================
 // First Pass Declaration Types
 // ============================================================================
@@ -169,7 +182,7 @@ pub enum FirstPassDeclaration {
     name: String,
     referenced_nodes: Vec<ReferencedNode>,
     reverts: Vec<FirstPassRevert>,
-    function_calls: Vec<i32>,
+    function_calls: Vec<FirstPassCall>,
     variable_mutations: Vec<ReferencedNode>,
     /// References to variable declarations whose value is consumed
     /// (read). The LHS base of a pure assignment (`x = ...`) and of
@@ -359,7 +372,7 @@ pub enum InScopeDeclaration {
     name: String,
     references: Vec<ScopedReference>,
     reverts: Vec<FirstPassRevert>,
-    function_calls: Vec<i32>,
+    function_calls: Vec<FirstPassCall>,
     variable_mutations: Vec<ReferencedNode>,
     /// See `FirstPassDeclaration::FunctionMod::variable_reads` for the
     /// semantics — copied verbatim from the first-pass output.
@@ -1597,9 +1610,13 @@ fn process_second_pass_nodes(
             })
             .collect();
 
-          let call_topics: Vec<topic::Topic> = function_calls
+          let call_infos: Vec<domain::CallInfo> = function_calls
             .iter()
-            .map(|&id| topic::new_node_topic(&id))
+            .map(|fp| domain::CallInfo {
+              site: topic::new_node_topic(&fp.call_node),
+              callee: topic::new_node_topic(&fp.callee_node),
+              in_try_block: fp.in_try_block,
+            })
             .collect();
           let mutation_topics: Vec<topic::Topic> = variable_mutations
             .iter()
@@ -1622,7 +1639,7 @@ fn process_second_pass_nodes(
                 topic,
                 FunctionModProperties::FunctionProperties {
                   reverts,
-                  calls: call_topics,
+                  calls: call_infos,
                   mutations: mutation_topics,
                   reads: read_topics,
                   events_emitted: event_topics,
@@ -1634,7 +1651,7 @@ fn process_second_pass_nodes(
                 topic,
                 FunctionModProperties::ModifierProperties {
                   reverts,
-                  calls: call_topics,
+                  calls: call_infos,
                   mutations: mutation_topics,
                   reads: read_topics,
                   events_emitted: event_topics,
@@ -2264,7 +2281,7 @@ fn collect_references_and_statements(
   current_containing_block: Option<i32>,
   referenced_nodes: &mut Vec<ReferencedNode>,
   reverts: &mut Vec<FirstPassRevert>,
-  function_calls: &mut Vec<i32>,
+  function_calls: &mut Vec<FirstPassCall>,
   variable_mutations: &mut Vec<ReferencedNode>,
   variable_reads: &mut Vec<ReferencedNode>,
   events_emitted: &mut Vec<i32>,
@@ -2320,6 +2337,7 @@ fn collect_references_and_statements(
       node_id,
       expression,
       referenced_return_declarations,
+      try_call,
       ..
     } => {
       // Add references to the function's return parameter declarations
@@ -2352,8 +2370,17 @@ fn collect_references_and_statements(
             error_node: None,
           });
         } else {
-          // For other function calls, extract the function reference
-          function_calls.push(*referenced_declaration);
+          // For other function calls, extract the function reference.
+          // `try_call` (set by the Solidity compiler on the outer
+          // FunctionCall) marks this site as the `external_call` of a
+          // `TryStatement` — reverts from the callee are caught and do
+          // not propagate, so downstream consumers (transitive-revert
+          // fold, agent-context renderer) gate propagation on this flag.
+          function_calls.push(FirstPassCall {
+            call_node: *node_id,
+            callee_node: *referenced_declaration,
+            in_try_block: *try_call,
+          });
         }
       }
     }
@@ -2547,7 +2574,7 @@ fn walk_write_target_for_reads(
   containing_block: Option<i32>,
   referenced_nodes: &mut Vec<ReferencedNode>,
   reverts: &mut Vec<FirstPassRevert>,
-  function_calls: &mut Vec<i32>,
+  function_calls: &mut Vec<FirstPassCall>,
   variable_mutations: &mut Vec<ReferencedNode>,
   variable_reads: &mut Vec<ReferencedNode>,
   events_emitted: &mut Vec<i32>,
@@ -2678,7 +2705,7 @@ fn walk_call_skipping_callee(
   containing_block: Option<i32>,
   referenced_nodes: &mut Vec<ReferencedNode>,
   reverts: &mut Vec<FirstPassRevert>,
-  function_calls: &mut Vec<i32>,
+  function_calls: &mut Vec<FirstPassCall>,
   variable_mutations: &mut Vec<ReferencedNode>,
   variable_reads: &mut Vec<ReferencedNode>,
   events_emitted: &mut Vec<i32>,
@@ -3003,10 +3030,12 @@ fn process_tree_shake_declarations(
       ..
     } => {
       // Filter function calls to exclude events, errors, and modifiers
-      let filtered_function_calls = function_calls
+      let filtered_function_calls: Vec<FirstPassCall> = function_calls
         .iter()
-        .filter(|&&call_id| {
-          if let Some(called_decl) = first_pass_declarations.get(&call_id) {
+        .filter(|call| {
+          if let Some(called_decl) =
+            first_pass_declarations.get(&call.callee_node)
+          {
             !matches!(
               called_decl.declaration_kind(),
               NamedTopicKind::Event
@@ -4980,7 +5009,7 @@ mod tests {
   struct VisitorOutput {
     referenced_nodes: Vec<ReferencedNode>,
     reverts: Vec<FirstPassRevert>,
-    function_calls: Vec<i32>,
+    function_calls: Vec<FirstPassCall>,
     variable_mutations: Vec<ReferencedNode>,
     variable_reads: Vec<ReferencedNode>,
     events_emitted: Vec<i32>,
@@ -5247,7 +5276,10 @@ mod tests {
     assert_eq!(out.reverts[0].error_node, Some(200));
     // Only `doWork` lands in function_calls — A, B, C are bucketed
     // elsewhere.
-    assert_eq!(out.function_calls, vec![300]);
+    assert_eq!(out.function_calls.len(), 1);
+    assert_eq!(out.function_calls[0].callee_node, 300);
+    assert_eq!(out.function_calls[0].call_node, 30);
+    assert!(!out.function_calls[0].in_try_block);
   }
 
   #[test]

@@ -289,9 +289,16 @@ fn extract_function_property_edges(
 
     let mut covered: BTreeSet<topic::Topic> = BTreeSet::new();
 
-    for callee in calls {
-      add_directed(audit_data, graph, emitted, *src, *callee, EdgeType::Calls);
-      covered.insert(*callee);
+    for call in calls {
+      add_directed(
+        audit_data,
+        graph,
+        emitted,
+        *src,
+        call.callee,
+        EdgeType::Calls,
+      );
+      covered.insert(call.callee);
     }
     for field in mutations {
       add_directed(

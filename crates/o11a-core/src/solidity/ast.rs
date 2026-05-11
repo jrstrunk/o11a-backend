@@ -583,7 +583,6 @@ pub enum ASTNode {
     expression: Box<ASTNode>,
     name_locations: Vec<SourceLocation>,
     names: Vec<String>,
-    try_call: bool,
     type_descriptions: TypeDescriptions,
   },
   StructConstructor {
@@ -593,7 +592,6 @@ pub enum ASTNode {
     expression: Box<ASTNode>,
     name_locations: Vec<SourceLocation>,
     names: Vec<String>,
-    try_call: bool,
     type_descriptions: TypeDescriptions,
   },
   FunctionCallOptions {

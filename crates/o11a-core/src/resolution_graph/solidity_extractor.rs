@@ -341,9 +341,16 @@ fn extract_function_property_edges(
     // suppress duplicate `references` edges below.
     let mut covered: BTreeSet<topic::Topic> = BTreeSet::new();
 
-    for callee in calls {
-      add_directed(audit_data, graph, emitted, *src, *callee, EdgeType::Calls);
-      covered.insert(*callee);
+    for call in calls {
+      add_directed(
+        audit_data,
+        graph,
+        emitted,
+        *src,
+        call.callee,
+        EdgeType::Calls,
+      );
+      covered.insert(call.callee);
     }
     for state_var in mutations {
       add_directed(
@@ -1440,11 +1447,19 @@ mod tests {
     events: Vec<topic::Topic>,
     reverts: Vec<RevertInfo>,
   ) {
+    let call_infos: Vec<crate::domain::CallInfo> = calls
+      .into_iter()
+      .map(|callee| crate::domain::CallInfo {
+        site: callee,
+        callee,
+        in_try_block: false,
+      })
+      .collect();
     audit.function_properties.insert(
       function_topic,
       FunctionModProperties::FunctionProperties {
         reverts,
-        calls,
+        calls: call_infos,
         mutations,
         reads: vec![],
         events_emitted: events,

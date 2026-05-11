@@ -6151,7 +6151,18 @@ mod functional_property_render_tests {
       member,
       FunctionModProperties::FunctionProperties {
         reverts: vec![],
-        calls: vec![in_scope_callee, out_of_scope_callee],
+        calls: vec![
+          domain::CallInfo {
+            site: in_scope_callee,
+            callee: in_scope_callee,
+            in_try_block: false,
+          },
+          domain::CallInfo {
+            site: out_of_scope_callee,
+            callee: out_of_scope_callee,
+            in_try_block: false,
+          },
+        ],
         mutations: vec![],
         reads: vec![],
         events_emitted: vec![],

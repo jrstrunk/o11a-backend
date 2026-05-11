@@ -306,7 +306,6 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       expression,
       name_locations,
       names,
-      try_call,
       type_descriptions,
     } => ASTNode::TypeConversion {
       node_id,
@@ -315,7 +314,6 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       expression: Box::new(node_to_stub(&expression)),
       name_locations,
       names,
-      try_call,
       type_descriptions,
     },
     ASTNode::StructConstructor {
@@ -325,7 +323,6 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       expression,
       name_locations,
       names,
-      try_call,
       type_descriptions,
     } => ASTNode::StructConstructor {
       node_id,
@@ -334,7 +331,6 @@ pub fn children_to_stubs(node: ASTNode) -> ASTNode {
       expression: Box::new(node_to_stub(&expression)),
       name_locations,
       names,
-      try_call,
       type_descriptions,
     },
     ASTNode::FunctionCallOptions {
@@ -2031,8 +2027,6 @@ fn node_from_json(
       )?;
       let names =
         get_required_string_vec_with_context(val, "names", node_type_str)?;
-      let try_call =
-        get_required_bool_with_context(val, "tryCall", node_type_str)?;
       let type_descriptions = get_required_type_descriptions_with_context(
         val,
         "typeDescriptions",
@@ -2045,6 +2039,8 @@ fn node_from_json(
           // Arguments are stored as raw expressions; they will be wrapped
           // with Argument nodes during the transform phase after tree-shaking.
           // referenced_return_declarations is populated during transform phase.
+          let try_call =
+            get_required_bool_with_context(val, "tryCall", node_type_str)?;
           Ok(ASTNode::FunctionCall {
             node_id,
             src_location,
@@ -2074,7 +2070,6 @@ fn node_from_json(
             expression,
             name_locations,
             names,
-            try_call,
             type_descriptions,
           })
         }
@@ -2088,7 +2083,6 @@ fn node_from_json(
             expression,
             name_locations,
             names,
-            try_call,
             type_descriptions,
           })
         }

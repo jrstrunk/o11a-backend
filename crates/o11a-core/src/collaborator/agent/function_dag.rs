@@ -118,13 +118,13 @@ fn build_call_edges(
       FunctionModProperties::FunctionProperties { calls, .. }
       | FunctionModProperties::ModifierProperties { calls, .. } => calls,
     };
-    for callee in calls {
+    for call in calls {
       let resolved = audit_data
         .topic_metadata
-        .get(callee)
+        .get(&call.callee)
         .and_then(|m| m.transitive_topic())
         .copied()
-        .unwrap_or(*callee);
+        .unwrap_or(call.callee);
       if !in_scope.contains(&resolved) {
         continue;
       }
@@ -456,10 +456,10 @@ pub fn callees_of(
     .map(|c| {
       audit_data
         .topic_metadata
-        .get(c)
+        .get(&c.callee)
         .and_then(|m| m.transitive_topic())
         .copied()
-        .unwrap_or(*c)
+        .unwrap_or(c.callee)
     })
     .collect();
   out.sort();
