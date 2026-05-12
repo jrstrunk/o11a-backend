@@ -60,7 +60,7 @@ use std::path::{Path, PathBuf};
 /// Bumped on any breaking change to [`AuditDataSnapshot`] or
 /// [`AnalysisArtifact`]. The server refuses to load a file whose version
 /// it doesn't recognize.
-pub const ARTIFACT_SCHEMA_VERSION: u32 = 2;
+pub const ARTIFACT_SCHEMA_VERSION: u32 = 3;
 
 /// Binary envelope for the analyzed `AuditData` snapshot. Private format
 /// between `o11a-analyze` (writer) and `o11a-server` (reader). Encoded

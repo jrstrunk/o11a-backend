@@ -6073,10 +6073,14 @@ mod functional_property_render_tests {
       member,
       FunctionModProperties::FunctionProperties {
         reverts: vec![],
+        effective_reverts: vec![],
         calls: vec![],
         mutations: vec![state_var],
+        effective_mutations: vec![],
         reads: vec![],
+        effective_reads: vec![],
         events_emitted: vec![],
+        effective_events_emitted: vec![],
       },
     );
 
@@ -6151,6 +6155,7 @@ mod functional_property_render_tests {
       member,
       FunctionModProperties::FunctionProperties {
         reverts: vec![],
+        effective_reverts: vec![],
         calls: vec![
           domain::CallInfo {
             site: in_scope_callee,
@@ -6164,8 +6169,11 @@ mod functional_property_render_tests {
           },
         ],
         mutations: vec![],
+        effective_mutations: vec![],
         reads: vec![],
+        effective_reads: vec![],
         events_emitted: vec![],
+        effective_events_emitted: vec![],
       },
     );
 
@@ -6366,10 +6374,14 @@ mod batch_render_integration_tests {
       member,
       FunctionModProperties::FunctionProperties {
         reverts: vec![],
+        effective_reverts: vec![],
         calls: vec![],
         mutations: vec![],
+        effective_mutations: vec![],
         reads: vec![],
+        effective_reads: vec![],
         events_emitted: vec![],
+        effective_events_emitted: vec![],
       },
     );
 
@@ -6499,10 +6511,14 @@ mod batch_render_integration_tests {
       member,
       FunctionModProperties::FunctionProperties {
         reverts: vec![],
+        effective_reverts: vec![],
         calls: vec![],
         mutations: vec![],
+        effective_mutations: vec![],
         reads: vec![],
+        effective_reads: vec![],
         events_emitted: vec![],
+        effective_events_emitted: vec![],
       },
     );
 
@@ -6579,10 +6595,14 @@ mod batch_render_integration_tests {
       member,
       FunctionModProperties::FunctionProperties {
         reverts: vec![],
+        effective_reverts: vec![],
         calls: vec![],
         mutations: vec![],
+        effective_mutations: vec![],
         reads: vec![],
+        effective_reads: vec![],
         events_emitted: vec![],
+        effective_events_emitted: vec![],
       },
     );
   }
@@ -7837,10 +7857,14 @@ mod batch_render_integration_tests {
             error_topic: None,
           },
         ],
+        effective_reverts: vec![],
         calls: vec![],
         mutations: vec![],
+        effective_mutations: vec![],
         reads: vec![],
+        effective_reads: vec![],
         events_emitted: vec![],
+        effective_events_emitted: vec![],
       },
     );
 
@@ -7905,10 +7929,14 @@ mod batch_render_integration_tests {
           kind: domain::RevertConstraintKind::Require,
           error_topic: None,
         }],
+        effective_reverts: vec![],
         calls: vec![],
         mutations: vec![],
+        effective_mutations: vec![],
         reads: vec![],
+        effective_reads: vec![],
         events_emitted: vec![],
+        effective_events_emitted: vec![],
       },
     );
 
@@ -8009,10 +8037,14 @@ mod batch_render_integration_tests {
           kind: domain::RevertConstraintKind::Require,
           error_topic: None,
         }],
+        effective_reverts: vec![],
         calls: vec![],
         mutations: vec![state_b],
+        effective_mutations: vec![],
         reads: vec![state_a],
+        effective_reads: vec![],
         events_emitted: vec![],
+        effective_events_emitted: vec![],
       },
     );
 

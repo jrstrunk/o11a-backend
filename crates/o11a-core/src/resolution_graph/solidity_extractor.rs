@@ -1459,10 +1459,14 @@ mod tests {
       function_topic,
       FunctionModProperties::FunctionProperties {
         reverts,
+        effective_reverts: vec![],
         calls: call_infos,
         mutations,
+        effective_mutations: vec![],
         reads: vec![],
+        effective_reads: vec![],
         events_emitted: events,
+        effective_events_emitted: vec![],
       },
     );
   }

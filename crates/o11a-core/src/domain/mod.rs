@@ -231,6 +231,32 @@ pub struct CallInfo {
   pub in_try_block: bool,
 }
 
+/// One revert that a function can transitively raise. Produced by the
+/// bottom-up fold in `effective_properties.rs`. `origin` is the
+/// function or modifier whose body directly raises `revert` — i.e.,
+/// the leaf of the propagation chain. The intermediate call path is
+/// not stored; it can be reconstructed from the call graph if a
+/// render site needs it, and storing one canonical "via" hop would
+/// lose information when two paths converge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectiveRevert {
+  pub revert: RevertInfo,
+  pub origin: topic::Topic,
+}
+
+/// One transitive non-revert side-effect entry — a state-variable
+/// access (read or write) or an event emission. Shared across the
+/// three `effective_mutations` / `effective_reads` /
+/// `effective_events_emitted` fields. `topic` is the state variable
+/// or event being referenced; `origin` is the function/modifier whose
+/// body directly triggers it (the leaf of the propagation chain).
+/// Same not-storing-path rationale as `EffectiveRevert`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectiveTopic {
+  pub topic: topic::Topic,
+  pub origin: topic::Topic,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FunctionKind {
   Constructor,
@@ -2302,8 +2328,23 @@ pub fn resolve_transitive_topic(
 pub enum FunctionModProperties {
   FunctionProperties {
     reverts: Vec<RevertInfo>,
+    /// Transitive union of `reverts` plus the `effective_reverts` of
+    /// every non-try callee (resolved through proxies). Computed over
+    /// the *non-try propagation graph* — try-call sites are excluded
+    /// because try/catch absorbs them. Populated by
+    /// `effective_properties::compute_transitive_effects` at the tail
+    /// of the analyzer pass.
+    #[serde(default)]
+    effective_reverts: Vec<EffectiveRevert>,
     calls: Vec<CallInfo>,
     mutations: Vec<topic::Topic>,
+    /// Transitive union of `mutations` plus the `effective_mutations`
+    /// of every callee (resolved through proxies). Computed over the
+    /// *full call graph* — try-call sites are INCLUDED, since
+    /// try/catch doesn't suppress state changes from successful
+    /// callees, only catches reverts from failing ones.
+    #[serde(default)]
+    effective_mutations: Vec<EffectiveTopic>,
     /// Variable references whose value is consumed (read) by this
     /// function. The LHS base of a pure assignment (`x = ...`) and of
     /// `delete x` are excluded so write-only statements appear only
@@ -2313,24 +2354,47 @@ pub enum FunctionModProperties {
     /// agent-context renderer) filter to state-variable kind.
     #[serde(default)]
     reads: Vec<topic::Topic>,
+    /// Transitive union of `reads` plus the `effective_reads` of
+    /// every callee. Same propagation graph as `effective_mutations`
+    /// — try doesn't suppress reads from a successful callee.
+    #[serde(default)]
+    effective_reads: Vec<EffectiveTopic>,
     /// Events this function emits, sorted ascending by topic ID and
     /// deduped. Populated by the first-pass `EmitStatement` walker.
     #[serde(default)]
     events_emitted: Vec<topic::Topic>,
+    /// Transitive union of `events_emitted` plus the
+    /// `effective_events_emitted` of every callee. Same propagation
+    /// graph as `effective_mutations` — try doesn't suppress events
+    /// from a successful callee.
+    #[serde(default)]
+    effective_events_emitted: Vec<EffectiveTopic>,
   },
   ModifierProperties {
     reverts: Vec<RevertInfo>,
+    /// Same shape and semantics as `FunctionProperties::effective_reverts`.
+    #[serde(default)]
+    effective_reverts: Vec<EffectiveRevert>,
     calls: Vec<CallInfo>,
     mutations: Vec<topic::Topic>,
+    /// Same shape and semantics as `FunctionProperties::effective_mutations`.
+    #[serde(default)]
+    effective_mutations: Vec<EffectiveTopic>,
     /// Variable references whose value is consumed (read) by this
     /// modifier. Same shape and semantics as
     /// `FunctionProperties::reads`.
     #[serde(default)]
     reads: Vec<topic::Topic>,
+    /// Same shape and semantics as `FunctionProperties::effective_reads`.
+    #[serde(default)]
+    effective_reads: Vec<EffectiveTopic>,
     /// Events this modifier emits, sorted ascending by topic ID and
     /// deduped. Populated by the first-pass `EmitStatement` walker.
     #[serde(default)]
     events_emitted: Vec<topic::Topic>,
+    /// Same shape and semantics as `FunctionProperties::effective_events_emitted`.
+    #[serde(default)]
+    effective_events_emitted: Vec<EffectiveTopic>,
   },
 }
 
@@ -3443,10 +3507,14 @@ mod tests {
 
   #[test]
   fn function_mod_properties_events_emitted_deserializes_legacy_payload() {
-    // Payloads written before `events_emitted` and `reads` were added
-    // must still deserialize, with both defaulting to `[]`. Tested for
-    // both variants since they gain optional fields together — a
-    // serde-default regression on either is symmetric tech debt.
+    // Payloads written before `events_emitted` / `reads` and the four
+    // `effective_*` fields were added must still deserialize, with
+    // each defaulting to `[]`. Tested for both variants since they
+    // gain optional fields together — a serde-default regression on
+    // either is symmetric tech debt. The four `effective_*` fields
+    // are computed by the transitive-effects fold post-analyzer; old
+    // payloads predating that work won't carry them, and consumers
+    // must read them as empty.
     let legacy_function =
       r#"{"FunctionProperties":{"reverts":[],"calls":[],"mutations":[]}}"#;
     match serde_json::from_str::<FunctionModProperties>(legacy_function)
@@ -3455,10 +3523,18 @@ mod tests {
       FunctionModProperties::FunctionProperties {
         events_emitted,
         reads,
+        effective_reverts,
+        effective_mutations,
+        effective_reads,
+        effective_events_emitted,
         ..
       } => {
         assert!(events_emitted.is_empty());
         assert!(reads.is_empty());
+        assert!(effective_reverts.is_empty());
+        assert!(effective_mutations.is_empty());
+        assert!(effective_reads.is_empty());
+        assert!(effective_events_emitted.is_empty());
       }
       _ => panic!("expected FunctionProperties"),
     }
@@ -3471,10 +3547,18 @@ mod tests {
       FunctionModProperties::ModifierProperties {
         events_emitted,
         reads,
+        effective_reverts,
+        effective_mutations,
+        effective_reads,
+        effective_events_emitted,
         ..
       } => {
         assert!(events_emitted.is_empty());
         assert!(reads.is_empty());
+        assert!(effective_reverts.is_empty());
+        assert!(effective_mutations.is_empty());
+        assert!(effective_reads.is_empty());
+        assert!(effective_events_emitted.is_empty());
       }
       _ => panic!("expected ModifierProperties"),
     }

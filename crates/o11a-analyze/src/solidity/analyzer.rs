@@ -1639,10 +1639,14 @@ fn process_second_pass_nodes(
                 topic,
                 FunctionModProperties::FunctionProperties {
                   reverts,
+                  effective_reverts: vec![],
                   calls: call_infos,
                   mutations: mutation_topics,
+                  effective_mutations: vec![],
                   reads: read_topics,
+                  effective_reads: vec![],
                   events_emitted: event_topics,
+                  effective_events_emitted: vec![],
                 },
               );
             }
@@ -1651,10 +1655,14 @@ fn process_second_pass_nodes(
                 topic,
                 FunctionModProperties::ModifierProperties {
                   reverts,
+                  effective_reverts: vec![],
                   calls: call_infos,
                   mutations: mutation_topics,
+                  effective_mutations: vec![],
                   reads: read_topics,
+                  effective_reads: vec![],
                   events_emitted: event_topics,
+                  effective_events_emitted: vec![],
                 },
               );
             }
@@ -2857,7 +2865,7 @@ fn extract_referenced_declaration(expr: &ASTNode) -> Option<i32> {
 /// `function_properties` indexes. Capturing the contract topic in
 /// `function_calls` would muddy that field's "functions/modifiers
 /// called by this function" semantics. Constructor-call tracking is
-/// out of scope for this work — see `transitive-revert-effects.md`.
+/// out of scope for this work — see `transitive-effects.md`.
 fn callee_from_call_expression(expr: &ASTNode) -> Option<i32> {
   match expr {
     ASTNode::Identifier {
@@ -2876,7 +2884,7 @@ fn callee_from_call_expression(expr: &ASTNode) -> Option<i32> {
       callee_from_call_expression(expression)
     }
     // TODO: constructor calls (`new C(...)`) — out of scope, see
-    // transitive-revert-effects.md. Adding NewExpression here without
+    // transitive-effects.md. Adding NewExpression here without
     // resolving contract→constructor would put the contract topic
     // (not a function) into `function_calls`.
     _ => None,
@@ -5805,7 +5813,7 @@ mod tests {
   #[test]
   fn new_expression_does_not_appear_in_function_calls() {
     // `new MyContract(arg)` — constructor calls are intentionally not
-    // tracked in v1 (see transitive-revert-effects.md). The
+    // tracked in v1 (see transitive-effects.md). The
     // NewExpression's type_name still flows through the normal walker
     // so the contract reference contributes to `referenced_nodes`,
     // and the argument expression flows in as a read. The callee
