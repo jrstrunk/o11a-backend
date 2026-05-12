@@ -163,16 +163,18 @@ Source Subject: deployCampaign() → IERC20(token).transferFrom(...)   [non-pure
   │     └── Kind: RestrictedReachability
   ├── Condition: "no token-callback re-entry observes partial state during setup"
   │     └── Kind: AtomicConsistency
-  ├── Threat: "Frontrunning via pre-computed token address bricks deployment"
+  ├── Threat: "The deterministic token address can be pre-computed and createPair called first, bricking deployment"
   │     ├── Falsifies condition: "createPair invocations are not pre-emptable..."
+  │     ├── Controlled by: AnyParty
   │     └── Impact: [is vulnerable to] "Protocol Campaigns" (severity: critical)
-  ├── Threat: "Reentrancy via token callback during campaign setup"
+  ├── Threat: "The token callback re-enters before the surrounding state commits"
   │     ├── Falsifies condition: "no token-callback re-entry observes partial state..."
+  │     ├── Controlled by: External
   │     └── Impact: [is vulnerable to] "Protocol Campaigns" (severity: critical)
   ├── Invariant: "State updates precede external calls in deployCampaign"
-  │     └── Parent Threat: "Reentrancy via token callback..."
+  │     └── Parent Threat: "The token callback re-enters..."
   └── Invariant: "Token address must not be predictable or pair creation must be atomic"
-        └── Parent Threat: "Frontrunning via pre-computed token address..."
+        └── Parent Threat: "The deterministic token address can be pre-computed..."
 ```
 
 ## Convergences
@@ -388,7 +390,7 @@ Example assertions per non-pure subject type. These are illustrative, not enumer
 - The callee cannot re-enter the current contract before the surrounding state commits (kind: `AtomicConsistency`).
 - The return value is honored before subsequent operations rely on success (kind: `ErrorRecoverability`).
 
-For example, an external call to Uniswap's `createPair` whose token address comes from `Clones.clone()` typically emits a `RestrictedReachability` condition: "the token address is constrained to one that no other party can pre-compute." The threats step then generates the inversion: "an attacker pre-computes the deterministic token address, calls `createPair` first, and bricks the deployment."
+For example, an external call to Uniswap's `createPair` whose token address comes from `Clones.clone()` typically emits a `RestrictedReachability` condition: "the token address is constrained to one that no other party can pre-compute." The threats step then generates the inversion: "the deterministic token address can be pre-computed and `createPair` called first, bricking the deployment."
 
 **State mutations.** For a state write, conditions might assert:
 
@@ -444,9 +446,15 @@ The chain: **purpose → conditions → threats → invariants**. Conditions are
 
 ### Managing Threats and Invariants
 
-Threats are generated on-demand for non-pure subjects only, after their conditions have been generated. When a non-pure subject is first evaluated during the audit, the LLM is given the subject, its conditions (the assertions that must hold for the subject's purpose to be fulfilled), its backward context, its feature description and requirements (as the adversarial context), and its type constraints (to avoid restating those), and asked "given these assertions, what scenarios would falsify each one — and what implementation-specific risks does that create?" The conditions provide concrete inputs — "the token address is constrained to one that no other party can pre-compute" — from which the LLM derives specific threats by inverting each assertion ("an attacker pre-computes the deterministic token address, calls `createPair` first, and bricks deployment") rather than reasoning from scratch. Each generated threat carries a link back to the condition it falsifies, so an auditor disagreeing with a threat can trace the disagreement to the assertion the threat targets without invalidating that assertion. The result is cached on the subject and presented to the auditor for review.
+Threats are generated on-demand for non-pure subjects only, after their conditions have been generated. When a non-pure subject is first evaluated during the audit, the LLM is given the subject, its conditions (the assertions that must hold for the subject's purpose to be fulfilled), its backward context, its feature description and requirements (as the adversarial context), and its type constraints (to avoid restating those), and asked "given these assertions, what scenarios would falsify each one — and what implementation-specific risks does that create?" The conditions provide concrete inputs — "the token address is constrained to one that no other party can pre-compute" — from which the LLM derives specific threats by inverting each assertion ("the deterministic token address can be pre-computed and `createPair` called first, bricking deployment") rather than reasoning from scratch. Each generated threat carries a link back to the condition it falsifies, so an auditor disagreeing with a threat can trace the disagreement to the assertion the threat targets without invalidating that assertion. A condition can be the target of many threats; each threat names exactly one condition. The result is cached on the subject and presented to the auditor for review.
+
+Each threat carries a structured **`controlled_by`** field that classifies the primary actor whose action drives the scenario, drawn from a closed eight-variant `ThreatActor` enum: `Caller` (an unauthenticated external caller of a public entry point), `PrivilegedRole` (a role-gated party such as an admin, owner, or operator — the specific role lives in the description, not in this variant), `External` (a third-party contract, typically the callee in an external call, an oracle, or a token the subject interacts with), `BlockProducer` (a miner, sequencer, or validator with control over transaction ordering or inclusion), `Counterparty` (a peer in the protocol's economic model whose interests differ from the subject's purpose), `Self_` (the contract itself reentering through an external call), `AnyParty` (no constraint on who triggers the scenario; permissionless), and `Other` (a genuinely novel actor classification, with the structure carried in the description). One primary actor per threat; multi-actor coordination scenarios are captured in the description prose. Threat descriptions themselves remain **actor-agnostic** — the prose names the scenario in passive or mechanism terms ("the deterministic token address can be pre-computed and `createPair` called first") rather than naming the party ("an attacker pre-computes..."). This keeps the actor classification a separately scrutinized artifact: an auditor can approve the description while disagreeing with the actor (or vice versa) without the prose forcing a paired interpretation.
+
+Threat evidence is **scoped to the subject's containing function.** A threat's `evidence_topics` may reference only topics inside the subject's containing function: the subject node itself, descendants of the subject node, sibling statements in the same semantic block, the containing function, and the function's signature, modifiers, and parameters. Cross-function evidence is invalid on threats — that surface belongs to invariants, which point outside the subject to the codebase-level defenses. For "absence of X enables this threat" scenarios (no reentrancy guard, no slippage check, no access control modifier), the evidence points to the subject node showing the absence or to the function's modifier list — never to the missing element, which by definition is not in the codebase. The scope rule keeps the layer split clean: threats describe the vulnerable surface, invariants describe the defenses that protect it.
 
 Threats are created without a mandatory link to a feature. This keeps discovery lightweight — the auditor or LLM records the implementation-specific risk immediately without needing to perform impact analysis on the spot. Cross-cutting vulnerabilities like storage collisions may affect multiple features in ways that aren't apparent during code review, and forcing the link at creation time would either block documentation, produce a hasty and potentially misleading link, or cause the threat to go unrecorded. The linkage to features, along with severity and the relationship type ("is vulnerable to" or "defends against"), is established during the dedicated impact analysis step.
+
+When the threat-generation pass considers a condition and finds no plausible falsifying scenario — for example, an assertion enforced by Solidity itself, by an upstream type constraint, or by a structural property of the codebase — it records a `no_threat_rationale` rather than silently emitting nothing. The rationale is posted as an agent-authored comment on the condition's discussion thread (prefixed `[step-7 / no-threat]`), so the assertion's review carries an explicit audit signal that it was considered and discharged. Auditors can reply or contest in the same thread.
 
 Invariants are generated from threats and attached directly to the source subjects they protect. When the auditor evaluates a convergence, the invariants are immediately present alongside functional purpose, functional semantics, and type constraints — no indirection through abstract structures. Each invariant links back to its parent threat for traceability.
 
