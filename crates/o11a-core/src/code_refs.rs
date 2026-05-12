@@ -144,6 +144,7 @@ pub fn get_named_topic_kind(
     | domain::TopicMetadata::FeatureTopic { .. }
     | domain::TopicMetadata::RequirementTopic { .. }
     | domain::TopicMetadata::BehaviorTopic { .. }
+    | domain::TopicMetadata::CharacteristicTopic { .. }
     | domain::TopicMetadata::FunctionalSemanticTopic { .. }
     | domain::TopicMetadata::FunctionalPurposeTopic { .. }
     | domain::TopicMetadata::PlacementRationaleTopic { .. }

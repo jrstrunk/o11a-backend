@@ -375,6 +375,10 @@ pub fn highlighted_name(metadata: &TopicMetadata) -> String {
       "<span class=\"behavior\">{}</span>",
       html_escape(description)
     ),
+    TopicMetadata::CharacteristicTopic { description, .. } => format!(
+      "<span class=\"characteristic\">{}</span>",
+      html_escape(description)
+    ),
     TopicMetadata::FunctionalSemanticTopic { description, .. } => format!(
       "<span class=\"semantic\">{}</span>",
       html_escape(description)

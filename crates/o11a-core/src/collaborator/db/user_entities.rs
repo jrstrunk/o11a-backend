@@ -8,7 +8,10 @@
 //! occupy the same `i32` space as pipeline entities without collision.
 
 use crate::collaborator::models::Author;
-use crate::domain::{AuditData, Requirement, TopicMetadata, topic};
+use crate::domain::{
+  AuditData, Characteristic, Requirement, SystemCharacteristicKind,
+  TopicMetadata, topic,
+};
 use sqlx::SqlitePool;
 
 // ============================================================================
@@ -54,6 +57,19 @@ pub struct UserFunctionalSemanticRow {
   pub audit_id: String,
   pub description: String,
   pub declaration_topic: String,
+  #[sqlx(rename = "author_id")]
+  pub author: Author,
+  pub created_at: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct UserCharacteristicRow {
+  pub id: i64,
+  pub audit_id: String,
+  pub description: String,
+  /// `SystemCharacteristicKind::as_str()` form (currently only "Security").
+  pub kind: String,
+  pub section_topic: Option<String>,
   #[sqlx(rename = "author_id")]
   pub author: Author,
   pub created_at: String,
@@ -160,6 +176,59 @@ pub async fn create_user_behavior(
   .bind(id)
   .fetch_one(pool)
   .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_user_characteristic(
+  pool: &SqlitePool,
+  id: i32,
+  audit_id: &str,
+  description: &str,
+  kind: SystemCharacteristicKind,
+  section_topic: Option<&str>,
+  author_id: Author,
+  created_at: &str,
+) -> Result<UserCharacteristicRow, sqlx::Error> {
+  sqlx::query(
+    r#"
+    INSERT INTO user_characteristics (id, audit_id, description, kind, section_topic, author_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    "#,
+  )
+  .bind(id)
+  .bind(audit_id)
+  .bind(description)
+  .bind(kind.as_str())
+  .bind(section_topic)
+  .bind(author_id)
+  .bind(created_at)
+  .execute(pool)
+  .await?;
+
+  sqlx::query_as::<_, UserCharacteristicRow>(
+    "SELECT * FROM user_characteristics WHERE id = ?",
+  )
+  .bind(id)
+  .fetch_one(pool)
+  .await
+}
+
+pub async fn add_user_characteristic_documentation_topic(
+  pool: &SqlitePool,
+  user_characteristic_id: i32,
+  documentation_topic: &str,
+) -> Result<(), sqlx::Error> {
+  sqlx::query(
+    r#"
+    INSERT OR IGNORE INTO user_characteristic_documentation_topics (user_characteristic_id, documentation_topic)
+    VALUES (?, ?)
+    "#,
+  )
+  .bind(user_characteristic_id)
+  .bind(documentation_topic)
+  .execute(pool)
+  .await?;
+  Ok(())
 }
 
 pub async fn create_user_functional_semantic(
@@ -318,6 +387,18 @@ pub async fn load_user_functional_semantics(
   .await
 }
 
+pub async fn load_user_characteristics(
+  pool: &SqlitePool,
+  audit_id: &str,
+) -> Result<Vec<UserCharacteristicRow>, sqlx::Error> {
+  sqlx::query_as::<_, UserCharacteristicRow>(
+    "SELECT * FROM user_characteristics WHERE audit_id = ? ORDER BY id",
+  )
+  .bind(audit_id)
+  .fetch_all(pool)
+  .await
+}
+
 /// Load the D-prefixed documentation topics associated with a user requirement.
 async fn load_user_requirement_documentation_topics(
   pool: &SqlitePool,
@@ -340,6 +421,19 @@ async fn load_user_functional_semantic_documentation_topics(
     "SELECT documentation_topic FROM user_functional_semantic_documentation_topics WHERE user_functional_semantic_id = ? ORDER BY documentation_topic",
   )
   .bind(user_functional_semantic_id)
+  .fetch_all(pool)
+  .await
+}
+
+/// Load the D-prefixed documentation topics associated with a user characteristic.
+async fn load_user_characteristic_documentation_topics(
+  pool: &SqlitePool,
+  user_characteristic_id: i64,
+) -> Result<Vec<String>, sqlx::Error> {
+  sqlx::query_scalar::<_, String>(
+    "SELECT documentation_topic FROM user_characteristic_documentation_topics WHERE user_characteristic_id = ? ORDER BY documentation_topic",
+  )
+  .bind(user_characteristic_id)
   .fetch_all(pool)
   .await
 }
@@ -392,6 +486,7 @@ pub struct UserEntitiesSnapshot {
   pub features: Vec<UserFeatureRow>,
   pub requirements: Vec<(UserRequirementRow, Vec<String>)>,
   pub behaviors: Vec<UserBehaviorRow>,
+  pub characteristics: Vec<(UserCharacteristicRow, Vec<String>)>,
   pub functional_semantics: Vec<(UserFunctionalSemanticRow, Vec<String>)>,
   pub feature_requirement_links: Vec<(i64, String)>,
   pub feature_behavior_links: Vec<(i64, String)>,
@@ -406,12 +501,20 @@ pub async fn load_user_entities_snapshot(
   let features = load_user_features(pool, audit_id).await?;
   let requirement_rows = load_user_requirements(pool, audit_id).await?;
   let behaviors = load_user_behaviors(pool, audit_id).await?;
+  let characteristic_rows = load_user_characteristics(pool, audit_id).await?;
   let semantic_rows = load_user_functional_semantics(pool, audit_id).await?;
 
   let mut requirements = Vec::with_capacity(requirement_rows.len());
   for r in requirement_rows {
     let docs = load_user_requirement_documentation_topics(pool, r.id).await?;
     requirements.push((r, docs));
+  }
+
+  let mut characteristics = Vec::with_capacity(characteristic_rows.len());
+  for c in characteristic_rows {
+    let docs =
+      load_user_characteristic_documentation_topics(pool, c.id).await?;
+    characteristics.push((c, docs));
   }
 
   let mut functional_semantics = Vec::with_capacity(semantic_rows.len());
@@ -430,6 +533,7 @@ pub async fn load_user_entities_snapshot(
     features,
     requirements,
     behaviors,
+    characteristics,
     functional_semantics,
     feature_requirement_links,
     feature_behavior_links,
@@ -441,6 +545,8 @@ pub async fn load_user_entities_snapshot(
 /// Must be called *after* `report::apply_report` so pipeline IDs have already
 /// reseeded the counters; user-entity IDs loaded here share the same `i32`
 /// space as pipeline IDs (pipeline IDs own 1..=N, user IDs continue from N+1).
+/// Reseeds the `S`- and `P`-prefixed counters at the end so subsequent
+/// in-memory allocations skip past every user-entity row this call installed.
 ///
 /// Callers should invoke `crate::domain::rebuild_feature_context` after this
 /// so reverse indexes pick up the new topic metadata.
@@ -452,6 +558,7 @@ pub fn apply_user_entities_snapshot(
     features,
     requirements,
     behaviors,
+    characteristics,
     functional_semantics,
     feature_requirement_links,
     feature_behavior_links,
@@ -513,6 +620,40 @@ pub fn apply_user_entities_snapshot(
     );
   }
 
+  for (c, doc_ids) in &characteristics {
+    let topic = topic::new_spec_topic(c.id as i32);
+    let kind = SystemCharacteristicKind::parse_str(&c.kind).unwrap_or_else(
+      || {
+        panic!(
+          "Unknown system characteristic kind '{}' in user_characteristics row {}",
+          c.kind, c.id
+        )
+      },
+    );
+    let section_topic = c.section_topic.as_deref().map(topic::new_topic);
+    let documentation_topics: Vec<topic::Topic> =
+      doc_ids.iter().map(|id| topic::new_topic(id)).collect();
+
+    audit_data.characteristics.insert(
+      topic,
+      Characteristic {
+        documentation_topics,
+      },
+    );
+
+    audit_data.topic_metadata.insert(
+      topic,
+      TopicMetadata::CharacteristicTopic {
+        topic,
+        description: c.description.clone(),
+        kind,
+        section_topic,
+        author: c.author,
+        created_at: Some(c.created_at.clone()),
+      },
+    );
+  }
+
   for (s, doc_ids) in &functional_semantics {
     let topic = topic::new_functional_property_topic(s.id as i32);
     let declaration_topic = topic::new_topic(&s.declaration_topic);
@@ -550,4 +691,36 @@ pub fn apply_user_entities_snapshot(
       .or_default()
       .push(topic::new_topic(&behavior_topic));
   }
+
+  // Reseed the S- and P-counters past the highest user-entity ID just
+  // installed. `apply_report` already reseeded once based on the pipeline
+  // output; this second call covers any user-entity row whose DB ID exceeds
+  // the pipeline's max (e.g. a user-authored entity allocated by a previous
+  // server process). Scanning the merged `topic_metadata` keys is safe
+  // because `reseed_*` performs an unconditional store, and the post-merge
+  // max is never lower than `apply_report`'s.
+  let (max_spec, max_func_prop) =
+    topic_metadata_max_spec_and_functional_property(audit_data);
+  crate::ids::reseed_spec_id(max_spec);
+  crate::ids::reseed_functional_property_id(max_func_prop);
+}
+
+/// Highest numeric ID across `Topic::Spec` and `Topic::FunctionalProperty`
+/// keys in `topic_metadata`, returned as `(max_spec, max_functional_property)`.
+/// Either component is 0 when no key of that variant exists.
+fn topic_metadata_max_spec_and_functional_property(
+  audit_data: &AuditData,
+) -> (i32, i32) {
+  let mut max_spec = 0;
+  let mut max_func_prop = 0;
+  for key in audit_data.topic_metadata.keys() {
+    match key {
+      topic::Topic::Spec(id) if *id > max_spec => max_spec = *id,
+      topic::Topic::FunctionalProperty(id) if *id > max_func_prop => {
+        max_func_prop = *id
+      }
+      _ => {}
+    }
+  }
+  (max_spec, max_func_prop)
 }

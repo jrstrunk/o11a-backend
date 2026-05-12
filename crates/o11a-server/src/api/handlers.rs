@@ -367,6 +367,7 @@ pub async fn get_contracts(
       | o11a_core::domain::TopicMetadata::FeatureTopic { .. }
       | o11a_core::domain::TopicMetadata::RequirementTopic { .. }
       | o11a_core::domain::TopicMetadata::BehaviorTopic { .. }
+      | o11a_core::domain::TopicMetadata::CharacteristicTopic { .. }
       | o11a_core::domain::TopicMetadata::FunctionalSemanticTopic { .. }
       | o11a_core::domain::TopicMetadata::FunctionalPurposeTopic { .. }
       | o11a_core::domain::TopicMetadata::PlacementRationaleTopic { .. }
@@ -562,6 +563,23 @@ pub struct BehaviorTopicResponse {
   pub created_at: Option<String>,
 }
 
+/// Response for CharacteristicTopic metadata.
+#[derive(Debug, Serialize)]
+pub struct CharacteristicTopicResponse {
+  pub topic_id: String,
+  pub description: String,
+  /// `SystemCharacteristicKind` as its `as_str()` form (e.g. "Security").
+  pub kind: String,
+  /// D-prefixed section topic. `None` for characteristics whose only source
+  /// is the raw `security.md`.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub section_topic: Option<String>,
+  #[serde(rename = "author_id")]
+  pub author: Author,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<String>,
+}
+
 /// Response for FunctionalSemanticTopic metadata
 #[derive(Debug, Serialize)]
 pub struct SemanticTopicResponse {
@@ -661,6 +679,8 @@ pub enum TopicMetadataResponse {
   Requirement(RequirementTopicResponse),
   #[serde(rename = "behavior")]
   Behavior(BehaviorTopicResponse),
+  #[serde(rename = "characteristic")]
+  Characteristic(CharacteristicTopicResponse),
   #[serde(rename = "semantic")]
   Semantic(SemanticTopicResponse),
   #[serde(rename = "purpose")]
@@ -816,6 +836,22 @@ fn topic_metadata_to_response(
       topic_id: topic.id(),
       description: description.clone(),
       member_topic: member_topic.id(),
+      author: *author_id,
+      created_at: created_at.clone(),
+    }),
+
+    o11a_core::domain::TopicMetadata::CharacteristicTopic {
+      description,
+      kind,
+      section_topic,
+      author: author_id,
+      created_at,
+      ..
+    } => TopicMetadataResponse::Characteristic(CharacteristicTopicResponse {
+      topic_id: topic.id(),
+      description: description.clone(),
+      kind: kind.as_str().to_string(),
+      section_topic: section_topic.map(|t| t.id()),
       author: *author_id,
       created_at: created_at.clone(),
     }),

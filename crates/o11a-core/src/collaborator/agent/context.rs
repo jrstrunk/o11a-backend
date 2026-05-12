@@ -82,6 +82,7 @@ fn resolve_topic_name(topic: &topic::Topic, audit_data: &AuditData) -> String {
     Some(TopicMetadata::FeatureTopic { name, .. }) => name.clone(),
     Some(TopicMetadata::RequirementTopic { description, .. })
     | Some(TopicMetadata::BehaviorTopic { description, .. })
+    | Some(TopicMetadata::CharacteristicTopic { description, .. })
     | Some(TopicMetadata::FunctionalSemanticTopic { description, .. })
     | Some(TopicMetadata::FunctionalPurposeTopic { description, .. })
     | Some(TopicMetadata::PlacementRationaleTopic { description, .. })
@@ -201,6 +202,7 @@ fn plaintext_name_from_metadata(metadata: &TopicMetadata) -> String {
     TopicMetadata::FeatureTopic { name, .. } => name.clone(),
     TopicMetadata::RequirementTopic { description, .. }
     | TopicMetadata::BehaviorTopic { description, .. }
+    | TopicMetadata::CharacteristicTopic { description, .. }
     | TopicMetadata::FunctionalSemanticTopic { description, .. }
     | TopicMetadata::FunctionalPurposeTopic { description, .. }
     | TopicMetadata::PlacementRationaleTopic { description, .. }
@@ -2458,6 +2460,7 @@ pub fn build_agent_topic_context(
     TopicMetadata::FeatureTopic { .. }
     | TopicMetadata::RequirementTopic { .. }
     | TopicMetadata::BehaviorTopic { .. }
+    | TopicMetadata::CharacteristicTopic { .. }
     | TopicMetadata::FunctionalSemanticTopic { .. }
     | TopicMetadata::FunctionalPurposeTopic { .. }
     | TopicMetadata::PlacementRationaleTopic { .. }
@@ -2468,6 +2471,7 @@ pub fn build_agent_topic_context(
         TopicMetadata::FeatureTopic { .. } => "Feature",
         TopicMetadata::RequirementTopic { .. } => "Requirement",
         TopicMetadata::BehaviorTopic { .. } => "Behavior",
+        TopicMetadata::CharacteristicTopic { .. } => "Characteristic",
         TopicMetadata::FunctionalSemanticTopic { .. } => "Semantic",
         TopicMetadata::FunctionalPurposeTopic { .. } => "Purpose",
         TopicMetadata::PlacementRationaleTopic { .. } => "Placement",

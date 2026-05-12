@@ -25,18 +25,19 @@
 //!   - `asts`, `nodes`, `function_properties`, `variable_types`
 //!   - `topic_metadata` *minus* the pipeline-output variants
 //!     (FeatureTopic, RequirementTopic, BehaviorTopic,
-//!     FunctionalSemanticTopic — those are in `audit.json` and are
-//!     reapplied by `report::apply_report`)
+//!     CharacteristicTopic, FunctionalSemanticTopic — those are in
+//!     `audit.json` and are reapplied by `report::apply_report`)
 //!   - `name_index`, `comment_index`
 //!   - `topic_context`, `expanded_topic_context`
 //!   - `threat_feature_links`, `invariants`
 //!   - `mentions_index`
 //!
 //! Excluded (reconstructed after load):
-//!   - `requirements`, `feature_requirement_links`, `feature_behavior_links`
-//!     — applied from `audit.json` via `report::apply_report`
-//!   - `section_requirements`, `member_behaviors`, `declaration_semantics`
-//!     — derivable reverse indexes, rebuilt via
+//!   - `requirements`, `characteristics`, `feature_requirement_links`,
+//!     `feature_behavior_links` — applied from `audit.json` via
+//!     `report::apply_report`
+//!   - `section_requirements`, `section_characteristics`, `member_behaviors`,
+//!     `declaration_semantics` — derivable reverse indexes, rebuilt via
 //!     `domain::rebuild_feature_context`
 //!
 //! ## Version compatibility
@@ -60,7 +61,7 @@ use std::path::{Path, PathBuf};
 /// Bumped on any breaking change to [`AuditDataSnapshot`] or
 /// [`AnalysisArtifact`]. The server refuses to load a file whose version
 /// it doesn't recognize.
-pub const ARTIFACT_SCHEMA_VERSION: u32 = 5;
+pub const ARTIFACT_SCHEMA_VERSION: u32 = 6;
 
 /// Binary envelope for the analyzed `AuditData` snapshot. Private format
 /// between `o11a-analyze` (writer) and `o11a-server` (reader). Encoded
@@ -102,7 +103,7 @@ pub struct AuditDataSnapshot {
 
 /// Strip pipeline-output fields and derivable reverse indexes from an
 /// `AuditData` to produce a snapshot suitable for serialization. The
-/// four pipeline-sourced `TopicMetadata` variants are filtered out of
+/// pipeline-sourced `TopicMetadata` variants are filtered out of
 /// `topic_metadata`; they will be reinstalled by `report::apply_report`.
 pub fn snapshot_from_audit_data(audit_data: &AuditData) -> AuditDataSnapshot {
   let topic_metadata = audit_data
@@ -114,6 +115,7 @@ pub fn snapshot_from_audit_data(audit_data: &AuditData) -> AuditDataSnapshot {
         TopicMetadata::FeatureTopic { .. }
           | TopicMetadata::RequirementTopic { .. }
           | TopicMetadata::BehaviorTopic { .. }
+          | TopicMetadata::CharacteristicTopic { .. }
           | TopicMetadata::FunctionalSemanticTopic { .. }
       )
     })
@@ -141,9 +143,10 @@ pub fn snapshot_from_audit_data(audit_data: &AuditData) -> AuditDataSnapshot {
 
 /// Rehydrate a snapshot into a fresh `AuditData`. Pipeline-output fields
 /// are left empty; the caller must invoke
-/// [`crate::report::apply_report`] (to fill in requirements and links)
-/// and then [`crate::domain::rebuild_feature_context`] (to rebuild reverse
-/// indexes) before serving requests.
+/// [`crate::report::apply_report`] (to fill in requirements,
+/// characteristics, and links) and then
+/// [`crate::domain::rebuild_feature_context`] (to rebuild reverse indexes)
+/// before serving requests.
 pub fn apply_snapshot(audit_data: &mut AuditData, snap: AuditDataSnapshot) {
   audit_data.audit_name = snap.audit_name;
   audit_data.in_scope_files = snap.in_scope_files;
@@ -161,9 +164,11 @@ pub fn apply_snapshot(audit_data: &mut AuditData, snap: AuditDataSnapshot) {
   audit_data.invariants = snap.invariants;
   audit_data.mentions_index = snap.mentions_index;
   audit_data.requirements.clear();
+  audit_data.characteristics.clear();
   audit_data.feature_requirement_links.clear();
   audit_data.feature_behavior_links.clear();
   audit_data.section_requirements.clear();
+  audit_data.section_characteristics.clear();
   audit_data.member_behaviors.clear();
   audit_data.declaration_semantics.clear();
   audit_data.subject_purposes.clear();

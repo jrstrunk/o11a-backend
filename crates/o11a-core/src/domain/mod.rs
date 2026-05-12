@@ -370,6 +370,43 @@ pub struct Requirement {
   pub documentation_topics: Vec<topic::Topic>,
 }
 
+/// Kind of system characteristic. Each kind is consumed by exactly one
+/// downstream pipeline step (Security → threats). Add variants additively
+/// as new characteristic types are introduced (Performance, Convention, …).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SystemCharacteristicKind {
+  Security,
+}
+
+impl SystemCharacteristicKind {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      SystemCharacteristicKind::Security => "Security",
+    }
+  }
+
+  pub fn parse_str(s: &str) -> Option<Self> {
+    match s {
+      "Security" | "security" => Some(SystemCharacteristicKind::Security),
+      _ => None,
+    }
+  }
+}
+
+/// A system characteristic — a system-wide claim (security property, role
+/// assumption, trust assumption) extracted from documentation and refined
+/// during characteristic synthesis. Characteristics are *not* reconciled
+/// against behaviors and are *not* linked to features. The complete set of
+/// characteristics of a given kind is consumed in entirety by that kind's
+/// downstream pipeline step (Security → threats).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Characteristic {
+  /// D-prefixed documentation topics that informed this characteristic.
+  /// May be empty for characteristics that originated from `security.md`
+  /// rather than a documentation section.
+  pub documentation_topics: Vec<topic::Topic>,
+}
+
 /// The party whose action drives the threat scenario. One primary actor
 /// per threat; multi-actor coordination scenarios are captured in the
 /// threat's description prose. Loose taxonomy; the LLM picks; the auditor
@@ -502,6 +539,15 @@ pub struct AuditData {
   /// Reverse index: D-prefixed section topic → S-prefixed requirement topics.
   /// Derived from RequirementTopic.section_topic, rebuilt with rebuild_feature_context.
   pub section_requirements: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Characteristics keyed by S-prefixed topic ID. Replaces the role the raw
+  /// `security_notes` blob used to play in threats prompting; that field
+  /// stays as the synthesizer's raw input.
+  pub characteristics: BTreeMap<topic::Topic, Characteristic>,
+  /// Reverse index: D-prefixed section topic → S-prefixed characteristic
+  /// topics. Derived from `CharacteristicTopic.section_topic`, rebuilt with
+  /// `rebuild_feature_context`. Entries with `section_topic = None` are not
+  /// indexed here.
+  pub section_characteristics: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Reverse index: N-prefixed member topic → S-prefixed behavior topics.
   /// Derived from BehaviorTopic.member_topic, rebuilt with rebuild_feature_context.
   pub member_behaviors: BTreeMap<topic::Topic, Vec<topic::Topic>>,
@@ -2011,6 +2057,23 @@ pub enum TopicMetadata {
     /// `None` for pipeline-produced entities — see FeatureTopic for rationale.
     created_at: Option<String>,
   },
+  /// A system characteristic — paired with a `Characteristic` entry in
+  /// `audit_data.characteristics`. The `kind` field selects which downstream
+  /// pipeline step consumes this characteristic (Security → threats).
+  CharacteristicTopic {
+    topic: topic::Topic,
+    description: String,
+    kind: SystemCharacteristicKind,
+    /// D-prefixed documentation section this characteristic was extracted
+    /// from. `None` for characteristics whose only source is the raw
+    /// `security.md` (no documentation section to anchor to). Matches the
+    /// field name on `RequirementTopic` for renderer symmetry; the `Option`
+    /// is the only structural difference.
+    section_topic: Option<topic::Topic>,
+    author: crate::collaborator::models::Author,
+    /// `None` for pipeline-produced entities — see FeatureTopic for rationale.
+    created_at: Option<String>,
+  },
   /// A functional semantic — what a code declaration represents in the context
   /// of the project. Derived from one or more documentation sections.
   FunctionalSemanticTopic {
@@ -2160,6 +2223,7 @@ impl TopicMetadata {
       TopicMetadata::FeatureTopic { .. }
       | TopicMetadata::RequirementTopic { .. }
       | TopicMetadata::BehaviorTopic { .. }
+      | TopicMetadata::CharacteristicTopic { .. }
       | TopicMetadata::FunctionalSemanticTopic { .. }
       | TopicMetadata::FunctionalPurposeTopic { .. }
       | TopicMetadata::PlacementRationaleTopic { .. }
@@ -2179,6 +2243,7 @@ impl TopicMetadata {
       | TopicMetadata::CommentTopic { .. }
       | TopicMetadata::RequirementTopic { .. }
       | TopicMetadata::BehaviorTopic { .. }
+      | TopicMetadata::CharacteristicTopic { .. }
       | TopicMetadata::FunctionalSemanticTopic { .. }
       | TopicMetadata::FunctionalPurposeTopic { .. }
       | TopicMetadata::PlacementRationaleTopic { .. }
@@ -2199,6 +2264,7 @@ impl TopicMetadata {
       | TopicMetadata::FeatureTopic { topic, .. }
       | TopicMetadata::RequirementTopic { topic, .. }
       | TopicMetadata::BehaviorTopic { topic, .. }
+      | TopicMetadata::CharacteristicTopic { topic, .. }
       | TopicMetadata::FunctionalSemanticTopic { topic, .. }
       | TopicMetadata::FunctionalPurposeTopic { topic, .. }
       | TopicMetadata::PlacementRationaleTopic { topic, .. }
@@ -2284,6 +2350,7 @@ impl TopicMetadata {
       | TopicMetadata::FeatureTopic { author, .. }
       | TopicMetadata::RequirementTopic { author, .. }
       | TopicMetadata::BehaviorTopic { author, .. }
+      | TopicMetadata::CharacteristicTopic { author, .. }
       | TopicMetadata::FunctionalSemanticTopic { author, .. }
       | TopicMetadata::FunctionalPurposeTopic { author, .. }
       | TopicMetadata::PlacementRationaleTopic { author, .. }
@@ -2306,6 +2373,7 @@ impl TopicMetadata {
       TopicMetadata::FeatureTopic { description, .. }
       | TopicMetadata::RequirementTopic { description, .. }
       | TopicMetadata::BehaviorTopic { description, .. }
+      | TopicMetadata::CharacteristicTopic { description, .. }
       | TopicMetadata::FunctionalSemanticTopic { description, .. }
       | TopicMetadata::FunctionalPurposeTopic { description, .. }
       | TopicMetadata::PlacementRationaleTopic { description, .. }
@@ -2334,6 +2402,7 @@ impl TopicMetadata {
       TopicMetadata::FeatureTopic { created_at, .. }
       | TopicMetadata::RequirementTopic { created_at, .. }
       | TopicMetadata::BehaviorTopic { created_at, .. }
+      | TopicMetadata::CharacteristicTopic { created_at, .. }
       | TopicMetadata::FunctionalSemanticTopic { created_at, .. }
       | TopicMetadata::FunctionalPurposeTopic { created_at, .. }
       | TopicMetadata::PlacementRationaleTopic { created_at, .. }
@@ -2778,6 +2847,24 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         .entry(*st)
         .or_default()
         .push(*req_topic);
+    }
+  }
+
+  // Rebuild section_characteristics: section D-topic → S-topics.
+  // Characteristics with `section_topic = None` (e.g. originating only from
+  // raw security.md) are not indexed here.
+  audit_data.section_characteristics.clear();
+  for (char_topic, metadata) in &audit_data.topic_metadata {
+    if let TopicMetadata::CharacteristicTopic {
+      section_topic: Some(st),
+      ..
+    } = metadata
+    {
+      audit_data
+        .section_characteristics
+        .entry(*st)
+        .or_default()
+        .push(*char_topic);
     }
   }
 
@@ -3315,6 +3402,8 @@ pub fn new_audit_data(
     expanded_topic_context: BTreeMap::new(),
     requirements: BTreeMap::new(),
     section_requirements: BTreeMap::new(),
+    characteristics: BTreeMap::new(),
+    section_characteristics: BTreeMap::new(),
     member_behaviors: BTreeMap::new(),
     declaration_semantics: BTreeMap::new(),
     subject_purposes: BTreeMap::new(),
@@ -4182,5 +4271,129 @@ mod tests {
     assert!(serde_json::from_str::<ThreatActor>("\"Admin\"").is_err());
     assert!(serde_json::from_str::<ThreatActor>("\"caller\"").is_err());
     assert!(serde_json::from_str::<ThreatActor>("\"\"").is_err());
+  }
+
+  #[test]
+  fn rebuild_feature_context_populates_section_characteristics() {
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let section_a = topic::new_documentation_topic(10);
+    let section_b = topic::new_documentation_topic(20);
+
+    let char_a1 = topic::new_spec_topic(1);
+    let char_a2 = topic::new_spec_topic(2);
+    let char_b1 = topic::new_spec_topic(3);
+    // A characteristic with no section anchor (e.g. derived solely from
+    // raw security.md) must not appear in `section_characteristics`.
+    let char_unanchored = topic::new_spec_topic(4);
+
+    audit.topic_metadata.insert(
+      char_a1,
+      TopicMetadata::CharacteristicTopic {
+        topic: char_a1,
+        description: "owner is trusted".to_string(),
+        kind: SystemCharacteristicKind::Security,
+        section_topic: Some(section_a),
+        author: Author::System,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      char_a2,
+      TopicMetadata::CharacteristicTopic {
+        topic: char_a2,
+        description: "pauser can halt deposits".to_string(),
+        kind: SystemCharacteristicKind::Security,
+        section_topic: Some(section_a),
+        author: Author::System,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      char_b1,
+      TopicMetadata::CharacteristicTopic {
+        topic: char_b1,
+        description: "oracle data is fresh within the slot".to_string(),
+        kind: SystemCharacteristicKind::Security,
+        section_topic: Some(section_b),
+        author: Author::System,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      char_unanchored,
+      TopicMetadata::CharacteristicTopic {
+        topic: char_unanchored,
+        description: "supplied via security.md only".to_string(),
+        kind: SystemCharacteristicKind::Security,
+        section_topic: None,
+        author: Author::System,
+        created_at: None,
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+
+    let a_chars = audit
+      .section_characteristics
+      .get(&section_a)
+      .expect("section_a should have characteristics");
+    assert_eq!(a_chars.len(), 2);
+    assert!(a_chars.contains(&char_a1));
+    assert!(a_chars.contains(&char_a2));
+
+    let b_chars = audit
+      .section_characteristics
+      .get(&section_b)
+      .expect("section_b should have characteristics");
+    assert_eq!(b_chars.len(), 1);
+    assert_eq!(b_chars[0], char_b1);
+
+    // Unanchored characteristics never appear in any section bucket.
+    for chars in audit.section_characteristics.values() {
+      assert!(!chars.contains(&char_unanchored));
+    }
+
+    // A section with no characteristics is absent from the index.
+    let section_c = topic::new_documentation_topic(30);
+    assert!(!audit.section_characteristics.contains_key(&section_c));
+  }
+
+  #[test]
+  fn rebuild_feature_context_clears_section_characteristics_before_rebuilding()
+  {
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let section_a = topic::new_documentation_topic(10);
+    let char_a1 = topic::new_spec_topic(1);
+    audit.topic_metadata.insert(
+      char_a1,
+      TopicMetadata::CharacteristicTopic {
+        topic: char_a1,
+        description: "claim".to_string(),
+        kind: SystemCharacteristicKind::Security,
+        section_topic: Some(section_a),
+        author: Author::System,
+        created_at: None,
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+    assert_eq!(
+      audit
+        .section_characteristics
+        .get(&section_a)
+        .map(|v| v.len()),
+      Some(1)
+    );
+
+    audit.topic_metadata.remove(&char_a1);
+    rebuild_feature_context(&mut audit);
+    assert!(
+      !audit.section_characteristics.contains_key(&section_a),
+      "section_characteristics must be cleared before rebuild"
+    );
   }
 }

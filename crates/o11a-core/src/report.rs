@@ -18,15 +18,18 @@
 //! don't understand rather than silently skipping fields. Additive changes
 //! (new optional fields) do not require a bump.
 //!
-//! Current version: 3 (alpha — stability not yet guaranteed)
+//! Current version: 4 (alpha — stability not yet guaranteed)
 
 use crate::collaborator::models::Author;
-use crate::domain::{AuditData, MatchSource, Requirement, TopicMetadata};
+use crate::domain::{
+  AuditData, Characteristic, MatchSource, Requirement,
+  SystemCharacteristicKind, TopicMetadata,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The current audit-report schema version. Bump on breaking changes.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Name of the tool that produced the report.
 pub const GENERATOR_NAME: &str = "o11a-analyze";
@@ -74,6 +77,7 @@ pub struct PipelineOutput {
   pub features: Vec<ReportFeature>,
   pub requirements: Vec<ReportRequirement>,
   pub behaviors: Vec<ReportBehavior>,
+  pub characteristics: Vec<ReportCharacteristic>,
   pub functional_semantics: Vec<ReportFunctionalSemantic>,
   pub feature_requirement_links: Vec<FeatureLink>,
   pub feature_behavior_links: Vec<FeatureLink>,
@@ -105,6 +109,21 @@ pub struct ReportBehavior {
   pub description: String,
   /// N-prefixed code member topic this behavior belongs to.
   pub member_topic: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportCharacteristic {
+  /// S-prefixed topic id.
+  pub topic: String,
+  pub description: String,
+  pub kind: SystemCharacteristicKind,
+  /// D-prefixed documentation section this characteristic was extracted
+  /// from. `None` for characteristics whose only source is the raw
+  /// `security.md` (no documentation section to anchor to).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub section_topic: Option<String>,
+  /// D-prefixed documentation topics that informed this characteristic.
+  pub documentation_topics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +179,7 @@ pub fn build_report(
     features: collect_features(audit_data),
     requirements: collect_requirements(audit_data),
     behaviors: collect_behaviors(audit_data),
+    characteristics: collect_characteristics(audit_data),
     functional_semantics: collect_functional_semantics(audit_data),
     feature_requirement_links: flatten_links(
       &audit_data.feature_requirement_links,
@@ -262,6 +282,49 @@ fn collect_behaviors(audit_data: &AuditData) -> Vec<ReportBehavior> {
   out
 }
 
+fn collect_characteristics(
+  audit_data: &AuditData,
+) -> Vec<ReportCharacteristic> {
+  let mut out: Vec<ReportCharacteristic> = audit_data
+    .topic_metadata
+    .values()
+    .filter_map(|m| match m {
+      TopicMetadata::CharacteristicTopic {
+        topic,
+        description,
+        kind,
+        section_topic,
+        ..
+      } => {
+        let documentation_topics = audit_data
+          .characteristics
+          .get(topic)
+          .map(
+            |Characteristic {
+               documentation_topics,
+             }| {
+              documentation_topics
+                .iter()
+                .map(|t| t.id().to_string())
+                .collect()
+            },
+          )
+          .unwrap_or_default();
+        Some(ReportCharacteristic {
+          topic: topic.id().to_string(),
+          description: description.clone(),
+          kind: *kind,
+          section_topic: section_topic.map(|t| t.id().to_string()),
+          documentation_topics,
+        })
+      }
+      _ => None,
+    })
+    .collect();
+  out.sort_by(|a, b| a.topic.cmp(&b.topic));
+  out
+}
+
 fn collect_functional_semantics(
   audit_data: &AuditData,
 ) -> Vec<ReportFunctionalSemantic> {
@@ -349,7 +412,11 @@ impl std::error::Error for ApplyReportError {}
 /// Apply a report's pipeline output onto an `AuditData` that has already been
 /// populated from source parsing (ASTs, symbol tables, topic metadata for
 /// parsed declarations). This installs the LLM-derived topics (features,
-/// requirements, behaviors, functional semantics) and their links.
+/// requirements, behaviors, characteristics, functional semantics) and their
+/// links. Also reseeds the process-wide `S`-prefixed ID counter past the
+/// highest spec ID in the merged `topic_metadata`, so subsequent in-memory
+/// allocations (user-entity hydration, comment authoring, pipeline rerun)
+/// never collide with anything the report installed.
 ///
 /// Callers should invoke `crate::domain::rebuild_feature_context` on the audit
 /// data after applying the report, so that reverse indexes are refreshed.
@@ -380,10 +447,12 @@ pub fn apply_report(
       TopicMetadata::FeatureTopic { .. }
         | TopicMetadata::RequirementTopic { .. }
         | TopicMetadata::BehaviorTopic { .. }
+        | TopicMetadata::CharacteristicTopic { .. }
         | TopicMetadata::FunctionalSemanticTopic { .. }
     )
   });
   audit_data.requirements.clear();
+  audit_data.characteristics.clear();
   audit_data.feature_requirement_links.clear();
   audit_data.feature_behavior_links.clear();
 
@@ -444,6 +513,35 @@ pub fn apply_report(
     );
   }
 
+  for c in &report.pipeline.characteristics {
+    let topic = topic::new_topic(&c.topic);
+    let section_topic = c.section_topic.as_deref().map(topic::new_topic);
+    let documentation_topics: Vec<_> = c
+      .documentation_topics
+      .iter()
+      .map(|id| topic::new_topic(id))
+      .collect();
+
+    audit_data.characteristics.insert(
+      topic,
+      Characteristic {
+        documentation_topics,
+      },
+    );
+
+    audit_data.topic_metadata.insert(
+      topic,
+      TopicMetadata::CharacteristicTopic {
+        topic,
+        description: c.description.clone(),
+        kind: c.kind,
+        section_topic,
+        author: Author::System,
+        created_at: None,
+      },
+    );
+  }
+
   for s in &report.pipeline.functional_semantics {
     let topic = topic::new_topic(&s.topic);
     let declaration_topic = topic::new_topic(&s.declaration_topic);
@@ -481,5 +579,136 @@ pub fn apply_report(
       .push(topic::new_topic(&link.topic));
   }
 
+  // Reseed the S-counter so that any subsequent allocation skips past every
+  // spec topic the report installed. The four pipeline-output `TopicMetadata`
+  // kinds (Feature/Requirement/Behavior/Characteristic) all key by
+  // `Topic::Spec`, and link maps reference only topics that were just
+  // inserted into `topic_metadata`, so scanning `topic_metadata` keys covers
+  // every spec ID this report introduced.
+  crate::ids::reseed_spec_id(max_spec_id(audit_data));
+
   Ok(())
+}
+
+/// Highest numeric ID across every `Topic::Spec` key in `topic_metadata`,
+/// or 0 if there are none. Used to bound the spec-counter reseed after
+/// hydration paths that mutate `topic_metadata`.
+fn max_spec_id(audit_data: &AuditData) -> i32 {
+  audit_data
+    .topic_metadata
+    .keys()
+    .filter_map(|t| match t {
+      crate::domain::topic::Topic::Spec(id) => Some(*id),
+      _ => None,
+    })
+    .max()
+    .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::domain::{ProjectPath, new_audit_data};
+  use std::collections::HashSet;
+
+  fn empty_audit() -> AuditData {
+    new_audit_data("test".to_string(), HashSet::<ProjectPath>::new(), None)
+  }
+
+  fn report_with_pipeline(pipeline: PipelineOutput) -> AuditReport {
+    AuditReport {
+      schema_version: SCHEMA_VERSION,
+      generator: GeneratorInfo {
+        name: "test".to_string(),
+        version: "0".to_string(),
+      },
+      generated_at: "2026-05-12T00:00:00Z".to_string(),
+      audit: AuditMetadata {
+        id: "audit-1".to_string(),
+        name: "Test".to_string(),
+        in_scope_files: vec![],
+        security_notes: None,
+      },
+      pipeline,
+    }
+  }
+
+  fn empty_pipeline() -> PipelineOutput {
+    PipelineOutput {
+      features: vec![],
+      requirements: vec![],
+      behaviors: vec![],
+      characteristics: vec![],
+      functional_semantics: vec![],
+      feature_requirement_links: vec![],
+      feature_behavior_links: vec![],
+    }
+  }
+
+  #[test]
+  fn apply_report_reseeds_spec_counter_past_highest_pipeline_topic() {
+    // Holds for the duration of the test so the parallel ids.rs counter
+    // tests don't race on NEXT_SPEC_ID.
+    let _guard = crate::ids::SPEC_LOCK.lock().unwrap();
+
+    // Bottom out the counter so allocation after apply_report observably
+    // skips past the report's max — proving the reseed fired.
+    crate::ids::reseed_spec_id(0);
+
+    let mut pipeline = empty_pipeline();
+    // Spread the max across the four pipeline-output kinds so the test
+    // covers all of them, not just the one that happens to hold the max.
+    pipeline.features.push(ReportFeature {
+      topic: "S3".to_string(),
+      name: "f3".to_string(),
+      description: "f3 desc".to_string(),
+    });
+    pipeline.requirements.push(ReportRequirement {
+      topic: "S7".to_string(),
+      description: "r7".to_string(),
+      section_topic: "D1".to_string(),
+      documentation_topics: vec!["D1".to_string()],
+    });
+    pipeline.behaviors.push(ReportBehavior {
+      topic: "S11".to_string(),
+      description: "b11".to_string(),
+      member_topic: "N1".to_string(),
+    });
+    pipeline.characteristics.push(ReportCharacteristic {
+      topic: "S42".to_string(),
+      description: "security claim".to_string(),
+      kind: crate::domain::SystemCharacteristicKind::Security,
+      section_topic: Some("D1".to_string()),
+      documentation_topics: vec!["D1".to_string()],
+    });
+
+    let mut audit = empty_audit();
+    apply_report("audit-1", &mut audit, &report_with_pipeline(pipeline))
+      .expect("apply_report");
+
+    // Next allocation must skip past the highest spec ID the report
+    // installed (S42).
+    let next = crate::ids::allocate_spec_id();
+    assert_eq!(
+      next, 43,
+      "spec counter must reseed past max pipeline spec id"
+    );
+  }
+
+  #[test]
+  fn apply_report_with_no_spec_topics_reseeds_counter_to_one() {
+    let _guard = crate::ids::SPEC_LOCK.lock().unwrap();
+
+    crate::ids::reseed_spec_id(0);
+    let mut audit = empty_audit();
+    apply_report(
+      "audit-1",
+      &mut audit,
+      &report_with_pipeline(empty_pipeline()),
+    )
+    .expect("apply_report");
+
+    // No spec topics → max is 0 → reseed(0) → next allocation is 1.
+    assert_eq!(crate::ids::allocate_spec_id(), 1);
+  }
 }

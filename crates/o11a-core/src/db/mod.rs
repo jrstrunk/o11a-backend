@@ -224,6 +224,52 @@ pub async fn init_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .execute(pool)
   .await?;
 
+  // ── User characteristics ────────────────────────────────────────────────
+  // Column shapes mirror `TopicMetadata::CharacteristicTopic`. The `kind`
+  // column stores `SystemCharacteristicKind::as_str()` (currently only
+  // "Security"); the `section_topic` column is nullable for characteristics
+  // whose only source is the raw `security.md`. User-authored creation is
+  // deferred — this table lands empty in Phase 2.
+  sqlx::query(
+    r#"
+    CREATE TABLE IF NOT EXISTS user_characteristics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        audit_id TEXT NOT NULL,
+        description TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        section_topic TEXT,
+        author_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    "#,
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_user_characteristics_audit ON user_characteristics(audit_id)",
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS idx_user_characteristics_section ON user_characteristics(section_topic)",
+  )
+  .execute(pool)
+  .await?;
+
+  sqlx::query(
+    r#"
+    CREATE TABLE IF NOT EXISTS user_characteristic_documentation_topics (
+        user_characteristic_id INTEGER NOT NULL,
+        documentation_topic TEXT NOT NULL,
+        PRIMARY KEY (user_characteristic_id, documentation_topic)
+    )
+    "#,
+  )
+  .execute(pool)
+  .await?;
+
   // ── User feature-requirement links ──────────────────────────────────────
   // `requirement_topic` may reference either a pipeline or a user requirement.
   sqlx::query(

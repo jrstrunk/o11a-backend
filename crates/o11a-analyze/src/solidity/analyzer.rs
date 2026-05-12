@@ -4280,6 +4280,7 @@ fn populate_context(
       TopicMetadata::FeatureTopic { .. }
       | TopicMetadata::RequirementTopic { .. }
       | TopicMetadata::BehaviorTopic { .. }
+      | TopicMetadata::CharacteristicTopic { .. }
       | TopicMetadata::FunctionalSemanticTopic { .. }
       | TopicMetadata::FunctionalPurposeTopic { .. }
       | TopicMetadata::PlacementRationaleTopic { .. }

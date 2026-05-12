@@ -71,16 +71,23 @@ pub fn now_iso8601() -> String {
   format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, h, mi, s)
 }
 
+/// Per-counter serialization locks for tests that mutate the process-wide
+/// `NEXT_*_ID` atomics. Exposed crate-internally so integration tests in
+/// other modules (e.g. `report::apply_report`) can synchronize against the
+/// counter tests in this module — without sharing the lock, parallel test
+/// runs across modules would race on the global state.
+#[cfg(test)]
+pub(crate) static SPEC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(test)]
+pub(crate) static FUNCTIONAL_PROPERTY_LOCK: std::sync::Mutex<()> =
+  std::sync::Mutex::new(());
+#[cfg(test)]
+pub(crate) static ADVERSARIAL_PROPERTY_LOCK: std::sync::Mutex<()> =
+  std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::sync::Mutex;
-
-  // Each counter has a mutex to serialize the tests that touch it, since
-  // the counters are process-wide state.
-  static SPEC_LOCK: Mutex<()> = Mutex::new(());
-  static FUNCTIONAL_PROPERTY_LOCK: Mutex<()> = Mutex::new(());
-  static ADVERSARIAL_PROPERTY_LOCK: Mutex<()> = Mutex::new(());
 
   #[test]
   fn spec_allocation_is_monotonic() {
