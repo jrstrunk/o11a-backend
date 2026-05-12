@@ -405,13 +405,6 @@ pub struct ThreatFeatureLink {
   pub severity: ThreatSeverity,
 }
 
-/// A threat describing how an attacker could compromise a feature.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Threat {
-  /// A-prefixed topic IDs of invariants that defend against this threat
-  pub invariant_topics: Vec<topic::Topic>,
-}
-
 /// An invariant that must hold to prevent a threat.
 /// Linked to source code topics where the invariant is enforced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -483,8 +476,6 @@ pub struct AuditData {
   pub subject_conditions: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Impact analysis links between threats and features.
   pub threat_feature_links: Vec<ThreatFeatureLink>,
-  /// Threats keyed by A-prefixed topic ID. Each belongs to one feature.
-  pub threats: BTreeMap<topic::Topic, Threat>,
   /// Invariants keyed by A-prefixed topic ID. Each belongs to one threat.
   pub invariants: BTreeMap<topic::Topic, Invariant>,
   /// Feature-to-requirement links (many-to-many). Keyed by F-prefixed topic.
@@ -2629,41 +2620,6 @@ pub fn load_security_notes(
   Ok(Some(trimmed.to_string()))
 }
 
-/// Builds nested references for invariants under their parent threats.
-/// Each threat with invariants becomes a NestedSourceContext (subscope = threat topic)
-/// containing only the invariant references as children.
-/// The threat itself is expected to be in scope_references already.
-fn build_invariant_nested_refs(
-  threat_topics: &[topic::Topic],
-  threats: &std::collections::BTreeMap<topic::Topic, Threat>,
-) -> Vec<NestedSourceContext> {
-  let mut nested = Vec::new();
-  for tt in threat_topics {
-    let threat = match threats.get(tt) {
-      Some(t) if !t.invariant_topics.is_empty() => t,
-      _ => continue,
-    };
-    let sort_key = Some(tt.numeric_id() as usize);
-    let children = threat
-      .invariant_topics
-      .iter()
-      .map(|inv_topic| {
-        let inv_sort_key = Some(inv_topic.numeric_id() as usize);
-        SourceChild::Reference(Reference::ProjectReference {
-          reference_topic: *inv_topic,
-          sort_key: inv_sort_key,
-        })
-      })
-      .collect();
-    nested.push(NestedSourceContext {
-      subscope: *tt,
-      sort_key,
-      children,
-    });
-  }
-  nested
-}
-
 /// Collect the semantic text strings for a single declaration by resolving
 /// through `declaration_semantics` (decl → P-topics) and reading each
 /// P-topic's `description` from `topic_metadata`.
@@ -3021,8 +2977,10 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     audit_data.topic_context.insert(*sem_topic, context);
   }
 
-  // Build context for ThreatTopics: subject + threat as scope refs,
-  // invariants as nested refs indented under the threat
+  // Build context for ThreatTopics: subject + threat as scope refs.
+  // Nested invariant refs are rebuilt by step 8 once the
+  // `threat_invariants` reverse index lands; until then, threats have
+  // no nested children here.
   for (threat_topic, metadata) in &audit_data.topic_metadata {
     if let TopicMetadata::ThreatTopic { subject_topic, .. } = metadata {
       let subj_sort_key = Some(subject_topic.numeric_id() as usize);
@@ -3037,16 +2995,12 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
           sort_key: threat_sort_key,
         },
       ];
-      let nested_references = build_invariant_nested_refs(
-        std::slice::from_ref(threat_topic),
-        &audit_data.threats,
-      );
       let context = vec![SourceContext {
         scope: *threat_topic,
         sort_key: threat_sort_key,
         is_in_scope: true,
         scope_references,
-        nested_references,
+        nested_references: vec![],
       }];
       audit_data.topic_context.insert(*threat_topic, context);
     }
@@ -3251,7 +3205,6 @@ pub fn new_audit_data(
     subject_placements: BTreeMap::new(),
     subject_conditions: BTreeMap::new(),
     threat_feature_links: Vec::new(),
-    threats: BTreeMap::new(),
     invariants: BTreeMap::new(),
     feature_requirement_links: BTreeMap::new(),
     feature_behavior_links: BTreeMap::new(),

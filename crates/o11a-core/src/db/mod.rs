@@ -166,75 +166,6 @@ pub async fn init_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
   .execute(pool)
   .await?;
 
-  // ── Threats ─────────────────────────────────────────────────────────────
-  sqlx::query(
-    r#"
-    CREATE TABLE IF NOT EXISTS threats (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        audit_id TEXT NOT NULL,
-        subject_topic TEXT NOT NULL,
-        description TEXT NOT NULL,
-        author_id INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        severity TEXT NOT NULL DEFAULT 'medium'
-    )
-    "#,
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_threats_audit ON threats(audit_id)",
-  )
-  .execute(pool)
-  .await?;
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_threats_subject ON threats(subject_topic)",
-  )
-  .execute(pool)
-  .await?;
-
-  // ── Invariants ──────────────────────────────────────────────────────────
-  sqlx::query(
-    r#"
-    CREATE TABLE IF NOT EXISTS invariants (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        threat_id INTEGER NOT NULL,
-        description TEXT NOT NULL,
-        author_id INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        severity TEXT NOT NULL DEFAULT 'medium'
-    )
-    "#,
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_invariants_threat ON invariants(threat_id)",
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    r#"
-    CREATE TABLE IF NOT EXISTS invariant_source_topics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        invariant_id INTEGER NOT NULL,
-        topic_id TEXT NOT NULL,
-        UNIQUE(invariant_id, topic_id)
-    )
-    "#,
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_inv_source_topics_inv ON invariant_source_topics(invariant_id)",
-  )
-  .execute(pool)
-  .await?;
-
   // ── User functional semantics ───────────────────────────────────────────
   // Column shapes mirror `TopicMetadata::FunctionalSemanticTopic`.
   sqlx::query(
@@ -266,34 +197,6 @@ pub async fn init_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         PRIMARY KEY (user_functional_semantic_id, documentation_topic)
     )
     "#,
-  )
-  .execute(pool)
-  .await?;
-
-  // ── Threat-feature links ────────────────────────────────────────────────
-  sqlx::query(
-    r#"
-    CREATE TABLE IF NOT EXISTS threat_feature_links (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        audit_id TEXT NOT NULL,
-        threat_id INTEGER NOT NULL,
-        feature_id INTEGER NOT NULL,
-        relation TEXT NOT NULL,
-        severity TEXT NOT NULL,
-        UNIQUE(threat_id, feature_id)
-    )
-    "#,
-  )
-  .execute(pool)
-  .await?;
-
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_tfl_threat ON threat_feature_links(threat_id)",
-  )
-  .execute(pool)
-  .await?;
-  sqlx::query(
-    "CREATE INDEX IF NOT EXISTS idx_tfl_feature ON threat_feature_links(feature_id)",
   )
   .execute(pool)
   .await?;

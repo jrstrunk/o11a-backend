@@ -120,51 +120,6 @@ pub fn create_router(state: AppState) -> Router {
       "/api/v1/audits/:audit_id/topics/:topic_id/semantics",
       get(handlers::get_functional_semantics),
     )
-    // ============================================
-    // Impact analysis routes
-    // ============================================
-    .route(
-      "/api/v1/audits/:audit_id/impact_analysis",
-      post(handlers::create_threat_feature_link),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/impact_analysis/:threat_id/:feature_id",
-      delete(handlers::delete_threat_feature_link),
-    )
-    // ============================================
-    // Threat routes
-    // ============================================
-    .route(
-      "/api/v1/audits/:audit_id/threats",
-      post(handlers::create_threat),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/threats/:threat_id",
-      get(handlers::get_threat).delete(handlers::delete_threat),
-    )
-    // ============================================
-    // Invariant routes
-    // ============================================
-    .route(
-      "/api/v1/audits/:audit_id/threats/:threat_id/invariants",
-      get(handlers::get_threat_invariants).post(handlers::create_invariant),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/threats/:threat_id/invariants/:invariant_id",
-      delete(handlers::delete_invariant),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/invariants/:invariant_id",
-      get(handlers::get_invariant),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/invariants/:invariant_id/source_topics",
-      post(handlers::add_invariant_source_topic),
-    )
-    .route(
-      "/api/v1/audits/:audit_id/invariants/:invariant_id/source_topics/:topic_id",
-      delete(handlers::remove_invariant_source_topic),
-    )
     // WebSocket for the real-time audit event stream
     .route(
       "/api/v1/audits/:audit_id/events/ws",
