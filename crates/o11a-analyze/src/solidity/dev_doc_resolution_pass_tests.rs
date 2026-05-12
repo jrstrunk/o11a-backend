@@ -2044,7 +2044,7 @@ fn phase_a_seed_to_non_named_topic_does_not_panic() {
     func,
     named_topic(func, "f", NamedTopicKind::Builtin, Scope::Global),
   );
-  let feature = topic::new_feature_topic(7);
+  let feature = topic::new_spec_topic(7);
   audit.topic_metadata.insert(
     feature,
     domain::TopicMetadata::FeatureTopic {

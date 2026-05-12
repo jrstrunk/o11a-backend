@@ -5,9 +5,9 @@ use std::str::FromStr;
 /// A topic identifier in the audit graph.
 ///
 /// The wire format is a single prefix character followed by a signed integer,
-/// e.g. `"F42"`, `"R7"`, `"B13"`, `"P99"`, `"N-100"`, `"D34"`, `"C2"`, `"A4"`,
-/// `"Y5"`. Clients, the on-disk JSON report, and the DB columns all use this
-/// form. The prefix determines the variant; the suffix is stored as an `i32`.
+/// e.g. `"S42"`, `"P99"`, `"N-100"`, `"D34"`, `"C2"`, `"A4"`, `"Y5"`. Clients,
+/// the on-disk JSON report, and the DB columns all use this form. The prefix
+/// determines the variant; the suffix is stored as an `i32`.
 ///
 /// Prefix map:
 /// - `N` → `Node`
@@ -15,9 +15,9 @@ use std::str::FromStr;
 /// - `C` → `Comment`
 /// - `A` → `AdversarialProperty` (shared by `ThreatTopic` and
 ///   `InvariantTopic`; `ConditionTopic` will join later)
-/// - `F` → `Feature`
-/// - `R` → `Requirement`
-/// - `B` → `Behavior`
+/// - `S` → `Spec` (shared by `FeatureTopic`, `RequirementTopic`,
+///   `BehaviorTopic`, and `CharacteristicTopic` — all four entity kinds
+///   in the security-model spec family)
 /// - `P` → `FunctionalProperty`
 /// - `Y` → `TypeConstraint` (chosen as the next unused ASCII letter; no
 ///   existing wire producer emits this prefix yet)
@@ -27,9 +27,7 @@ pub enum Topic {
   Documentation(i32),
   Comment(i32),
   AdversarialProperty(i32),
-  Feature(i32),
-  Requirement(i32),
-  Behavior(i32),
+  Spec(i32),
   FunctionalProperty(i32),
   TypeConstraint(i32),
 }
@@ -42,9 +40,7 @@ impl Topic {
       Topic::Documentation(_) => 'D',
       Topic::Comment(_) => 'C',
       Topic::AdversarialProperty(_) => 'A',
-      Topic::Feature(_) => 'F',
-      Topic::Requirement(_) => 'R',
-      Topic::Behavior(_) => 'B',
+      Topic::Spec(_) => 'S',
       Topic::FunctionalProperty(_) => 'P',
       Topic::TypeConstraint(_) => 'Y',
     }
@@ -57,15 +53,13 @@ impl Topic {
       | Topic::Documentation(id)
       | Topic::Comment(id)
       | Topic::AdversarialProperty(id)
-      | Topic::Feature(id)
-      | Topic::Requirement(id)
-      | Topic::Behavior(id)
+      | Topic::Spec(id)
       | Topic::FunctionalProperty(id)
       | Topic::TypeConstraint(id) => *id,
     }
   }
 
-  /// The prefixed string form of this topic, e.g. `"F42"` or `"N-100"`.
+  /// The prefixed string form of this topic, e.g. `"S42"` or `"N-100"`.
   /// Equivalent to `format!("{}", topic)`.
   pub fn id(&self) -> String {
     self.to_string()
@@ -119,9 +113,7 @@ impl FromStr for Topic {
       'D' => Ok(Topic::Documentation(id)),
       'C' => Ok(Topic::Comment(id)),
       'A' => Ok(Topic::AdversarialProperty(id)),
-      'F' => Ok(Topic::Feature(id)),
-      'R' => Ok(Topic::Requirement(id)),
-      'B' => Ok(Topic::Behavior(id)),
+      'S' => Ok(Topic::Spec(id)),
       'P' => Ok(Topic::FunctionalProperty(id)),
       'Y' => Ok(Topic::TypeConstraint(id)),
       other => Err(ParseTopicError::UnknownPrefix(other)),
@@ -145,7 +137,7 @@ impl<'de> Deserialize<'de> for Topic {
       type Value = Topic;
 
       fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a prefixed topic ID string like \"F42\"")
+        f.write_str("a prefixed topic ID string like \"S42\"")
       }
 
       fn visit_str<E: de::Error>(self, v: &str) -> Result<Topic, E> {
@@ -163,7 +155,7 @@ impl<'de> Deserialize<'de> for Topic {
 
 // ---------------------------------------------------------------------------
 // Thin constructor helpers. Each is a one-liner; callers may use the variant
-// syntax directly (`Topic::Feature(id)`) instead of these helpers.
+// syntax directly (`Topic::Spec(id)`) instead of these helpers.
 // ---------------------------------------------------------------------------
 
 pub fn new_node_topic(node_id: &i32) -> Topic {
@@ -182,16 +174,13 @@ pub fn new_adversarial_property_topic(id: i32) -> Topic {
   Topic::AdversarialProperty(id)
 }
 
-pub fn new_feature_topic(id: i32) -> Topic {
-  Topic::Feature(id)
-}
-
-pub fn new_requirement_topic(id: i32) -> Topic {
-  Topic::Requirement(id)
-}
-
-pub fn new_behavior_topic(id: i32) -> Topic {
-  Topic::Behavior(id)
+/// Construct an `S`-prefixed spec topic. The single counter behind this
+/// prefix is shared across `FeatureTopic`, `RequirementTopic`,
+/// `BehaviorTopic`, and `CharacteristicTopic` — all four entity kinds in
+/// the security-model spec family. The kind distinction lives on the
+/// corresponding `TopicMetadata` variant, not on the topic itself.
+pub fn new_spec_topic(id: i32) -> Topic {
+  Topic::Spec(id)
 }
 
 pub fn new_functional_property_topic(id: i32) -> Topic {
@@ -239,9 +228,7 @@ define_parse_variant!(
   AdversarialProperty,
   "A"
 );
-define_parse_variant!(parse_feature_topic, Feature, "F");
-define_parse_variant!(parse_requirement_topic, Requirement, "R");
-define_parse_variant!(parse_behavior_topic, Behavior, "B");
+define_parse_variant!(parse_spec_topic, Spec, "S");
 define_parse_variant!(parse_functional_property_topic, FunctionalProperty, "P");
 define_parse_variant!(parse_type_constraint_topic, TypeConstraint, "Y");
 
@@ -251,21 +238,21 @@ mod tests {
 
   #[test]
   fn display_matches_wire_format() {
-    assert_eq!(Topic::Feature(42).to_string(), "F42");
+    assert_eq!(Topic::Spec(42).to_string(), "S42");
     assert_eq!(Topic::Node(-100).to_string(), "N-100");
     assert_eq!(Topic::Comment(7).to_string(), "C7");
     assert_eq!(Topic::Documentation(34).to_string(), "D34");
     assert_eq!(Topic::AdversarialProperty(4).to_string(), "A4");
     assert_eq!(Topic::AdversarialProperty(1).to_string(), "A1");
-    assert_eq!(Topic::Requirement(7).to_string(), "R7");
-    assert_eq!(Topic::Behavior(13).to_string(), "B13");
+    assert_eq!(Topic::Spec(7).to_string(), "S7");
+    assert_eq!(Topic::Spec(13).to_string(), "S13");
     assert_eq!(Topic::FunctionalProperty(99).to_string(), "P99");
     assert_eq!(Topic::TypeConstraint(5).to_string(), "Y5");
   }
 
   #[test]
   fn from_str_parses_wire_format() {
-    assert_eq!("F42".parse::<Topic>().unwrap(), Topic::Feature(42));
+    assert_eq!("S42".parse::<Topic>().unwrap(), Topic::Spec(42));
     assert_eq!("N-100".parse::<Topic>().unwrap(), Topic::Node(-100));
     assert_eq!("Y5".parse::<Topic>().unwrap(), Topic::TypeConstraint(5));
   }
@@ -282,7 +269,7 @@ mod tests {
       Err(ParseTopicError::UnknownPrefix('X'))
     ));
     assert!(matches!(
-      "F".parse::<Topic>(),
+      "S".parse::<Topic>(),
       Err(ParseTopicError::InvalidNumericSuffix(_))
     ));
   }
@@ -295,9 +282,9 @@ mod tests {
       Topic::Comment(7),
       Topic::AdversarialProperty(4),
       Topic::AdversarialProperty(1),
-      Topic::Feature(42),
-      Topic::Requirement(7),
-      Topic::Behavior(13),
+      Topic::Spec(42),
+      Topic::Spec(7),
+      Topic::Spec(13),
       Topic::FunctionalProperty(99),
       Topic::TypeConstraint(5),
     ] {
@@ -309,16 +296,16 @@ mod tests {
 
   #[test]
   fn serde_json_round_trip() {
-    let topic = Topic::Feature(42);
+    let topic = Topic::Spec(42);
     let json = serde_json::to_string(&topic).unwrap();
-    assert_eq!(json, "\"F42\"");
+    assert_eq!(json, "\"S42\"");
     let back: Topic = serde_json::from_str(&json).unwrap();
     assert_eq!(back, topic);
   }
 
   #[test]
   fn bincode_round_trip() {
-    let topic = Topic::Feature(42);
+    let topic = Topic::Spec(42);
     let bytes =
       bincode::serde::encode_to_vec(&topic, bincode::config::standard())
         .unwrap();

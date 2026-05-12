@@ -467,7 +467,7 @@ pub fn callees_of(
   out
 }
 
-/// Map a member topic to its prior behaviors (B-topic descriptions).
+/// Map a member topic to its prior behaviors (S-topic descriptions).
 /// Returns an empty vec for members not yet processed or with no
 /// behaviors. Used by render functions to populate
 /// `called_function_behaviors`.

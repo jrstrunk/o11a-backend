@@ -244,18 +244,18 @@ pub async fn get_documentation_panel(
   let mut has_direct_feature_input = false;
   for id in &payload.feature_topics {
     let t = new_topic(id);
-    match t {
-      topic::Topic::Feature(_) => {
-        has_direct_feature_input = true;
-        if !feature_topics_resolved.contains(&t) {
-          feature_topics_resolved.push(t);
-        }
+    if matches!(
+      audit_data.topic_metadata.get(&t),
+      Some(domain::TopicMetadata::FeatureTopic { .. })
+    ) {
+      has_direct_feature_input = true;
+      if !feature_topics_resolved.contains(&t) {
+        feature_topics_resolved.push(t);
       }
-      _ => {
-        for ft in features_for_topic(&t, audit_data) {
-          if !feature_topics_resolved.contains(&ft) {
-            feature_topics_resolved.push(ft);
-          }
+    } else {
+      for ft in features_for_topic(&t, audit_data) {
+        if !feature_topics_resolved.contains(&ft) {
+          feature_topics_resolved.push(ft);
         }
       }
     }
@@ -274,8 +274,10 @@ pub async fn get_documentation_panel(
     let t = new_topic(id);
     related_topics.push(t);
 
-    if matches!(t, topic::Topic::Requirement(_))
-      && let Some(req) = audit_data.requirements.get(&t)
+    if matches!(
+      audit_data.topic_metadata.get(&t),
+      Some(domain::TopicMetadata::RequirementTopic { .. })
+    ) && let Some(req) = audit_data.requirements.get(&t)
     {
       for dt in &req.documentation_topics {
         if !mention_topics.contains(dt) {

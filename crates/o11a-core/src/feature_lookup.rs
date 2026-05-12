@@ -1,43 +1,45 @@
 use crate::domain::{self, AuditData, topic};
 
-/// Find feature topics for any topic by walking the appropriate chain:
-/// - Feature topic: returns itself
-/// - Requirement topic: reverse-lookups feature_requirement_links
-/// - Behavior topic: reverse-lookups feature_behavior_links
-/// - Code topic: walks to containing member → behaviors → feature_behavior_links
+/// Find feature topics for any topic by walking the appropriate chain.
+/// Spec topics (`S`) cover four entity kinds; the kind distinction comes
+/// from the corresponding `TopicMetadata` variant:
+/// - Feature: returns itself
+/// - Requirement: reverse-lookups `feature_requirement_links`
+/// - Behavior: reverse-lookups `feature_behavior_links`
+/// - Characteristic: never linked to a feature, returns nothing
+///
+/// For a code topic (`N`), walks to containing member → behaviors →
+/// `feature_behavior_links`.
 pub fn features_for_topic(
   t: &topic::Topic,
   audit_data: &AuditData,
 ) -> Vec<topic::Topic> {
   let mut features = Vec::new();
 
-  match t {
-    topic::Topic::Feature(_) => {
-      if matches!(
-        audit_data.topic_metadata.get(t),
-        Some(domain::TopicMetadata::FeatureTopic { .. })
-      ) {
+  if matches!(t, topic::Topic::Spec(_)) {
+    match audit_data.topic_metadata.get(t) {
+      Some(domain::TopicMetadata::FeatureTopic { .. }) => {
         features.push(*t);
+        return features;
       }
-      return features;
-    }
-    topic::Topic::Requirement(_) => {
-      for (ft, req_topics) in &audit_data.feature_requirement_links {
-        if req_topics.contains(t) && !features.contains(ft) {
-          features.push(*ft);
+      Some(domain::TopicMetadata::RequirementTopic { .. }) => {
+        for (ft, req_topics) in &audit_data.feature_requirement_links {
+          if req_topics.contains(t) && !features.contains(ft) {
+            features.push(*ft);
+          }
         }
+        return features;
       }
-      return features;
-    }
-    topic::Topic::Behavior(_) => {
-      for (ft, beh_topics) in &audit_data.feature_behavior_links {
-        if beh_topics.contains(t) && !features.contains(ft) {
-          features.push(*ft);
+      Some(domain::TopicMetadata::BehaviorTopic { .. }) => {
+        for (ft, beh_topics) in &audit_data.feature_behavior_links {
+          if beh_topics.contains(t) && !features.contains(ft) {
+            features.push(*ft);
+          }
         }
+        return features;
       }
-      return features;
+      _ => return features,
     }
-    _ => {}
   }
 
   // Code topic: determine the member topic (self if already a member, or walk up)

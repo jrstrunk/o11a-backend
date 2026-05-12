@@ -64,7 +64,7 @@ pub struct UserFunctionalSemanticRow {
 // ============================================================================
 
 /// Creates a user feature with the given pre-allocated ID. The caller is
-/// responsible for obtaining `id` via `o11a_core::ids::allocate_feature_id`
+/// responsible for obtaining `id` via `o11a_core::ids::allocate_spec_id`
 /// so the in-memory counter, not SQLite, owns ID allocation.
 pub async fn create_user_feature(
   pool: &SqlitePool,
@@ -458,7 +458,7 @@ pub fn apply_user_entities_snapshot(
   } = snapshot;
 
   for f in &features {
-    let topic = topic::new_feature_topic(f.id as i32);
+    let topic = topic::new_spec_topic(f.id as i32);
     audit_data.topic_metadata.insert(
       topic,
       TopicMetadata::FeatureTopic {
@@ -472,7 +472,7 @@ pub fn apply_user_entities_snapshot(
   }
 
   for (r, doc_ids) in &requirements {
-    let topic = topic::new_requirement_topic(r.id as i32);
+    let topic = topic::new_spec_topic(r.id as i32);
     let section_topic =
       topic::new_topic(r.section_topic.as_deref().unwrap_or(""));
 
@@ -499,7 +499,7 @@ pub fn apply_user_entities_snapshot(
   }
 
   for b in &behaviors {
-    let topic = topic::new_behavior_topic(b.id as i32);
+    let topic = topic::new_spec_topic(b.id as i32);
     let member_topic = topic::new_topic(&b.member_topic);
     audit_data.topic_metadata.insert(
       topic,
@@ -534,7 +534,7 @@ pub fn apply_user_entities_snapshot(
   }
 
   for (user_feature_id, requirement_topic) in feature_requirement_links {
-    let feature_topic = topic::new_feature_topic(user_feature_id as i32);
+    let feature_topic = topic::new_spec_topic(user_feature_id as i32);
     audit_data
       .feature_requirement_links
       .entry(feature_topic)
@@ -543,7 +543,7 @@ pub fn apply_user_entities_snapshot(
   }
 
   for (user_feature_id, behavior_topic) in feature_behavior_links {
-    let feature_topic = topic::new_feature_topic(user_feature_id as i32);
+    let feature_topic = topic::new_spec_topic(user_feature_id as i32);
     audit_data
       .feature_behavior_links
       .entry(feature_topic)

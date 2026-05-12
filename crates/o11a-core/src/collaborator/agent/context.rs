@@ -5895,7 +5895,7 @@ mod functional_property_render_tests {
   fn member_has_feature_link_behaviors_without_feature_link_means_no_link() {
     let mut audit = empty_audit();
     let member = topic::new_node_topic(&5);
-    let beh = topic::new_behavior_topic(1);
+    let beh = topic::new_spec_topic(101);
     install_behavior_for_member(&mut audit, member, beh);
     assert!(!member_has_feature_link(&member, &audit));
   }
@@ -5904,8 +5904,8 @@ mod functional_property_render_tests {
   fn member_has_feature_link_behavior_in_a_feature_link_is_recognized() {
     let mut audit = empty_audit();
     let member = topic::new_node_topic(&5);
-    let beh = topic::new_behavior_topic(1);
-    let feat = topic::new_feature_topic(1);
+    let beh = topic::new_spec_topic(101);
+    let feat = topic::new_spec_topic(1);
     install_behavior_for_member(&mut audit, member, beh);
     audit.feature_behavior_links.insert(feat, vec![beh]);
     assert!(member_has_feature_link(&member, &audit));
@@ -5915,9 +5915,9 @@ mod functional_property_render_tests {
   fn member_has_feature_link_unrelated_feature_link_is_not_a_match() {
     let mut audit = empty_audit();
     let member = topic::new_node_topic(&5);
-    let beh = topic::new_behavior_topic(1);
-    let feat = topic::new_feature_topic(1);
-    let other_beh = topic::new_behavior_topic(2);
+    let beh = topic::new_spec_topic(101);
+    let feat = topic::new_spec_topic(1);
+    let other_beh = topic::new_spec_topic(102);
     install_behavior_for_member(&mut audit, member, beh);
     audit.feature_behavior_links.insert(feat, vec![other_beh]);
     assert!(!member_has_feature_link(&member, &audit));
@@ -5934,7 +5934,7 @@ mod functional_property_render_tests {
   fn lookup_member_features_returns_empty_when_no_link() {
     let mut audit = empty_audit();
     let member = topic::new_node_topic(&5);
-    let beh = topic::new_behavior_topic(1);
+    let beh = topic::new_spec_topic(101);
     audit.topic_metadata.insert(
       beh,
       TopicMetadata::BehaviorTopic {
@@ -5953,9 +5953,9 @@ mod functional_property_render_tests {
   fn lookup_member_features_returns_feature_object_on_match() {
     let mut audit = empty_audit();
     let member = topic::new_node_topic(&5);
-    let beh = topic::new_behavior_topic(1);
-    let feat = topic::new_feature_topic(1);
-    let req = topic::new_requirement_topic(1);
+    let beh = topic::new_spec_topic(101);
+    let feat = topic::new_spec_topic(1);
+    let req = topic::new_spec_topic(201);
     audit.topic_metadata.insert(
       beh,
       TopicMetadata::BehaviorTopic {
@@ -6004,9 +6004,9 @@ mod functional_property_render_tests {
   {
     let mut audit = empty_audit();
     let member = topic::new_node_topic(&5);
-    let beh = topic::new_behavior_topic(1);
-    let feat_a = topic::new_feature_topic(1);
-    let feat_b = topic::new_feature_topic(2);
+    let beh = topic::new_spec_topic(101);
+    let feat_a = topic::new_spec_topic(1);
+    let feat_b = topic::new_spec_topic(2);
     audit.topic_metadata.insert(
       beh,
       TopicMetadata::BehaviorTopic {
@@ -6045,10 +6045,10 @@ mod functional_property_render_tests {
   fn lookup_member_features_dedupes_requirements_across_features() {
     let mut audit = empty_audit();
     let member = topic::new_node_topic(&5);
-    let beh = topic::new_behavior_topic(1);
-    let feat_a = topic::new_feature_topic(1);
-    let feat_b = topic::new_feature_topic(2);
-    let req = topic::new_requirement_topic(1);
+    let beh = topic::new_spec_topic(101);
+    let feat_a = topic::new_spec_topic(1);
+    let feat_b = topic::new_spec_topic(2);
+    let req = topic::new_spec_topic(201);
     audit.topic_metadata.insert(
       beh,
       TopicMetadata::BehaviorTopic {
@@ -6405,7 +6405,7 @@ mod functional_property_render_tests {
         doc_references: vec![],
       },
     );
-    let beh = topic::new_behavior_topic(1);
+    let beh = topic::new_spec_topic(101);
     audit.topic_metadata.insert(
       beh,
       TopicMetadata::BehaviorTopic {
@@ -6653,8 +6653,8 @@ mod batch_render_integration_tests {
     );
 
     // Set up the feature link so the renderer doesn't skip the member.
-    let beh = topic::new_behavior_topic(1);
-    let feat = topic::new_feature_topic(1);
+    let beh = topic::new_spec_topic(101);
+    let feat = topic::new_spec_topic(1);
     audit.topic_metadata.insert(
       beh,
       TopicMetadata::BehaviorTopic {
@@ -6791,8 +6791,8 @@ mod batch_render_integration_tests {
 
     // Set up a feature link so the skip is purity-driven, not feature-
     // driven.
-    let beh = topic::new_behavior_topic(1);
-    let feat = topic::new_feature_topic(1);
+    let beh = topic::new_spec_topic(101);
+    let feat = topic::new_spec_topic(1);
     audit.topic_metadata.insert(
       beh,
       TopicMetadata::BehaviorTopic {
@@ -7089,7 +7089,7 @@ mod batch_render_integration_tests {
       300,
       vec![],
     );
-    let beh = topic::new_behavior_topic(1);
+    let beh = topic::new_spec_topic(101);
     audit.topic_metadata.insert(
       beh,
       TopicMetadata::BehaviorTopic {

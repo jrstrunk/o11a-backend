@@ -497,12 +497,12 @@ pub struct AuditData {
   /// (NamedTopics, documentation TitledTopics/UnnamedTopics, FeatureTopics,
   /// BehaviorTopics, FunctionalSemanticTopics).
   pub expanded_topic_context: BTreeMap<topic::Topic, Vec<SourceContext>>,
-  /// Requirements keyed by R-prefixed topic ID. Links to features are in feature_requirement_links.
+  /// Requirements keyed by S-prefixed topic ID. Links to features are in feature_requirement_links.
   pub requirements: BTreeMap<topic::Topic, Requirement>,
-  /// Reverse index: D-prefixed section topic → R-prefixed requirement topics.
+  /// Reverse index: D-prefixed section topic → S-prefixed requirement topics.
   /// Derived from RequirementTopic.section_topic, rebuilt with rebuild_feature_context.
   pub section_requirements: BTreeMap<topic::Topic, Vec<topic::Topic>>,
-  /// Reverse index: N-prefixed member topic → B-prefixed behavior topics.
+  /// Reverse index: N-prefixed member topic → S-prefixed behavior topics.
   /// Derived from BehaviorTopic.member_topic, rebuilt with rebuild_feature_context.
   pub member_behaviors: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Reverse index: N-prefixed declaration topic → P-prefixed semantic topics.
@@ -541,9 +541,9 @@ pub struct AuditData {
   pub threat_feature_links: Vec<ThreatFeatureLink>,
   /// Invariants keyed by A-prefixed topic ID. Each belongs to one threat.
   pub invariants: BTreeMap<topic::Topic, Invariant>,
-  /// Feature-to-requirement links (many-to-many). Keyed by F-prefixed topic.
+  /// Feature-to-requirement links (many-to-many). Keyed by S-prefixed topic.
   pub feature_requirement_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
-  /// Feature-to-behavior links (many-to-many). Keyed by F-prefixed topic.
+  /// Feature-to-behavior links (many-to-many). Keyed by S-prefixed topic.
   pub feature_behavior_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Reverse index: mentioned topic → comment topics that mention it. Updated
   /// on comment create. Feeds the conversation panel.
@@ -2766,7 +2766,7 @@ pub fn semantic_texts_by_declaration(
 /// - `topic_context` for FeatureTopics (linked requirements)
 /// - `topic_context` for RequirementTopics (parent feature)
 pub fn rebuild_feature_context(audit_data: &mut AuditData) {
-  // Rebuild section_requirements: section D-topic → R-topics
+  // Rebuild section_requirements: section D-topic → S-topics
   audit_data.section_requirements.clear();
   for (req_topic, metadata) in &audit_data.topic_metadata {
     if let TopicMetadata::RequirementTopic {
@@ -2781,7 +2781,7 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }
   }
 
-  // Rebuild member_behaviors: member N-topic → B-topics
+  // Rebuild member_behaviors: member N-topic → S-topics
   audit_data.member_behaviors.clear();
   for (beh_topic, metadata) in &audit_data.topic_metadata {
     if let TopicMetadata::BehaviorTopic { member_topic, .. } = metadata {

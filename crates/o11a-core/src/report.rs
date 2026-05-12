@@ -18,7 +18,7 @@
 //! don't understand rather than silently skipping fields. Additive changes
 //! (new optional fields) do not require a bump.
 //!
-//! Current version: 2 (alpha — stability not yet guaranteed)
+//! Current version: 3 (alpha — stability not yet guaranteed)
 
 use crate::collaborator::models::Author;
 use crate::domain::{AuditData, MatchSource, Requirement, TopicMetadata};
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The current audit-report schema version. Bump on breaking changes.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Name of the tool that produced the report.
 pub const GENERATOR_NAME: &str = "o11a-analyze";
@@ -81,7 +81,7 @@ pub struct PipelineOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportFeature {
-  /// F-prefixed topic id.
+  /// S-prefixed topic id.
   pub topic: String,
   pub name: String,
   pub description: String,
@@ -89,7 +89,7 @@ pub struct ReportFeature {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportRequirement {
-  /// R-prefixed topic id.
+  /// S-prefixed topic id.
   pub topic: String,
   pub description: String,
   /// D-prefixed documentation section topic this requirement was extracted from.
@@ -100,7 +100,7 @@ pub struct ReportRequirement {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportBehavior {
-  /// B-prefixed topic id.
+  /// S-prefixed topic id.
   pub topic: String,
   pub description: String,
   /// N-prefixed code member topic this behavior belongs to.

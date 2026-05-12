@@ -1,34 +1,25 @@
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-static NEXT_FEATURE_ID: AtomicI32 = AtomicI32::new(1);
-static NEXT_REQUIREMENT_ID: AtomicI32 = AtomicI32::new(1);
-static NEXT_BEHAVIOR_ID: AtomicI32 = AtomicI32::new(1);
+/// Shared counter for `S`-prefixed topic IDs. One counter backs every
+/// entity kind in the security-model spec family — `FeatureTopic`,
+/// `RequirementTopic`, `BehaviorTopic`, and `CharacteristicTopic`. The
+/// kind distinction lives on the `TopicMetadata` variant; the numeric
+/// suffix is allocated from this single sequence so that no two entities
+/// in the family ever collide on `i32`.
+static NEXT_SPEC_ID: AtomicI32 = AtomicI32::new(1);
 static NEXT_FUNCTIONAL_PROPERTY_ID: AtomicI32 = AtomicI32::new(1);
 static NEXT_ADVERSARIAL_PROPERTY_ID: AtomicI32 = AtomicI32::new(1);
 
-pub fn allocate_feature_id() -> i32 {
-  NEXT_FEATURE_ID.fetch_add(1, Ordering::Relaxed)
+/// Allocate an `S`-prefixed topic ID. Shared across `FeatureTopic`,
+/// `RequirementTopic`, `BehaviorTopic`, and `CharacteristicTopic` — all
+/// four entity kinds in the security-model spec family.
+pub fn allocate_spec_id() -> i32 {
+  NEXT_SPEC_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-pub fn reseed_feature_id(max_loaded: i32) {
-  NEXT_FEATURE_ID.store(max_loaded + 1, Ordering::Relaxed);
-}
-
-pub fn allocate_requirement_id() -> i32 {
-  NEXT_REQUIREMENT_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-pub fn reseed_requirement_id(max_loaded: i32) {
-  NEXT_REQUIREMENT_ID.store(max_loaded + 1, Ordering::Relaxed);
-}
-
-pub fn allocate_behavior_id() -> i32 {
-  NEXT_BEHAVIOR_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-pub fn reseed_behavior_id(max_loaded: i32) {
-  NEXT_BEHAVIOR_ID.store(max_loaded + 1, Ordering::Relaxed);
+pub fn reseed_spec_id(max_loaded: i32) {
+  NEXT_SPEC_ID.store(max_loaded + 1, Ordering::Relaxed);
 }
 
 /// Allocate a `P`-prefixed topic ID. Shared across `FunctionalSemanticTopic`,
@@ -87,85 +78,37 @@ mod tests {
 
   // Each counter has a mutex to serialize the tests that touch it, since
   // the counters are process-wide state.
-  static FEATURE_LOCK: Mutex<()> = Mutex::new(());
-  static REQUIREMENT_LOCK: Mutex<()> = Mutex::new(());
-  static BEHAVIOR_LOCK: Mutex<()> = Mutex::new(());
+  static SPEC_LOCK: Mutex<()> = Mutex::new(());
   static FUNCTIONAL_PROPERTY_LOCK: Mutex<()> = Mutex::new(());
   static ADVERSARIAL_PROPERTY_LOCK: Mutex<()> = Mutex::new(());
 
   #[test]
-  fn feature_allocation_is_monotonic() {
-    let _guard = FEATURE_LOCK.lock().unwrap();
-    reseed_feature_id(0);
-    let a = allocate_feature_id();
-    let b = allocate_feature_id();
-    let c = allocate_feature_id();
+  fn spec_allocation_is_monotonic() {
+    let _guard = SPEC_LOCK.lock().unwrap();
+    reseed_spec_id(0);
+    let a = allocate_spec_id();
+    let b = allocate_spec_id();
+    let c = allocate_spec_id();
     assert_eq!(a, 1);
     assert_eq!(b, 2);
     assert_eq!(c, 3);
   }
 
   #[test]
-  fn feature_reseed_advances_past_max() {
-    let _guard = FEATURE_LOCK.lock().unwrap();
-    reseed_feature_id(42);
-    assert_eq!(allocate_feature_id(), 43);
-    assert_eq!(allocate_feature_id(), 44);
+  fn spec_reseed_advances_past_max() {
+    let _guard = SPEC_LOCK.lock().unwrap();
+    reseed_spec_id(42);
+    assert_eq!(allocate_spec_id(), 43);
+    assert_eq!(allocate_spec_id(), 44);
   }
 
   #[test]
-  fn feature_reseed_with_lower_value_still_stores() {
-    let _guard = FEATURE_LOCK.lock().unwrap();
-    reseed_feature_id(100);
-    assert_eq!(allocate_feature_id(), 101);
-    reseed_feature_id(5);
-    assert_eq!(allocate_feature_id(), 6);
-  }
-
-  #[test]
-  fn requirement_allocation_is_monotonic() {
-    let _guard = REQUIREMENT_LOCK.lock().unwrap();
-    reseed_requirement_id(0);
-    assert_eq!(allocate_requirement_id(), 1);
-    assert_eq!(allocate_requirement_id(), 2);
-  }
-
-  #[test]
-  fn requirement_reseed_advances_past_max() {
-    let _guard = REQUIREMENT_LOCK.lock().unwrap();
-    reseed_requirement_id(10);
-    assert_eq!(allocate_requirement_id(), 11);
-  }
-
-  #[test]
-  fn requirement_reseed_with_lower_value_still_stores() {
-    let _guard = REQUIREMENT_LOCK.lock().unwrap();
-    reseed_requirement_id(50);
-    reseed_requirement_id(2);
-    assert_eq!(allocate_requirement_id(), 3);
-  }
-
-  #[test]
-  fn behavior_allocation_is_monotonic() {
-    let _guard = BEHAVIOR_LOCK.lock().unwrap();
-    reseed_behavior_id(0);
-    assert_eq!(allocate_behavior_id(), 1);
-    assert_eq!(allocate_behavior_id(), 2);
-  }
-
-  #[test]
-  fn behavior_reseed_advances_past_max() {
-    let _guard = BEHAVIOR_LOCK.lock().unwrap();
-    reseed_behavior_id(7);
-    assert_eq!(allocate_behavior_id(), 8);
-  }
-
-  #[test]
-  fn behavior_reseed_with_lower_value_still_stores() {
-    let _guard = BEHAVIOR_LOCK.lock().unwrap();
-    reseed_behavior_id(99);
-    reseed_behavior_id(1);
-    assert_eq!(allocate_behavior_id(), 2);
+  fn spec_reseed_with_lower_value_still_stores() {
+    let _guard = SPEC_LOCK.lock().unwrap();
+    reseed_spec_id(100);
+    assert_eq!(allocate_spec_id(), 101);
+    reseed_spec_id(5);
+    assert_eq!(allocate_spec_id(), 6);
   }
 
   #[test]

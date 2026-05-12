@@ -160,7 +160,7 @@ pub async fn build_requirements(
   );
 
   // Re-key parsed entities with allocated IDs from the atomic counter.
-  // The parser assigns local R-topic IDs starting from 1; replace them with
+  // The parser assigns local S-topic IDs starting from 1; replace them with
   // process-wide allocated IDs so pipeline runs don't collide with existing
   // IDs already in the counter's range.
   let task::ParsedRequirements {
@@ -187,9 +187,9 @@ pub async fn build_requirements(
   for (section_topic, req_topics) in parsed_section_requirements {
     let mut new_req_topics = Vec::with_capacity(req_topics.len());
     for old_req_topic in req_topics {
-      let new_req_topic = *id_remap.entry(old_req_topic).or_insert_with(|| {
-        topic::new_requirement_topic(ids::allocate_requirement_id())
-      });
+      let new_req_topic = *id_remap
+        .entry(old_req_topic)
+        .or_insert_with(|| topic::new_spec_topic(ids::allocate_spec_id()));
       new_req_topics.push(new_req_topic);
     }
     new_section_requirements.insert(section_topic, new_req_topics);
@@ -199,7 +199,7 @@ pub async fn build_requirements(
     let new_req_topic = match id_remap.get(&old_req_topic) {
       Some(t) => *t,
       None => {
-        let t = topic::new_requirement_topic(ids::allocate_requirement_id());
+        let t = topic::new_spec_topic(ids::allocate_spec_id());
         id_remap.insert(old_req_topic, t);
         t
       }
@@ -313,7 +313,7 @@ pub async fn synthesize_features(
   for (old_feat_topic, metadata) in topic_metadata {
     let new_feat_topic = *id_remap
       .entry(old_feat_topic)
-      .or_insert_with(|| topic::new_feature_topic(ids::allocate_feature_id()));
+      .or_insert_with(|| topic::new_spec_topic(ids::allocate_spec_id()));
     if let domain::TopicMetadata::FeatureTopic {
       name, description, ..
     } = metadata
@@ -335,7 +335,7 @@ pub async fn synthesize_features(
     let new_feat_topic = match id_remap.get(&old_feat_topic) {
       Some(t) => *t,
       None => {
-        let t = topic::new_feature_topic(ids::allocate_feature_id());
+        let t = topic::new_spec_topic(ids::allocate_spec_id());
         id_remap.insert(old_feat_topic, t);
         t
       }
@@ -347,7 +347,7 @@ pub async fn synthesize_features(
     let new_feat_topic = match id_remap.get(&old_feat_topic) {
       Some(t) => *t,
       None => {
-        let t = topic::new_feature_topic(ids::allocate_feature_id());
+        let t = topic::new_spec_topic(ids::allocate_spec_id());
         id_remap.insert(old_feat_topic, t);
         t
       }
@@ -501,7 +501,7 @@ pub async fn build_behaviors(
         }
       })?;
       for (member_topic, description) in parsed.behaviors {
-        let beh_topic = topic::new_behavior_topic(ids::allocate_behavior_id());
+        let beh_topic = topic::new_spec_topic(ids::allocate_spec_id());
         audit_data.topic_metadata.insert(
           beh_topic,
           domain::TopicMetadata::BehaviorTopic {
@@ -2186,13 +2186,13 @@ mod build_threats_tests {
       // a previous deletion that didn't prune. Both must be gone.
       audit_data.threat_feature_links.push(ThreatFeatureLink {
         threat_topic: pre_threat_topic,
-        feature_topic: topic::new_feature_topic(1),
+        feature_topic: topic::new_spec_topic(1),
         relation: ThreatFeatureRelation::IsVulnerableTo,
         severity: ThreatSeverity::Medium,
       });
       audit_data.threat_feature_links.push(ThreatFeatureLink {
         threat_topic: topic::new_adversarial_property_topic(999),
-        feature_topic: topic::new_feature_topic(2),
+        feature_topic: topic::new_spec_topic(2),
         relation: ThreatFeatureRelation::DefendsAgainst,
         severity: ThreatSeverity::Low,
       });

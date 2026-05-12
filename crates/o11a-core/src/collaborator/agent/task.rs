@@ -245,7 +245,7 @@ static REQUIREMENTS_SCHEMA: LazyLock<JsonSchema> =
 pub struct ParsedRequirements {
   pub requirements: BTreeMap<topic::Topic, Requirement>,
   pub topic_metadata: BTreeMap<topic::Topic, domain::TopicMetadata>,
-  /// Section D-topic → R-topic list, preserving document structure
+  /// Section D-topic → S-topic list, preserving document structure
   pub section_requirements: BTreeMap<topic::Topic, Vec<topic::Topic>>,
 }
 
@@ -269,7 +269,7 @@ fn parse_requirements_response(
 
     for raw_req in section.requirements {
       req_counter += 1;
-      let req_topic = topic::new_requirement_topic(req_counter);
+      let req_topic = topic::new_spec_topic(req_counter);
       section_req_topics.push(req_topic);
 
       let doc_topics: Vec<topic::Topic> = raw_req
@@ -907,9 +907,9 @@ pub async fn condense_semantics(
 /// Prompt for synthesizing features from requirements and behaviors.
 const SYNTHESIZE_FEATURES_PROMPT: &str = "Below are two lists from a smart contract audit:\n\n\
 1. **Requirements** — what the documentation claims the system does, grouped \
-by documentation section. Each requirement has an R-prefixed topic ID.\n\
+by documentation section. Each requirement has an S-prefixed topic ID.\n\
 2. **Behaviors** — what the source code actually does, grouped by code member. \
-Each behavior has a B-prefixed topic ID.\n\n\
+Each behavior has an S-prefixed topic ID.\n\n\
 Your task is to **synthesize features** that represent the system's \
 capabilities. Each feature connects the documented intent (requirements) \
 with the implemented reality (behaviors) for a coherent area of \
@@ -919,8 +919,8 @@ feature objects. Each feature has:\n\
 - `name`: a short, descriptive feature name (behavioral, not technical)\n\
 - `description`: a summary synthesized from both the documented intent and \
 the implemented reality\n\
-- `requirement_topics`: array of R-prefixed topic IDs that apply to this feature\n\
-- `behavior_topics`: array of B-prefixed topic IDs that apply to this feature\n\n\
+- `requirement_topics`: array of S-prefixed topic IDs that apply to this feature\n\
+- `behavior_topics`: array of S-prefixed topic IDs that apply to this feature\n\n\
 Rules:\n\
 - Link each requirement and behavior to every feature it genuinely \
 constrains or participates in. Cross-cutting concerns like access control, \
@@ -987,9 +987,9 @@ static FEATURES_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
 /// Result of feature synthesis.
 pub struct SynthesizedFeatures {
   pub topic_metadata: BTreeMap<topic::Topic, domain::TopicMetadata>,
-  /// Feature → requirement links (F-topic → [R-topics])
+  /// Feature → requirement links (S-topic → [S-topics])
   pub feature_requirement_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
-  /// Feature → behavior links (F-topic → [B-topics])
+  /// Feature → behavior links (S-topic → [S-topics])
   pub feature_behavior_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
 }
 
@@ -1148,7 +1148,7 @@ pub async fn synthesize_features(
   let mut feature_behavior_links = BTreeMap::new();
 
   for (i, raw) in raw_features.into_iter().enumerate() {
-    let feature_topic = topic::new_feature_topic((i + 1) as i32);
+    let feature_topic = topic::new_spec_topic((i + 1) as i32);
 
     let requirement_topics: Vec<topic::Topic> = raw
       .requirement_topics
@@ -3060,10 +3060,10 @@ mod functional_properties_tests {
   #[test]
   fn extract_response_parser_rejects_non_node_topic() {
     let json = r#"{"subjects":[
-      {"subject_topic":"F5","functional_purpose":"p","placement_rationale":"r"}
+      {"subject_topic":"S5","functional_purpose":"p","placement_rationale":"r"}
     ]}"#;
     let entries = run_parse(json);
-    assert!(entries.is_empty(), "F-prefixed topic must not be accepted");
+    assert!(entries.is_empty(), "S-prefixed topic must not be accepted");
   }
 
   #[test]
@@ -3148,7 +3148,7 @@ mod behaviors_parser_tests {
   #[test]
   fn behaviors_parser_skips_non_node_topic() {
     let json = r#"{"members":[
-      {"member_topic":"B5","behaviors":["does X"]}
+      {"member_topic":"S5","behaviors":["does X"]}
     ]}"#;
     let got = run_parse(json);
     assert!(got.is_empty());

@@ -1465,7 +1465,7 @@ pub async fn get_feature_requirements(
   State(state): State<AppState>,
   Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
-  let feature_topic = topic::parse_feature_topic(&topic_id).map_err(|e| {
+  let feature_topic = topic::parse_spec_topic(&topic_id).map_err(|e| {
     tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
@@ -1521,7 +1521,7 @@ pub async fn get_feature(
   State(state): State<AppState>,
   Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  let feature_topic = topic::parse_feature_topic(&topic_id).map_err(|e| {
+  let feature_topic = topic::parse_spec_topic(&topic_id).map_err(|e| {
     tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
@@ -1551,7 +1551,7 @@ pub async fn get_requirement(
   State(state): State<AppState>,
   Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  let req_topic = topic::parse_requirement_topic(&topic_id).map_err(|e| {
+  let req_topic = topic::parse_spec_topic(&topic_id).map_err(|e| {
     tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
@@ -1613,11 +1613,11 @@ pub async fn get_requirements(
   if let Some(for_topic) = params.for_topic.as_deref() {
     let t = new_topic(for_topic);
     let mut requirement_topics: Vec<topic::Topic> = Vec::new();
-    match t {
-      topic::Topic::Requirement(_) => {
+    match audit_data.topic_metadata.get(&t) {
+      Some(domain::TopicMetadata::RequirementTopic { .. }) => {
         requirement_topics.push(t);
       }
-      topic::Topic::Feature(_) => {
+      Some(domain::TopicMetadata::FeatureTopic { .. }) => {
         if let Some(req_topics) = audit_data.feature_requirement_links.get(&t) {
           for rt in req_topics {
             if !requirement_topics.contains(rt) {
@@ -1805,7 +1805,7 @@ pub async fn get_behavior(
   State(state): State<AppState>,
   Path((audit_id, topic_id)): Path<(String, String)>,
 ) -> Result<Json<TopicMetadataResponse>, StatusCode> {
-  let beh_topic = topic::parse_behavior_topic(&topic_id).map_err(|e| {
+  let beh_topic = topic::parse_spec_topic(&topic_id).map_err(|e| {
     tracing::warn!("Invalid topic ID in path: {}", e);
     StatusCode::BAD_REQUEST
   })?;
@@ -1913,7 +1913,7 @@ pub async fn create_user_feature(
 ) -> Result<Json<CreatedResponse>, StatusCode> {
   tracing::debug!("POST /api/v1/audits/{}/features", audit_id);
 
-  let id = o11a_core::ids::allocate_feature_id();
+  let id = o11a_core::ids::allocate_spec_id();
   let created_at = o11a_core::ids::now_iso8601();
 
   db::user_entities::create_user_feature(
@@ -1948,7 +1948,7 @@ pub async fn create_user_feature(
       })?;
   }
 
-  let feature_topic = topic::new_feature_topic(id);
+  let feature_topic = topic::new_spec_topic(id);
   let requirement_topics: Vec<topic::Topic> = payload
     .requirement_topics
     .iter()
@@ -2010,7 +2010,7 @@ pub async fn create_user_requirement(
 ) -> Result<Json<CreatedResponse>, StatusCode> {
   tracing::debug!("POST /api/v1/audits/{}/requirements", audit_id);
 
-  let id = o11a_core::ids::allocate_requirement_id();
+  let id = o11a_core::ids::allocate_spec_id();
   let created_at = o11a_core::ids::now_iso8601();
 
   db::user_entities::create_user_requirement(
@@ -2039,7 +2039,7 @@ pub async fn create_user_requirement(
     })?;
   }
 
-  let req_topic = topic::new_requirement_topic(id);
+  let req_topic = topic::new_spec_topic(id);
   let section_topic =
     topic::new_topic(payload.section_topic.as_deref().unwrap_or(""));
   let documentation_topics: Vec<topic::Topic> = payload
@@ -2090,7 +2090,7 @@ pub async fn create_user_behavior(
 ) -> Result<Json<CreatedResponse>, StatusCode> {
   tracing::debug!("POST /api/v1/audits/{}/behaviors", audit_id);
 
-  let id = o11a_core::ids::allocate_behavior_id();
+  let id = o11a_core::ids::allocate_spec_id();
   let created_at = o11a_core::ids::now_iso8601();
 
   db::user_entities::create_user_behavior(
@@ -2108,7 +2108,7 @@ pub async fn create_user_behavior(
     StatusCode::INTERNAL_SERVER_ERROR
   })?;
 
-  let beh_topic = topic::new_behavior_topic(id);
+  let beh_topic = topic::new_spec_topic(id);
   let member_topic = topic::new_topic(&payload.member_topic);
 
   {

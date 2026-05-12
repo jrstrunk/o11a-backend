@@ -1926,7 +1926,7 @@ fn phase_a_and_ambiguous_with_same_value_coexist() {
 #[test]
 fn phase_a_resolution_to_non_named_topic_does_not_panic() {
   let mut audit = staged_audit();
-  let feature = topic::new_feature_topic(7);
+  let feature = topic::new_spec_topic(7);
   // Insert a synthetic feature topic so the seed doesn't dangle on a
   // missing metadata lookup downstream.
   audit.topic_metadata.insert(
