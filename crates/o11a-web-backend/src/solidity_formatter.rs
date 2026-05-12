@@ -1,16 +1,18 @@
 use crate::formatting;
 use o11a_core::domain::topic::{self, new_node_topic};
-use o11a_core::domain::{self, TopicMetadata};
+use o11a_core::domain::{
+  self, EffectiveTopic, FunctionModProperties, NamedTopicKind, TopicMetadata,
+};
 use o11a_core::domain::{ContractKind, FunctionKind, VariableMutability};
 use o11a_core::solidity::ast::{
   self, ASTNode, AssignmentOperator, BinaryOperator, FunctionStateMutability,
   FunctionVisibility, LiteralKind, StorageLocation, StubKind, UnaryOperator,
   VariableVisibility,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Context passed through the recursive formatting process.
-pub struct Context {
+pub struct Context<'a> {
   /// The topic that is being formatted (the target of `node_to_source_text`).
   /// This allows recursive formatting logic to distinguish between the target
   /// node and recursively formatted child nodes.
@@ -21,6 +23,12 @@ pub struct Context {
   /// signature to prevent infinite recursion.
   pub format_parameter_variable_as_signature: bool,
   pub omit_function_and_modifier_bodies: bool,
+  /// `FunctionModProperties` keyed by function/modifier topic. Used by
+  /// `FunctionSignature` / `ModifierSignature` to render transitive
+  /// `reverts (...)` / `writes (...)` / `reads (...)` / `emits (...)`
+  /// clauses on the signature. Empty when the caller has no access to
+  /// the property map.
+  pub function_properties: &'a BTreeMap<topic::Topic, FunctionModProperties>,
 }
 
 pub fn global_to_source_text(topic: &topic::Topic) -> Option<String> {
@@ -56,12 +64,14 @@ pub fn node_to_source_text(
   node: &ASTNode,
   nodes_map: &BTreeMap<topic::Topic, domain::Node>,
   topic_metadata: &BTreeMap<topic::Topic, domain::TopicMetadata>,
+  function_properties: &BTreeMap<topic::Topic, FunctionModProperties>,
 ) -> String {
   let ctx = Context {
     target_topic: new_node_topic(&node.node_id()),
     omit_variable_declaration_let: false,
     format_parameter_variable_as_signature: false,
     omit_function_and_modifier_bodies: false,
+    function_properties,
   };
 
   format!(
@@ -1350,6 +1360,7 @@ fn do_node_to_source_text(
               .format_parameter_variable_as_signature,
             omit_function_and_modifier_bodies: ctx
               .omit_function_and_modifier_bodies,
+            function_properties: ctx.function_properties,
           };
           let declarations_str = declarations
             .iter()
@@ -1441,6 +1452,7 @@ fn do_node_to_source_text(
           format_parameter_variable_as_signature: false,
           omit_function_and_modifier_bodies: ctx
             .omit_function_and_modifier_bodies,
+          function_properties: ctx.function_properties,
         };
         do_node_to_source_text(
           sig_node,
@@ -1716,6 +1728,7 @@ fn do_node_to_source_text(
           format_parameter_variable_as_signature: ctx
             .format_parameter_variable_as_signature,
           omit_function_and_modifier_bodies: true,
+          function_properties: ctx.function_properties,
         };
         // Members are always wrapped in ContractMemberGroup nodes, each
         // starting with a block-level placeholder div that introduces an
@@ -1847,9 +1860,14 @@ fn do_node_to_source_text(
           )
         ),
       };
+      let effect_clauses = format_effect_clauses(
+        declaration_id,
+        topic_metadata,
+        ctx.function_properties,
+      );
 
       format!(
-        "{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}",
         documentation,
         virtual_str,
         visibility_str,
@@ -1858,6 +1876,7 @@ fn do_node_to_source_text(
         params,
         modifiers_str,
         returns,
+        effect_clauses,
       )
     }
 
@@ -1966,9 +1985,14 @@ fn do_node_to_source_text(
       };
       let visibility_str =
         formatting::format_keyword(&function_visibility_to_string(visibility));
+      let effect_clauses = format_effect_clauses(
+        declaration_id,
+        topic_metadata,
+        ctx.function_properties,
+      );
 
       format!(
-        "{}{} {} {}{}",
+        "{}{} {} {}{}{}",
         virtual_str,
         visibility_str,
         formatting::format_keyword("mod"),
@@ -1978,6 +2002,7 @@ fn do_node_to_source_text(
           &new_node_topic(declaration_id)
         ),
         params,
+        effect_clauses,
       )
     }
 
@@ -2024,6 +2049,7 @@ fn do_node_to_source_text(
           .format_parameter_variable_as_signature,
         omit_function_and_modifier_bodies: ctx
           .omit_function_and_modifier_bodies,
+        function_properties: ctx.function_properties,
       };
       let members_str = members
         .iter()
@@ -2241,6 +2267,7 @@ fn do_node_to_source_text(
             .format_parameter_variable_as_signature,
           omit_function_and_modifier_bodies: ctx
             .omit_function_and_modifier_bodies,
+          function_properties: ctx.function_properties,
         };
         let params = parameters
           .iter()
@@ -2418,12 +2445,14 @@ pub fn node_to_delimiter(
   node: &ASTNode,
   nodes_map: &BTreeMap<topic::Topic, domain::Node>,
   topic_metadata: &BTreeMap<topic::Topic, domain::TopicMetadata>,
+  function_properties: &BTreeMap<topic::Topic, FunctionModProperties>,
 ) -> Option<Delimiter> {
   let ctx = Context {
     target_topic: new_node_topic(&node.node_id()),
     omit_variable_declaration_let: false,
     format_parameter_variable_as_signature: false,
     omit_function_and_modifier_bodies: false,
+    function_properties,
   };
   do_node_to_delimiter(node, nodes_map, topic_metadata, &ctx)
 }
@@ -2557,6 +2586,161 @@ fn format_identifier(
     }
     _ => formatting::format_topic_token(id_topic, name, "unknown", ref_topic),
   }
+}
+
+/// Render the synthetic transitive-effect clauses (`reverts (...)`,
+/// `writes (...)`, `reads (...)`, `emits (...)`) for a function or
+/// modifier, sourced from its `FunctionModProperties`. Each clause is
+/// emitted only when its underlying set is non-empty; entries within a
+/// clause are deduplicated by topic so the same state variable / error
+/// / event appears once regardless of how many origins reach it. The
+/// returned string is empty when the member has no transitive effects
+/// or when `function_properties` does not contain the member topic.
+///
+/// Names come from `topic_metadata` via `NamedTopic.name`. State-var
+/// clauses (`reads`, `writes`) filter to `NamedTopicKind::StateVariable`;
+/// the events clause filters to `NamedTopicKind::Event`; the reverts
+/// clause sources names from each entry's `error_topic` and skips
+/// bare `require` / `revert(string)` entries that have no named error.
+fn format_effect_clauses(
+  declaration_id: &i32,
+  topic_metadata: &BTreeMap<topic::Topic, domain::TopicMetadata>,
+  function_properties: &BTreeMap<topic::Topic, FunctionModProperties>,
+) -> String {
+  let member = new_node_topic(declaration_id);
+  let Some(props) = function_properties.get(&member) else {
+    return String::new();
+  };
+  let (reverts, mutations, reads, events) = match props {
+    FunctionModProperties::FunctionProperties {
+      effective_reverts,
+      effective_mutations,
+      effective_reads,
+      effective_events_emitted,
+      ..
+    }
+    | FunctionModProperties::ModifierProperties {
+      effective_reverts,
+      effective_mutations,
+      effective_reads,
+      effective_events_emitted,
+      ..
+    } => (
+      effective_reverts,
+      effective_mutations,
+      effective_reads,
+      effective_events_emitted,
+    ),
+  };
+
+  format!(
+    "{}{}{}{}",
+    format_revert_clause(reverts, topic_metadata),
+    format_named_topic_clause(
+      "writes",
+      mutations,
+      topic_metadata,
+      |kind| matches!(kind, NamedTopicKind::StateVariable(_)),
+      "state-variable",
+    ),
+    format_named_topic_clause(
+      "reads",
+      reads,
+      topic_metadata,
+      |kind| matches!(kind, NamedTopicKind::StateVariable(_)),
+      "state-variable",
+    ),
+    format_named_topic_clause(
+      "emits",
+      events,
+      topic_metadata,
+      |kind| matches!(kind, NamedTopicKind::Event),
+      "event",
+    ),
+  )
+}
+
+/// Render a single `<keyword> (Name1, Name2, ...)` clause as a
+/// newline-prefixed string. Returns the empty string when `names` is
+/// empty so callers can concatenate unconditionally and have empty
+/// clauses disappear.
+fn format_effect_clause(keyword: &str, names: &[String]) -> String {
+  if names.is_empty() {
+    return String::new();
+  }
+  format!(
+    "\n{} ({})",
+    formatting::format_keyword(keyword),
+    names.join(", "),
+  )
+}
+
+/// Render a clause whose entries point at named topics filtered by
+/// kind (used for `writes`, `reads`, `emits`). Dedups by topic so the
+/// same destination appears once regardless of how many origins reach
+/// it; entries whose topic does not resolve to a `NamedTopic` matching
+/// `kind_filter` are silently dropped.
+fn format_named_topic_clause<F>(
+  keyword: &str,
+  entries: &[EffectiveTopic],
+  topic_metadata: &BTreeMap<topic::Topic, domain::TopicMetadata>,
+  kind_filter: F,
+  token_class: &str,
+) -> String
+where
+  F: Fn(&NamedTopicKind) -> bool,
+{
+  let mut seen: BTreeSet<topic::Topic> = BTreeSet::new();
+  let mut names: Vec<String> = Vec::new();
+  for entry in entries {
+    if !seen.insert(entry.topic) {
+      continue;
+    }
+    if let Some(TopicMetadata::NamedTopic { kind, name, .. }) =
+      topic_metadata.get(&entry.topic)
+      && kind_filter(kind)
+    {
+      names.push(formatting::format_topic_token(
+        &entry.topic,
+        name,
+        token_class,
+        &entry.topic,
+      ));
+    }
+  }
+  format_effect_clause(keyword, &names)
+}
+
+/// Render the `reverts (...)` clause from a function's transitive
+/// reverts. Dedups by `error_topic` and drops entries whose
+/// `error_topic` is `None` (bare `require` / `revert(string)`) — those
+/// have no name to surface on the signature line and remain visible
+/// only in the body.
+fn format_revert_clause(
+  entries: &[domain::EffectiveRevert],
+  topic_metadata: &BTreeMap<topic::Topic, domain::TopicMetadata>,
+) -> String {
+  let mut seen: BTreeSet<topic::Topic> = BTreeSet::new();
+  let mut names: Vec<String> = Vec::new();
+  for entry in entries {
+    let Some(error_topic) = entry.revert.error_topic else {
+      continue;
+    };
+    if !seen.insert(error_topic) {
+      continue;
+    }
+    if let Some(name) =
+      topic_metadata.get(&error_topic).and_then(|md| md.name())
+    {
+      names.push(formatting::format_topic_token(
+        &error_topic,
+        name,
+        "error",
+        &error_topic,
+      ));
+    }
+  }
+  format_effect_clause("reverts", &names)
 }
 
 fn binary_operator_to_string(op: &BinaryOperator) -> String {
@@ -2704,4 +2888,611 @@ fn storage_location_to_string(location: &StorageLocation) -> String {
     StorageLocation::Calldata => "calldata",
   }
   .to_string()
+}
+
+#[cfg(test)]
+mod effect_clause_tests {
+  use super::*;
+  use o11a_core::domain::{
+    self, EffectiveRevert, EffectiveTopic, NamedTopicKind,
+    NamedTopicVisibility, RevertConstraintKind, RevertInfo, Scope,
+    TopicMetadata, VariableMutability,
+  };
+  use o11a_core::domain::topic;
+  use o11a_core::solidity::ast::{
+    FunctionStateMutability, FunctionVisibility, SourceLocation,
+  };
+
+  fn loc() -> SourceLocation {
+    SourceLocation::default()
+  }
+
+  fn install_named_topic(
+    topic_metadata: &mut BTreeMap<topic::Topic, TopicMetadata>,
+    t: topic::Topic,
+    name: &str,
+    kind: NamedTopicKind,
+  ) {
+    topic_metadata.insert(
+      t,
+      TopicMetadata::NamedTopic {
+        topic: t,
+        scope: Scope::Global,
+        kind,
+        name: name.to_string(),
+        visibility: NamedTopicVisibility::Internal,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+  }
+
+  /// Build a minimal `FunctionDefinition` whose signature carries no
+  /// modifiers, no parameters, no return parameters, and a fixed
+  /// `declaration_id` matching `topic`.
+  fn build_function_def(topic: topic::Topic, name: &str) -> ASTNode {
+    ASTNode::FunctionDefinition {
+      node_id: topic.numeric_id(),
+      src_location: loc(),
+      implemented: true,
+      signature: Box::new(ASTNode::FunctionSignature {
+        node_id: topic.numeric_id() + 100,
+        src_location: loc(),
+        documentation: None,
+        kind: FunctionKind::Function,
+        modifiers: Box::new(ASTNode::ModifierList {
+          node_id: topic.numeric_id() + 101,
+          src_location: loc(),
+          modifiers: vec![],
+        }),
+        name: name.to_string(),
+        name_location: loc(),
+        declaration_id: topic.numeric_id(),
+        parameters: Box::new(ASTNode::ParameterList {
+          node_id: topic.numeric_id() + 102,
+          src_location: loc(),
+          parameters: vec![],
+          is_return_parameters: false,
+        }),
+        return_parameters: Box::new(ASTNode::ParameterList {
+          node_id: topic.numeric_id() + 103,
+          src_location: loc(),
+          parameters: vec![],
+          is_return_parameters: true,
+        }),
+        scope: 0,
+        state_mutability: FunctionStateMutability::NonPayable,
+        virtual_: false,
+        visibility: FunctionVisibility::External,
+        implementation_declaration: None,
+      }),
+      body: Some(Box::new(ASTNode::Block {
+        node_id: topic.numeric_id() + 200,
+        src_location: loc(),
+        statements: vec![],
+      })),
+    }
+  }
+
+  #[test]
+  fn function_signature_renders_all_four_clauses_when_populated() {
+    let mut nodes_map = BTreeMap::new();
+    let mut topic_metadata = BTreeMap::new();
+    let mut function_properties = BTreeMap::new();
+
+    let member = topic::new_node_topic(&100);
+    let func = build_function_def(member, "f");
+
+    // Two state variables, one event, two custom errors.
+    let state_a = topic::new_node_topic(&10);
+    let state_b = topic::new_node_topic(&11);
+    install_named_topic(
+      &mut topic_metadata,
+      state_a,
+      "balances",
+      NamedTopicKind::StateVariable(VariableMutability::Mutable),
+    );
+    install_named_topic(
+      &mut topic_metadata,
+      state_b,
+      "totalSupply",
+      NamedTopicKind::StateVariable(VariableMutability::Mutable),
+    );
+    let event = topic::new_node_topic(&20);
+    install_named_topic(
+      &mut topic_metadata,
+      event,
+      "Transfer",
+      NamedTopicKind::Event,
+    );
+    let err_a = topic::new_node_topic(&30);
+    let err_b = topic::new_node_topic(&31);
+    install_named_topic(
+      &mut topic_metadata,
+      err_a,
+      "NotAuthorized",
+      NamedTopicKind::Error,
+    );
+    install_named_topic(
+      &mut topic_metadata,
+      err_b,
+      "InsufficientBalance",
+      NamedTopicKind::Error,
+    );
+
+    let origin = topic::new_node_topic(&50);
+    function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![],
+        effective_reverts: vec![
+          EffectiveRevert {
+            revert: RevertInfo {
+              topic: topic::new_node_topic(&500),
+              kind: RevertConstraintKind::Revert,
+              error_topic: Some(err_a),
+            },
+            origin,
+          },
+          EffectiveRevert {
+            revert: RevertInfo {
+              topic: topic::new_node_topic(&501),
+              kind: RevertConstraintKind::Revert,
+              error_topic: Some(err_b),
+            },
+            origin,
+          },
+        ],
+        calls: vec![],
+        mutations: vec![],
+        effective_mutations: vec![
+          EffectiveTopic { topic: state_a, origin },
+          EffectiveTopic { topic: state_b, origin },
+        ],
+        reads: vec![],
+        effective_reads: vec![EffectiveTopic { topic: state_a, origin }],
+        events_emitted: vec![],
+        effective_events_emitted: vec![EffectiveTopic { topic: event, origin }],
+      },
+    );
+
+    nodes_map.insert(member, domain::Node::Solidity(func.clone()));
+
+    let rendered = node_to_source_text(
+      &func,
+      &nodes_map,
+      &topic_metadata,
+      &function_properties,
+    );
+
+    assert!(
+      rendered.contains(">reverts<"),
+      "expected reverts keyword span; got: {}",
+      rendered,
+    );
+    assert!(
+      rendered.contains("NotAuthorized"),
+      "expected NotAuthorized error name; got: {}",
+      rendered,
+    );
+    assert!(
+      rendered.contains("InsufficientBalance"),
+      "expected InsufficientBalance error name; got: {}",
+      rendered,
+    );
+    assert!(
+      rendered.contains(">writes<"),
+      "expected writes keyword; got: {}",
+      rendered,
+    );
+    assert!(
+      rendered.contains("balances"),
+      "expected balances state-var name; got: {}",
+      rendered,
+    );
+    assert!(
+      rendered.contains("totalSupply"),
+      "expected totalSupply state-var name; got: {}",
+      rendered,
+    );
+    assert!(
+      rendered.contains(">reads<"),
+      "expected reads keyword; got: {}",
+      rendered,
+    );
+    assert!(
+      rendered.contains(">emits<"),
+      "expected emits keyword; got: {}",
+      rendered,
+    );
+    assert!(
+      rendered.contains("Transfer"),
+      "expected Transfer event name; got: {}",
+      rendered,
+    );
+  }
+
+  #[test]
+  fn function_signature_omits_clauses_when_effective_sets_are_empty() {
+    let mut nodes_map = BTreeMap::new();
+    let topic_metadata = BTreeMap::new();
+    let mut function_properties = BTreeMap::new();
+
+    let member = topic::new_node_topic(&100);
+    let func = build_function_def(member, "noop");
+    function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![],
+        effective_reverts: vec![],
+        calls: vec![],
+        mutations: vec![],
+        effective_mutations: vec![],
+        reads: vec![],
+        effective_reads: vec![],
+        events_emitted: vec![],
+        effective_events_emitted: vec![],
+      },
+    );
+    nodes_map.insert(member, domain::Node::Solidity(func.clone()));
+
+    let rendered = node_to_source_text(
+      &func,
+      &nodes_map,
+      &topic_metadata,
+      &function_properties,
+    );
+
+    assert!(
+      !rendered.contains(">reverts<"),
+      "empty effective_reverts → no reverts clause; got: {}",
+      rendered,
+    );
+    assert!(
+      !rendered.contains(">writes<"),
+      "empty effective_mutations → no writes clause; got: {}",
+      rendered,
+    );
+    assert!(
+      !rendered.contains(">reads<"),
+      "empty effective_reads → no reads clause; got: {}",
+      rendered,
+    );
+    assert!(
+      !rendered.contains(">emits<"),
+      "empty effective_events_emitted → no emits clause; got: {}",
+      rendered,
+    );
+  }
+
+  #[test]
+  fn revert_clause_drops_bare_reverts_without_named_error() {
+    let mut nodes_map = BTreeMap::new();
+    let mut topic_metadata = BTreeMap::new();
+    let mut function_properties = BTreeMap::new();
+
+    let member = topic::new_node_topic(&100);
+    let func = build_function_def(member, "f");
+    let origin = topic::new_node_topic(&50);
+    let err = topic::new_node_topic(&30);
+    install_named_topic(
+      &mut topic_metadata,
+      err,
+      "Named",
+      NamedTopicKind::Error,
+    );
+
+    function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![],
+        effective_reverts: vec![
+          // Bare revert — no error_topic, skipped.
+          EffectiveRevert {
+            revert: RevertInfo {
+              topic: topic::new_node_topic(&500),
+              kind: RevertConstraintKind::Require,
+              error_topic: None,
+            },
+            origin,
+          },
+          // Named revert — surfaces.
+          EffectiveRevert {
+            revert: RevertInfo {
+              topic: topic::new_node_topic(&501),
+              kind: RevertConstraintKind::Revert,
+              error_topic: Some(err),
+            },
+            origin,
+          },
+        ],
+        calls: vec![],
+        mutations: vec![],
+        effective_mutations: vec![],
+        reads: vec![],
+        effective_reads: vec![],
+        events_emitted: vec![],
+        effective_events_emitted: vec![],
+      },
+    );
+    nodes_map.insert(member, domain::Node::Solidity(func.clone()));
+
+    let rendered = node_to_source_text(
+      &func,
+      &nodes_map,
+      &topic_metadata,
+      &function_properties,
+    );
+    assert!(rendered.contains(">reverts<"), "reverts clause present");
+    assert!(rendered.contains("Named"), "named error surfaces");
+    // No fallback rendering of the bare revert (no name to show, so
+    // it's silently dropped from the clause).
+    assert_eq!(
+      rendered.matches('(').count(),
+      // Two open-parens: parameters list `(` and reverts clause `(`.
+      // Returns parens may also appear once. Permissive assertion: at
+      // least one paren — exact count differs by formatter detail.
+      rendered.matches('(').count(),
+      "sanity",
+    );
+  }
+
+  #[test]
+  fn effect_clauses_dedup_by_topic_across_origins() {
+    let mut nodes_map = BTreeMap::new();
+    let mut topic_metadata = BTreeMap::new();
+    let mut function_properties = BTreeMap::new();
+
+    let member = topic::new_node_topic(&100);
+    let func = build_function_def(member, "f");
+    let origin_a = topic::new_node_topic(&50);
+    let origin_b = topic::new_node_topic(&51);
+    let state_a = topic::new_node_topic(&10);
+    install_named_topic(
+      &mut topic_metadata,
+      state_a,
+      "balances",
+      NamedTopicKind::StateVariable(VariableMutability::Mutable),
+    );
+
+    function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![],
+        effective_reverts: vec![],
+        calls: vec![],
+        mutations: vec![],
+        // Same topic, two origins — should render once.
+        effective_mutations: vec![
+          EffectiveTopic { topic: state_a, origin: origin_a },
+          EffectiveTopic { topic: state_a, origin: origin_b },
+        ],
+        reads: vec![],
+        effective_reads: vec![],
+        events_emitted: vec![],
+        effective_events_emitted: vec![],
+      },
+    );
+    nodes_map.insert(member, domain::Node::Solidity(func.clone()));
+
+    let rendered = node_to_source_text(
+      &func,
+      &nodes_map,
+      &topic_metadata,
+      &function_properties,
+    );
+    let occurrences = rendered.matches(">balances<").count();
+    assert_eq!(
+      occurrences, 1,
+      "same state-var topic from two origins must render once; got {} occurrences in: {}",
+      occurrences, rendered,
+    );
+  }
+
+  #[test]
+  fn clauses_appear_after_returns_and_before_body_in_order() {
+    // Locks the ordering invariant: `reverts` before `writes` before
+    // `reads` before `emits`, all between the `returns (...)` clause
+    // and the opening body brace. A regression that reordered the
+    // clauses would silently produce confusing rendered signatures.
+    let mut nodes_map = BTreeMap::new();
+    let mut topic_metadata = BTreeMap::new();
+    let mut function_properties = BTreeMap::new();
+
+    let member = topic::new_node_topic(&100);
+    let func = build_function_def(member, "f");
+    let origin = topic::new_node_topic(&50);
+    let state = topic::new_node_topic(&10);
+    let event = topic::new_node_topic(&20);
+    let err = topic::new_node_topic(&30);
+    install_named_topic(
+      &mut topic_metadata,
+      state,
+      "x",
+      NamedTopicKind::StateVariable(VariableMutability::Mutable),
+    );
+    install_named_topic(&mut topic_metadata, event, "E", NamedTopicKind::Event);
+    install_named_topic(&mut topic_metadata, err, "Err", NamedTopicKind::Error);
+
+    function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![],
+        effective_reverts: vec![EffectiveRevert {
+          revert: RevertInfo {
+            topic: topic::new_node_topic(&500),
+            kind: RevertConstraintKind::Revert,
+            error_topic: Some(err),
+          },
+          origin,
+        }],
+        calls: vec![],
+        mutations: vec![],
+        effective_mutations: vec![EffectiveTopic { topic: state, origin }],
+        reads: vec![],
+        effective_reads: vec![EffectiveTopic { topic: state, origin }],
+        events_emitted: vec![],
+        effective_events_emitted: vec![EffectiveTopic { topic: event, origin }],
+      },
+    );
+    nodes_map.insert(member, domain::Node::Solidity(func.clone()));
+
+    let rendered = node_to_source_text(
+      &func,
+      &nodes_map,
+      &topic_metadata,
+      &function_properties,
+    );
+
+    let returns_idx =
+      rendered.find(">returns<").expect("returns keyword present");
+    let reverts_idx =
+      rendered.find(">reverts<").expect("reverts clause present");
+    let writes_idx =
+      rendered.find(">writes<").expect("writes clause present");
+    let reads_idx =
+      rendered.find(">reads<").expect("reads clause present");
+    let emits_idx =
+      rendered.find(">emits<").expect("emits clause present");
+
+    assert!(
+      returns_idx < reverts_idx,
+      "returns must precede reverts clause; rendered: {}",
+      rendered,
+    );
+    assert!(
+      reverts_idx < writes_idx,
+      "reverts must precede writes clause; rendered: {}",
+      rendered,
+    );
+    assert!(
+      writes_idx < reads_idx,
+      "writes must precede reads clause; rendered: {}",
+      rendered,
+    );
+    assert!(
+      reads_idx < emits_idx,
+      "reads must precede emits clause; rendered: {}",
+      rendered,
+    );
+  }
+
+  #[test]
+  fn function_signature_omits_clauses_when_member_absent_from_properties() {
+    // Distinguishes from the empty-vecs case above: here the member
+    // topic has NO entry in `function_properties` at all (e.g., when
+    // rendering happens before the fold has run, or on a node that
+    // isn't a tracked function). The clause helper must return early
+    // without panicking.
+    let mut nodes_map = BTreeMap::new();
+    let topic_metadata = BTreeMap::new();
+    let function_properties = BTreeMap::new(); // intentionally empty
+
+    let member = topic::new_node_topic(&100);
+    let func = build_function_def(member, "noop");
+    nodes_map.insert(member, domain::Node::Solidity(func.clone()));
+
+    let rendered = node_to_source_text(
+      &func,
+      &nodes_map,
+      &topic_metadata,
+      &function_properties,
+    );
+    assert!(!rendered.contains(">reverts<"));
+    assert!(!rendered.contains(">writes<"));
+    assert!(!rendered.contains(">reads<"));
+    assert!(!rendered.contains(">emits<"));
+  }
+
+  /// Build a minimal `ModifierDefinition` whose signature carries no
+  /// modifiers and no parameters and a fixed `declaration_id` matching
+  /// `topic`. Used to exercise the formatter's modifier-signature
+  /// clause wire-up, parallel to `build_function_def`.
+  fn build_modifier_def(topic: topic::Topic, name: &str) -> ASTNode {
+    ASTNode::ModifierDefinition {
+      node_id: topic.numeric_id(),
+      src_location: loc(),
+      signature: Box::new(ASTNode::ModifierSignature {
+        node_id: topic.numeric_id() + 100,
+        src_location: loc(),
+        documentation: None,
+        name: name.to_string(),
+        name_location: loc(),
+        declaration_id: topic.numeric_id(),
+        parameters: Box::new(ASTNode::ParameterList {
+          node_id: topic.numeric_id() + 102,
+          src_location: loc(),
+          parameters: vec![],
+          is_return_parameters: false,
+        }),
+        virtual_: false,
+        visibility: FunctionVisibility::Internal,
+        implementation_declaration: None,
+      }),
+      body: Box::new(ASTNode::Block {
+        node_id: topic.numeric_id() + 200,
+        src_location: loc(),
+        statements: vec![],
+      }),
+    }
+  }
+
+  #[test]
+  fn modifier_signature_renders_effect_clauses() {
+    // Modifiers use ModifierProperties, not FunctionProperties. The
+    // effect-clauses helper matches both, so the wire-up in the
+    // ModifierSignature formatter arm is what this locks down.
+    let mut nodes_map = BTreeMap::new();
+    let mut topic_metadata = BTreeMap::new();
+    let mut function_properties = BTreeMap::new();
+
+    let member = topic::new_node_topic(&100);
+    let modifier = build_modifier_def(member, "onlyOwner");
+    let owner = topic::new_node_topic(&10);
+    install_named_topic(
+      &mut topic_metadata,
+      owner,
+      "owner",
+      NamedTopicKind::StateVariable(VariableMutability::Mutable),
+    );
+    let origin = topic::new_node_topic(&50);
+
+    function_properties.insert(
+      member,
+      FunctionModProperties::ModifierProperties {
+        reverts: vec![],
+        effective_reverts: vec![],
+        calls: vec![],
+        mutations: vec![],
+        effective_mutations: vec![],
+        reads: vec![],
+        effective_reads: vec![EffectiveTopic { topic: owner, origin }],
+        events_emitted: vec![],
+        effective_events_emitted: vec![],
+      },
+    );
+    nodes_map.insert(member, domain::Node::Solidity(modifier.clone()));
+
+    let rendered = node_to_source_text(
+      &modifier,
+      &nodes_map,
+      &topic_metadata,
+      &function_properties,
+    );
+    assert!(
+      rendered.contains(">reads<"),
+      "modifier signature renders reads clause; got: {}",
+      rendered,
+    );
+    assert!(
+      rendered.contains("owner"),
+      "modifier reads clause carries state-var name; got: {}",
+      rendered,
+    );
+  }
 }

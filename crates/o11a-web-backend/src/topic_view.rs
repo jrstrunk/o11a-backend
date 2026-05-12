@@ -701,6 +701,7 @@ pub fn render_source_text(
         solidity_node,
         &audit_data.nodes,
         &audit_data.topic_metadata,
+        &audit_data.function_properties,
       ))
     }
     Some(Node::Documentation(doc_node)) => {
@@ -936,6 +937,7 @@ fn get_delimiter_opening(
         node,
         &audit_data.nodes,
         &audit_data.topic_metadata,
+        &audit_data.function_properties,
       ) {
         Some(delimiter) => delimiter.opening,
         None => "<code>...</code>".to_string(),
@@ -955,6 +957,7 @@ fn get_delimiter_closing(
       node,
       &audit_data.nodes,
       &audit_data.topic_metadata,
+      &audit_data.function_properties,
     )
     .and_then(|d| d.closing),
     _ => None,

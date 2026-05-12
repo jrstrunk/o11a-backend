@@ -749,7 +749,11 @@ fn render_solidity_ast_snippet(
       // Inline callee data at the call site, when the callee can be
       // statically resolved. Each field is omitted when its underlying
       // list is empty so the rendered AST stays compact for calls
-      // that propagate nothing of interest.
+      // that propagate nothing of interest. The transitive callee_*
+      // variants come from the same `FunctionModProperties.effective_*`
+      // fields used by the per-member envelope, giving the LLM a
+      // symmetric view: at each call site it sees both what the callee
+      // directly does and what it can do through its own call graph.
       if let Some(callee_topic) = resolve_callee_topic(expression, audit_data) {
         let behaviors = crate::collaborator::agent::function_dag::behaviors_of(
           &callee_topic,
@@ -766,9 +770,32 @@ fn render_solidity_ast_snippet(
         if !callee_writes.is_empty() {
           o["callee_state_writes"] = json!(callee_writes);
         }
+        let callee_events =
+          collect_member_events_emitted(&callee_topic, audit_data);
+        if !callee_events.is_empty() {
+          o["callee_events_emitted"] = json!(callee_events);
+        }
         let callee_reverts = collect_member_reverts(&callee_topic, audit_data);
         if !callee_reverts.is_empty() {
           o["callee_reverts"] = json!(callee_reverts);
+        }
+        let (callee_transitive_reads, callee_transitive_writes) =
+          collect_member_transitive_state_io(&callee_topic, audit_data);
+        if !callee_transitive_reads.is_empty() {
+          o["callee_transitive_state_reads"] = json!(callee_transitive_reads);
+        }
+        if !callee_transitive_writes.is_empty() {
+          o["callee_transitive_state_writes"] = json!(callee_transitive_writes);
+        }
+        let callee_transitive_events =
+          collect_member_transitive_events(&callee_topic, audit_data);
+        if !callee_transitive_events.is_empty() {
+          o["callee_transitive_events_emitted"] = json!(callee_transitive_events);
+        }
+        let callee_transitive_reverts =
+          collect_member_transitive_reverts(&callee_topic, audit_data);
+        if !callee_transitive_reverts.is_empty() {
+          o["callee_transitive_reverts"] = json!(callee_transitive_reverts);
         }
       }
       o
@@ -2568,8 +2595,22 @@ pub struct BatchForExtraction {
 ///   from this list — they appear only in `state_writes`. Compound
 ///   assignments (`x += y`) and `++`/`--` correctly surface the
 ///   operand in both arrays.
+/// - `transitive_state_reads` — array of `{ topic, origin }` for every
+///   state variable read by this function transitively through its
+///   call graph (sourced from
+///   `FunctionModProperties.effective_reads`). `origin` is the
+///   function or modifier whose body directly reads the variable.
 /// - `state_writes` — array of state-variable topic IDs mutated by this
 ///   function (sourced from `FunctionModProperties.mutations`).
+/// - `transitive_state_writes` — array of `{ topic, origin }` for every
+///   state variable written transitively through the call graph
+///   (sourced from `FunctionModProperties.effective_mutations`).
+/// - `events_emitted` — array of event topic IDs directly emitted by
+///   this function (sourced from
+///   `FunctionModProperties.events_emitted`).
+/// - `transitive_events_emitted` — array of `{ topic, origin }` for
+///   every event emitted transitively through the call graph (sourced
+///   from `FunctionModProperties.effective_events_emitted`).
 /// - `reverts` — array of `{ topic, kind, name?, message? }` for every
 ///   `require` / `revert` statement directly inside this member.
 ///   `kind` is `"require"` or `"revert"`. `name` is set when the
@@ -2580,6 +2621,11 @@ pub struct BatchForExtraction {
 ///   message? }` shape is also stamped inline as `callee_reverts` on
 ///   `FunctionCall` AST nodes whose callee is statically resolvable
 ///   (see `render_solidity_ast_snippet`).
+/// - `transitive_reverts` — array of `{ topic, kind, name?, message?,
+///   origin }` for every revert reachable transitively through the
+///   non-try call graph (sourced from
+///   `FunctionModProperties.effective_reverts`). Reverts inside
+///   try-wrapped callees are absorbed and do NOT appear here.
 /// - `features` — array of all features whose behaviors include any of
 ///   this member's behaviors. Requirements deduped across features.
 ///   The array is empty before reconciliation has run (step 3) or for
@@ -2593,7 +2639,10 @@ pub struct BatchForExtraction {
 /// Inline metadata is also stamped onto reference nodes inside the
 /// member AST: `semantic` for any node with a `referenced_declaration`,
 /// `callee_behaviors` / `callee_state_reads` / `callee_state_writes` /
-/// `callee_reverts` for `FunctionCall` nodes whose callee is
+/// `callee_events_emitted` / `callee_reverts` (direct effects) and
+/// `callee_transitive_state_reads` / `callee_transitive_state_writes` /
+/// `callee_transitive_events_emitted` / `callee_transitive_reverts`
+/// (transitive effects) for `FunctionCall` nodes whose callee is
 /// statically resolvable, and `functional_purpose` /
 /// `placement_rationale` / `conditions` on non-pure subject nodes
 /// (see `render_solidity_ast_snippet`).
@@ -2704,7 +2753,14 @@ fn render_member_for_batch(
   let visibility = lookup_member_visibility(member, audit_data);
   let modifiers = collect_member_modifiers(node, audit_data);
   let (state_reads, state_writes) = collect_member_state_io(member, audit_data);
+  let events_emitted = collect_member_events_emitted(member, audit_data);
   let reverts = collect_member_reverts(member, audit_data);
+  let transitive_reverts =
+    collect_member_transitive_reverts(member, audit_data);
+  let (transitive_state_reads, transitive_state_writes) =
+    collect_member_transitive_state_io(member, audit_data);
+  let transitive_events_emitted =
+    collect_member_transitive_events(member, audit_data);
 
   let mut obj = json!({
     "topic": member.id(),
@@ -2713,8 +2769,13 @@ fn render_member_for_batch(
     "visibility": visibility,
     "modifiers": modifiers,
     "state_reads": state_reads,
+    "transitive_state_reads": transitive_state_reads,
     "state_writes": state_writes,
+    "transitive_state_writes": transitive_state_writes,
+    "events_emitted": events_emitted,
+    "transitive_events_emitted": transitive_events_emitted,
     "reverts": reverts,
+    "transitive_reverts": transitive_reverts,
     "definition": definition,
     "semantics": semantics,
     "called_function_behaviors": called_behaviors,
@@ -2917,6 +2978,177 @@ fn revert_info_to_json(
     obj["message"] = json!(message);
   }
   obj
+}
+
+/// Render `FunctionModProperties.events_emitted` as a JSON array of
+/// event topic IDs. Filtered to topics whose metadata identifies them
+/// as `NamedTopicKind::Event`, matching the same shape as the direct
+/// `state_reads` / `state_writes` arrays. Source order is preserved;
+/// duplicates are not dropped.
+fn collect_member_events_emitted(
+  member: &topic::Topic,
+  audit_data: &AuditData,
+) -> Vec<String> {
+  let Some(props) = audit_data.function_properties.get(member) else {
+    return Vec::new();
+  };
+  let events = match props {
+    domain::FunctionModProperties::FunctionProperties {
+      events_emitted,
+      ..
+    }
+    | domain::FunctionModProperties::ModifierProperties {
+      events_emitted,
+      ..
+    } => events_emitted,
+  };
+  events
+    .iter()
+    .filter(|event| {
+      matches!(
+        audit_data.topic_metadata.get(event),
+        Some(TopicMetadata::NamedTopic {
+          kind: NamedTopicKind::Event,
+          ..
+        })
+      )
+    })
+    .map(|event| event.id())
+    .collect()
+}
+
+/// Render `FunctionModProperties.effective_reverts` for a function or
+/// modifier as a JSON array. Each entry mirrors the direct-`reverts`
+/// envelope (`{ topic, kind, name?, message? }`) with an additional
+/// `origin` field naming the function or modifier whose body directly
+/// raises the revert (the leaf of the propagation chain). Try-wrapped
+/// callees are absorbed and contribute no entries here.
+fn collect_member_transitive_reverts(
+  member: &topic::Topic,
+  audit_data: &AuditData,
+) -> Vec<serde_json::Value> {
+  let Some(props) = audit_data.function_properties.get(member) else {
+    return Vec::new();
+  };
+  let effective = match props {
+    domain::FunctionModProperties::FunctionProperties {
+      effective_reverts,
+      ..
+    }
+    | domain::FunctionModProperties::ModifierProperties {
+      effective_reverts,
+      ..
+    } => effective_reverts,
+  };
+  effective
+    .iter()
+    .map(|entry| {
+      let mut obj = revert_info_to_json(&entry.revert, audit_data);
+      obj["origin"] = json!(entry.origin.id());
+      obj
+    })
+    .collect()
+}
+
+/// Return `(transitive_state_reads, transitive_state_writes)` arrays
+/// of `{ topic, origin }` objects for a member, sourced from
+/// `FunctionModProperties.effective_reads` and
+/// `effective_mutations`. Both arrays are filtered to entries whose
+/// `topic` resolves to a state variable (Component-scoped
+/// `NamedTopicKind::StateVariable`). `origin` is the function or
+/// modifier whose body directly performs the access (the leaf of the
+/// propagation chain).
+fn collect_member_transitive_state_io(
+  member: &topic::Topic,
+  audit_data: &AuditData,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+  let mut reads: Vec<serde_json::Value> = Vec::new();
+  let mut writes: Vec<serde_json::Value> = Vec::new();
+  let Some(props) = audit_data.function_properties.get(member) else {
+    return (reads, writes);
+  };
+  let (effective_reads, effective_mutations) = match props {
+    domain::FunctionModProperties::FunctionProperties {
+      effective_reads,
+      effective_mutations,
+      ..
+    }
+    | domain::FunctionModProperties::ModifierProperties {
+      effective_reads,
+      effective_mutations,
+      ..
+    } => (effective_reads, effective_mutations),
+  };
+  for entry in effective_reads {
+    if matches!(
+      audit_data.topic_metadata.get(&entry.topic),
+      Some(TopicMetadata::NamedTopic {
+        kind: NamedTopicKind::StateVariable(_),
+        ..
+      })
+    ) {
+      reads.push(json!({
+        "topic": entry.topic.id(),
+        "origin": entry.origin.id(),
+      }));
+    }
+  }
+  for entry in effective_mutations {
+    if matches!(
+      audit_data.topic_metadata.get(&entry.topic),
+      Some(TopicMetadata::NamedTopic {
+        kind: NamedTopicKind::StateVariable(_),
+        ..
+      })
+    ) {
+      writes.push(json!({
+        "topic": entry.topic.id(),
+        "origin": entry.origin.id(),
+      }));
+    }
+  }
+  (reads, writes)
+}
+
+/// Render `FunctionModProperties.effective_events_emitted` as a JSON
+/// array of `{ topic, origin }` entries, filtered to topics whose
+/// metadata identifies them as `NamedTopicKind::Event`. `origin` is
+/// the function or modifier whose body directly emits the event.
+fn collect_member_transitive_events(
+  member: &topic::Topic,
+  audit_data: &AuditData,
+) -> Vec<serde_json::Value> {
+  let Some(props) = audit_data.function_properties.get(member) else {
+    return Vec::new();
+  };
+  let effective = match props {
+    domain::FunctionModProperties::FunctionProperties {
+      effective_events_emitted,
+      ..
+    }
+    | domain::FunctionModProperties::ModifierProperties {
+      effective_events_emitted,
+      ..
+    } => effective_events_emitted,
+  };
+  effective
+    .iter()
+    .filter(|entry| {
+      matches!(
+        audit_data.topic_metadata.get(&entry.topic),
+        Some(TopicMetadata::NamedTopic {
+          kind: NamedTopicKind::Event,
+          ..
+        })
+      )
+    })
+    .map(|entry| {
+      json!({
+        "topic": entry.topic.id(),
+        "origin": entry.origin.id(),
+      })
+    })
+    .collect()
 }
 
 /// For a `require(cond, "msg")` or bare `revert("msg")` whose
@@ -7718,7 +7950,9 @@ mod batch_render_integration_tests {
           container,
           component,
         },
-        kind: NamedTopicKind::StateVariable(domain::VariableMutability::Mutable),
+        kind: NamedTopicKind::StateVariable(
+          domain::VariableMutability::Mutable,
+        ),
         name: name.to_string(),
         visibility: NamedTopicVisibility::Public,
         is_mutable: true,
@@ -7828,15 +8062,7 @@ mod batch_render_integration_tests {
       },
     ];
     let member = topic::new_node_topic(&100);
-    install_function(
-      &mut audit,
-      member,
-      "f",
-      container,
-      component,
-      200,
-      body,
-    );
+    install_function(&mut audit, member, "f", container, component, 200, body);
     audit.function_properties.insert(
       member,
       FunctionModProperties::FunctionProperties {
@@ -7875,7 +8101,12 @@ mod batch_render_integration_tests {
     let reverts = value["subject"]["reverts"]
       .as_array()
       .expect("envelope carries a reverts array");
-    assert_eq!(reverts.len(), 3, "all three reverts surface; got {:?}", reverts);
+    assert_eq!(
+      reverts.len(),
+      3,
+      "all three reverts surface; got {:?}",
+      reverts
+    );
 
     assert_eq!(reverts[0]["kind"], "require");
     assert_eq!(reverts[0]["message"], "msg");
@@ -7918,9 +8149,7 @@ mod batch_render_integration_tests {
       expression: Box::new(require_call),
     }];
     let member = topic::new_node_topic(&100);
-    install_function(
-      &mut audit, member, "f", container, component, 200, body,
-    );
+    install_function(&mut audit, member, "f", container, component, 200, body);
     audit.function_properties.insert(
       member,
       FunctionModProperties::FunctionProperties {
@@ -7965,7 +8194,9 @@ mod batch_render_integration_tests {
         {
           return Some(serde_json::Value::Object(map.clone()));
         }
-        map.values().find_map(|v| find_function_call_node(v, target_id))
+        map
+          .values()
+          .find_map(|v| find_function_call_node(v, target_id))
       }
       serde_json::Value::Array(arr) => arr
         .iter()
@@ -8148,5 +8379,764 @@ mod batch_render_integration_tests {
       call.get("callee_reverts").is_none(),
       "no reverts → field must be absent",
     );
+  }
+
+  // =====================================================================
+  // Transitive effect envelope fields (transitive_*)
+  // =====================================================================
+
+  #[test]
+  fn envelope_carries_transitive_reverts_state_io_and_events() {
+    // Member f's `function_properties` carries `effective_*` entries
+    // produced by the bottom-up fold. The envelope must surface each as
+    // `transitive_*` alongside the direct counterparts, including the
+    // originating function for each entry.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    // State variables and an event that the transitive fold attributes
+    // to a downstream callee.
+    let state_a = topic::new_node_topic(&10);
+    let state_b = topic::new_node_topic(&11);
+    install_state_var(
+      &mut audit,
+      state_a,
+      "stateA",
+      container.clone(),
+      component,
+    );
+    install_state_var(
+      &mut audit,
+      state_b,
+      "stateB",
+      container.clone(),
+      component,
+    );
+
+    let event_topic = topic::new_node_topic(&20);
+    audit.topic_metadata.insert(
+      event_topic,
+      TopicMetadata::NamedTopic {
+        topic: event_topic,
+        scope: domain::Scope::Component {
+          container: container.clone(),
+          component,
+        },
+        kind: NamedTopicKind::Event,
+        name: "Updated".to_string(),
+        visibility: NamedTopicVisibility::Internal,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+
+    // Custom error topic for the transitive revert.
+    let error_decl_id = 70;
+    let error_decl_topic = topic::new_node_topic(&error_decl_id);
+    audit.topic_metadata.insert(
+      error_decl_topic,
+      TopicMetadata::NamedTopic {
+        topic: error_decl_topic,
+        scope: domain::Scope::Component {
+          container: container.clone(),
+          component,
+        },
+        kind: NamedTopicKind::Error,
+        name: "Bad".to_string(),
+        visibility: NamedTopicVisibility::Internal,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+
+    // The originating callee whose body raises the revert / writes the
+    // state / emits the event. The transitive entries point at this
+    // topic via their `origin` field.
+    let origin_member = topic::new_node_topic(&50);
+
+    // A FunctionCall AST node that serves as the revert site (so
+    // revert_info_to_json can find it via `info.topic`).
+    let revert_site_id = 80;
+    let revert_site_topic = topic::new_node_topic(&revert_site_id);
+    let revert_site = ASTNode::RevertStatement {
+      node_id: revert_site_id,
+      src_location: loc(),
+      error_call: Box::new(make_function_call_node(
+        81,
+        make_identifier_node(82, "Bad", error_decl_id),
+        vec![],
+      )),
+    };
+    audit
+      .nodes
+      .insert(revert_site_topic, Node::Solidity(revert_site));
+
+    let member = topic::new_node_topic(&100);
+    install_function(
+      &mut audit,
+      member,
+      "f",
+      container,
+      component,
+      200,
+      vec![],
+    );
+    audit.function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![],
+        effective_reverts: vec![domain::EffectiveRevert {
+          revert: domain::RevertInfo {
+            topic: revert_site_topic,
+            kind: domain::RevertConstraintKind::Revert,
+            error_topic: Some(error_decl_topic),
+          },
+          origin: origin_member,
+        }],
+        calls: vec![],
+        mutations: vec![],
+        effective_mutations: vec![domain::EffectiveTopic {
+          topic: state_b,
+          origin: origin_member,
+        }],
+        reads: vec![],
+        effective_reads: vec![domain::EffectiveTopic {
+          topic: state_a,
+          origin: origin_member,
+        }],
+        events_emitted: vec![],
+        effective_events_emitted: vec![domain::EffectiveTopic {
+          topic: event_topic,
+          origin: origin_member,
+        }],
+      },
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+    let subject = value.get("subject").expect("subject envelope");
+
+    let reverts = subject["transitive_reverts"]
+      .as_array()
+      .expect("transitive_reverts present");
+    assert_eq!(reverts.len(), 1, "exactly one transitive revert");
+    assert_eq!(reverts[0]["kind"], "revert");
+    assert_eq!(reverts[0]["name"], "Bad");
+    assert_eq!(reverts[0]["origin"], origin_member.id().as_str());
+
+    let reads = subject["transitive_state_reads"]
+      .as_array()
+      .expect("transitive_state_reads present");
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0]["topic"], state_a.id().as_str());
+    assert_eq!(reads[0]["origin"], origin_member.id().as_str());
+
+    let writes = subject["transitive_state_writes"]
+      .as_array()
+      .expect("transitive_state_writes present");
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0]["topic"], state_b.id().as_str());
+    assert_eq!(writes[0]["origin"], origin_member.id().as_str());
+
+    let events = subject["transitive_events_emitted"]
+      .as_array()
+      .expect("transitive_events_emitted present");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["topic"], event_topic.id().as_str());
+    assert_eq!(events[0]["origin"], origin_member.id().as_str());
+
+    // Direct counterparts must still be present (and empty here).
+    assert!(subject["state_reads"].as_array().unwrap().is_empty());
+    assert!(subject["state_writes"].as_array().unwrap().is_empty());
+    assert!(subject["events_emitted"].as_array().unwrap().is_empty());
+    assert!(subject["reverts"].as_array().unwrap().is_empty());
+  }
+
+  #[test]
+  fn envelope_transitive_state_io_filters_non_state_variable_topics() {
+    // The transitive collectors filter their entries to state variables
+    // (and events to events). A garbage topic that happens to appear in
+    // an `effective_*` field but does not resolve to a state variable
+    // must be dropped — same filter as the direct collectors.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let state_var = topic::new_node_topic(&10);
+    install_state_var(
+      &mut audit,
+      state_var,
+      "ok",
+      container.clone(),
+      component,
+    );
+    // A non-state-variable topic with no metadata.
+    let stranger = topic::new_node_topic(&11);
+
+    let origin = topic::new_node_topic(&50);
+    let member = topic::new_node_topic(&100);
+    install_function(
+      &mut audit,
+      member,
+      "f",
+      container,
+      component,
+      200,
+      vec![],
+    );
+    audit.function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![],
+        effective_reverts: vec![],
+        calls: vec![],
+        mutations: vec![],
+        effective_mutations: vec![
+          domain::EffectiveTopic {
+            topic: state_var,
+            origin,
+          },
+          domain::EffectiveTopic {
+            topic: stranger,
+            origin,
+          },
+        ],
+        reads: vec![],
+        effective_reads: vec![domain::EffectiveTopic {
+          topic: stranger,
+          origin,
+        }],
+        events_emitted: vec![],
+        effective_events_emitted: vec![domain::EffectiveTopic {
+          topic: stranger,
+          origin,
+        }],
+      },
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+    let subject = value.get("subject").expect("subject envelope");
+
+    let writes = subject["transitive_state_writes"]
+      .as_array()
+      .expect("transitive_state_writes present");
+    assert_eq!(
+      writes.len(),
+      1,
+      "stranger filtered out, real state-var kept"
+    );
+    assert_eq!(writes[0]["topic"], state_var.id().as_str());
+
+    let reads = subject["transitive_state_reads"]
+      .as_array()
+      .expect("transitive_state_reads present");
+    assert!(reads.is_empty(), "stranger filtered out, no reads remain");
+
+    let events = subject["transitive_events_emitted"]
+      .as_array()
+      .expect("transitive_events_emitted present");
+    assert!(events.is_empty(), "stranger filtered out, no events remain");
+  }
+
+  #[test]
+  fn envelope_direct_and_transitive_arrays_are_independent() {
+    // The direct `state_writes` and the new `transitive_state_writes`
+    // are distinct facts about a function: the direct array is what
+    // the body literally writes; the transitive array is what the
+    // function can cause to be written through its call graph. When
+    // both reference the same state variable, both arrays must carry
+    // it. No cross-array dedup. Same invariant for reverts (same error
+    // topic in both direct and transitive arrays).
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let state = topic::new_node_topic(&10);
+    install_state_var(&mut audit, state, "x", container.clone(), component);
+
+    // Custom error referenced by both direct and transitive reverts.
+    let err = topic::new_node_topic(&30);
+    audit.topic_metadata.insert(
+      err,
+      TopicMetadata::NamedTopic {
+        topic: err,
+        scope: domain::Scope::Component {
+          container: container.clone(),
+          component,
+        },
+        kind: NamedTopicKind::Error,
+        name: "DupErr".to_string(),
+        visibility: NamedTopicVisibility::Internal,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+    let direct_revert_node_id = 80;
+    let direct_revert_topic = topic::new_node_topic(&direct_revert_node_id);
+    let direct_revert_node = ASTNode::RevertStatement {
+      node_id: direct_revert_node_id,
+      src_location: loc(),
+      error_call: Box::new(make_function_call_node(
+        81,
+        make_identifier_node(82, "DupErr", err.numeric_id()),
+        vec![],
+      )),
+    };
+    audit
+      .nodes
+      .insert(direct_revert_topic, Node::Solidity(direct_revert_node));
+
+    let origin = topic::new_node_topic(&50);
+    let member = topic::new_node_topic(&100);
+    install_function(
+      &mut audit,
+      member,
+      "f",
+      container,
+      component,
+      200,
+      vec![],
+    );
+    audit.function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![domain::RevertInfo {
+          topic: direct_revert_topic,
+          kind: domain::RevertConstraintKind::Revert,
+          error_topic: Some(err),
+        }],
+        effective_reverts: vec![domain::EffectiveRevert {
+          revert: domain::RevertInfo {
+            topic: topic::new_node_topic(&90),
+            kind: domain::RevertConstraintKind::Revert,
+            error_topic: Some(err),
+          },
+          origin,
+        }],
+        calls: vec![],
+        mutations: vec![state],
+        effective_mutations: vec![domain::EffectiveTopic {
+          topic: state,
+          origin,
+        }],
+        reads: vec![],
+        effective_reads: vec![],
+        events_emitted: vec![],
+        effective_events_emitted: vec![],
+      },
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+    let subject = value.get("subject").expect("subject envelope");
+
+    // The same state variable appears in BOTH direct and transitive
+    // arrays — no cross-array dedup.
+    let writes = subject["state_writes"]
+      .as_array()
+      .expect("state_writes present");
+    assert_eq!(writes.len(), 1, "direct write present");
+    assert_eq!(writes[0], state.id().as_str());
+
+    let transitive_writes = subject["transitive_state_writes"]
+      .as_array()
+      .expect("transitive_state_writes present");
+    assert_eq!(transitive_writes.len(), 1, "transitive write present");
+    assert_eq!(transitive_writes[0]["topic"], state.id().as_str());
+
+    // Same custom error appears in BOTH direct and transitive revert
+    // arrays. The transitive entry additionally carries `origin`,
+    // the direct entry does not.
+    let reverts = subject["reverts"].as_array().expect("reverts present");
+    assert_eq!(reverts.len(), 1, "direct revert present");
+    assert_eq!(reverts[0]["name"], "DupErr");
+    assert!(reverts[0].get("origin").is_none());
+
+    let transitive_reverts = subject["transitive_reverts"]
+      .as_array()
+      .expect("transitive_reverts present");
+    assert_eq!(transitive_reverts.len(), 1, "transitive revert present");
+    assert_eq!(transitive_reverts[0]["name"], "DupErr");
+    assert_eq!(
+      transitive_reverts[0]["origin"].as_str(),
+      Some(origin.id().as_str()),
+    );
+  }
+
+  #[test]
+  fn envelope_transitive_mutations_keep_distinct_origins_for_same_topic() {
+    // Plan invariant: dedup is `(origin, topic)`, so two
+    // `effective_mutations` entries with different origins on the
+    // same state variable are kept distinct in the envelope. The
+    // renderer must surface both.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+    let state = topic::new_node_topic(&10);
+    install_state_var(&mut audit, state, "x", container.clone(), component);
+    let origin_a = topic::new_node_topic(&50);
+    let origin_b = topic::new_node_topic(&51);
+    let member = topic::new_node_topic(&100);
+    install_function(
+      &mut audit,
+      member,
+      "f",
+      container,
+      component,
+      200,
+      vec![],
+    );
+    audit.function_properties.insert(
+      member,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![],
+        effective_reverts: vec![],
+        calls: vec![],
+        mutations: vec![],
+        effective_mutations: vec![
+          domain::EffectiveTopic {
+            topic: state,
+            origin: origin_a,
+          },
+          domain::EffectiveTopic {
+            topic: state,
+            origin: origin_b,
+          },
+        ],
+        reads: vec![],
+        effective_reads: vec![],
+        events_emitted: vec![],
+        effective_events_emitted: vec![],
+      },
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+    let subject = value.get("subject").expect("subject envelope");
+
+    let writes = subject["transitive_state_writes"]
+      .as_array()
+      .expect("transitive_state_writes present");
+    assert_eq!(
+      writes.len(),
+      2,
+      "same topic from two distinct origins must both surface",
+    );
+    let origins: Vec<&str> = writes
+      .iter()
+      .map(|e| e["origin"].as_str().unwrap())
+      .collect();
+    assert!(origins.contains(&origin_a.id().as_str()));
+    assert!(origins.contains(&origin_b.id().as_str()));
+  }
+
+  #[test]
+  fn render_inlines_callee_transitive_fields_at_call_site() {
+    // Caller calls `_update`. `_update` has direct effects (state read,
+    // state write, revert, event) AND transitive effects propagated
+    // from a deeper callee. The FunctionCall node inside the caller's
+    // body must carry parallel direct and transitive `callee_*` fields.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    // State vars / event / error referenced by the transitive sets.
+    let direct_state = topic::new_node_topic(&10);
+    let transitive_state = topic::new_node_topic(&11);
+    install_state_var(
+      &mut audit,
+      direct_state,
+      "directVar",
+      container.clone(),
+      component,
+    );
+    install_state_var(
+      &mut audit,
+      transitive_state,
+      "transitiveVar",
+      container.clone(),
+      component,
+    );
+
+    let direct_event = topic::new_node_topic(&20);
+    let transitive_event = topic::new_node_topic(&21);
+    audit.topic_metadata.insert(
+      direct_event,
+      TopicMetadata::NamedTopic {
+        topic: direct_event,
+        scope: domain::Scope::Component {
+          container: container.clone(),
+          component,
+        },
+        kind: NamedTopicKind::Event,
+        name: "DirectEvent".to_string(),
+        visibility: NamedTopicVisibility::Internal,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+    audit.topic_metadata.insert(
+      transitive_event,
+      TopicMetadata::NamedTopic {
+        topic: transitive_event,
+        scope: domain::Scope::Component {
+          container: container.clone(),
+          component,
+        },
+        kind: NamedTopicKind::Event,
+        name: "TransitiveEvent".to_string(),
+        visibility: NamedTopicVisibility::Internal,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+
+    let transitive_err = topic::new_node_topic(&31);
+    audit.topic_metadata.insert(
+      transitive_err,
+      TopicMetadata::NamedTopic {
+        topic: transitive_err,
+        scope: domain::Scope::Component {
+          container: container.clone(),
+          component,
+        },
+        kind: NamedTopicKind::Error,
+        name: "TransitiveErr".to_string(),
+        visibility: NamedTopicVisibility::Internal,
+        is_mutable: false,
+        mutations: vec![],
+        ancestors: vec![],
+        descendants: vec![],
+        relatives: vec![],
+        transitive_topic: None,
+        doc_references: vec![],
+      },
+    );
+
+    // Direct revert site (a require call) for the callee.
+    let require_call_id = 90;
+    let require_call_topic = topic::new_node_topic(&require_call_id);
+    let require_call = make_function_call_node(
+      require_call_id,
+      make_identifier_node(91, "require", 0),
+      vec![
+        make_identifier_node(92, "cond", 1000),
+        make_string_literal(93, "DIRECT"),
+      ],
+    );
+    audit
+      .nodes
+      .insert(require_call_topic, Node::Solidity(require_call));
+
+    // Callee `_update` with direct AND transitive effect sets.
+    let callee = topic::new_node_topic(&50);
+    install_simple_function(
+      &mut audit,
+      callee,
+      "_update",
+      container.clone(),
+      component,
+      300,
+      vec![],
+    );
+    let deeper_origin = topic::new_node_topic(&60); // where transitive effects originate
+    audit.function_properties.insert(
+      callee,
+      FunctionModProperties::FunctionProperties {
+        reverts: vec![domain::RevertInfo {
+          topic: require_call_topic,
+          kind: domain::RevertConstraintKind::Require,
+          error_topic: None,
+        }],
+        effective_reverts: vec![domain::EffectiveRevert {
+          revert: domain::RevertInfo {
+            topic: topic::new_node_topic(&501),
+            kind: domain::RevertConstraintKind::Revert,
+            error_topic: Some(transitive_err),
+          },
+          origin: deeper_origin,
+        }],
+        calls: vec![],
+        mutations: vec![direct_state],
+        effective_mutations: vec![domain::EffectiveTopic {
+          topic: transitive_state,
+          origin: deeper_origin,
+        }],
+        reads: vec![direct_state],
+        effective_reads: vec![domain::EffectiveTopic {
+          topic: transitive_state,
+          origin: deeper_origin,
+        }],
+        events_emitted: vec![direct_event],
+        effective_events_emitted: vec![domain::EffectiveTopic {
+          topic: transitive_event,
+          origin: deeper_origin,
+        }],
+      },
+    );
+
+    // Caller body: a call to `_update()`.
+    let call_node_id = 60;
+    let body = vec![make_function_call_node(
+      call_node_id,
+      make_identifier_node(61, "_update", 50),
+      vec![],
+    )];
+    let caller = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, caller, "swap", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[caller], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+    let call_topic_id = topic::new_node_topic(&call_node_id).id();
+    let call = find_function_call_node(&value, &call_topic_id)
+      .expect("expected the rendered _update() FunctionCall node");
+
+    // Direct fields (existing) — sanity check still present.
+    assert_eq!(
+      call["callee_state_reads"].as_array().unwrap()[0],
+      direct_state.id().as_str(),
+    );
+    assert_eq!(
+      call["callee_state_writes"].as_array().unwrap()[0],
+      direct_state.id().as_str(),
+    );
+    assert_eq!(
+      call["callee_events_emitted"].as_array().unwrap()[0],
+      direct_event.id().as_str(),
+    );
+    let direct_reverts = call["callee_reverts"].as_array().unwrap();
+    assert_eq!(direct_reverts[0]["message"], "DIRECT");
+
+    // New transitive fields — origin-carrying entries for each.
+    let tr_reads = call["callee_transitive_state_reads"]
+      .as_array()
+      .expect("callee_transitive_state_reads stamped");
+    assert_eq!(tr_reads.len(), 1);
+    assert_eq!(tr_reads[0]["topic"], transitive_state.id().as_str());
+    assert_eq!(tr_reads[0]["origin"], deeper_origin.id().as_str());
+
+    let tr_writes = call["callee_transitive_state_writes"]
+      .as_array()
+      .expect("callee_transitive_state_writes stamped");
+    assert_eq!(tr_writes.len(), 1);
+    assert_eq!(tr_writes[0]["topic"], transitive_state.id().as_str());
+    assert_eq!(tr_writes[0]["origin"], deeper_origin.id().as_str());
+
+    let tr_events = call["callee_transitive_events_emitted"]
+      .as_array()
+      .expect("callee_transitive_events_emitted stamped");
+    assert_eq!(tr_events.len(), 1);
+    assert_eq!(tr_events[0]["topic"], transitive_event.id().as_str());
+    assert_eq!(tr_events[0]["origin"], deeper_origin.id().as_str());
+
+    let tr_reverts = call["callee_transitive_reverts"]
+      .as_array()
+      .expect("callee_transitive_reverts stamped");
+    assert_eq!(tr_reverts.len(), 1);
+    assert_eq!(tr_reverts[0]["name"], "TransitiveErr");
+    assert_eq!(tr_reverts[0]["origin"], deeper_origin.id().as_str());
+  }
+
+  #[test]
+  fn render_omits_callee_transitive_fields_when_callee_has_none() {
+    // Callee with empty transitive sets must not have any
+    // `callee_transitive_*` fields stamped — the omission keeps the
+    // rendered AST compact for routine calls.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let callee = topic::new_node_topic(&50);
+    install_simple_function(
+      &mut audit,
+      callee,
+      "noop",
+      container.clone(),
+      component,
+      300,
+      vec![],
+    );
+
+    let call_node_id = 60;
+    let body = vec![make_function_call_node(
+      call_node_id,
+      make_identifier_node(61, "noop", 50),
+      vec![],
+    )];
+    let caller = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, caller, "swap", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[caller], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+    let call_topic_id = topic::new_node_topic(&call_node_id).id();
+    let call = find_function_call_node(&value, &call_topic_id)
+      .expect("expected rendered FunctionCall node");
+
+    assert!(call.get("callee_transitive_state_reads").is_none());
+    assert!(call.get("callee_transitive_state_writes").is_none());
+    assert!(call.get("callee_transitive_events_emitted").is_none());
+    assert!(call.get("callee_transitive_reverts").is_none());
+    assert!(call.get("callee_events_emitted").is_none());
   }
 }
