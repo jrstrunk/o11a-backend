@@ -1801,8 +1801,9 @@ pub async fn build_threats(
     // `topic_metadata` lookup inside `retain` doesn't conflict with the
     // mutable borrow on `threat_feature_links` that retain requires.
     let mut links = std::mem::take(&mut audit_data.threat_feature_links);
-    links
-      .retain(|link| audit_data.topic_metadata.contains_key(&link.threat_topic));
+    links.retain(|link| {
+      audit_data.topic_metadata.contains_key(&link.threat_topic)
+    });
     audit_data.threat_feature_links = links;
     domain::rebuild_feature_context(audit_data);
 
@@ -2176,7 +2177,9 @@ mod build_threats_tests {
       );
       audit_data.invariants.insert(
         pre_invariant_topic,
-        Invariant { source_topics: vec![] },
+        Invariant {
+          source_topics: vec![],
+        },
       );
       // Two impact-analysis links — one referring to the existing threat
       // (will be orphaned once the clear runs), one already orphaned by
@@ -2302,9 +2305,12 @@ mod build_threats_tests {
             severity: None,
           },
         );
-        audit_data
-          .invariants
-          .insert(pre_invariant, Invariant { source_topics: vec![] });
+        audit_data.invariants.insert(
+          pre_invariant,
+          Invariant {
+            source_topics: vec![],
+          },
+        );
       }
 
       build_threats(&state, audit_id).await.unwrap();
@@ -2385,7 +2391,9 @@ mod build_threats_tests {
     let c = state.data_context.lock().unwrap();
     let audit_data = c.get_audit(audit_id).unwrap();
     assert!(
-      audit_data.topic_metadata.contains_key(&comment_topic_before),
+      audit_data
+        .topic_metadata
+        .contains_key(&comment_topic_before),
       "comment topic must survive build_threats clear"
     );
     assert!(

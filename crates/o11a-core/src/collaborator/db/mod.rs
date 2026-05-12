@@ -345,4 +345,3 @@ pub async fn get_unvoted_comment_ids(
   .fetch_all(pool)
   .await
 }
-

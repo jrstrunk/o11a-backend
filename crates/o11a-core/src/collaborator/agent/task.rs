@@ -2344,9 +2344,7 @@ fn build_threats_validation_context(
   let Ok(value) = serde_json::from_str::<serde_json::Value>(batch_json) else {
     return ctx;
   };
-  if let Some(arr) =
-    value.get("non_pure_subjects").and_then(|v| v.as_array())
-  {
+  if let Some(arr) = value.get("non_pure_subjects").and_then(|v| v.as_array()) {
     ctx.expected_subjects = arr
       .iter()
       .filter_map(|item| item.as_str().map(String::from))
@@ -2512,14 +2510,14 @@ fn parse_threats_response(
     let mut conditions: Vec<ParsedConditionThreats> =
       Vec::with_capacity(s.conditions.len());
     for ct in s.conditions {
-      let falsifies_condition = match topic::parse_topic(&ct.falsifies_condition)
-      {
-        Ok(t @ topic::Topic::AdversarialProperty(_)) => t,
-        _ => {
-          bad_condition_topics.push(ct.falsifies_condition);
-          continue;
-        }
-      };
+      let falsifies_condition =
+        match topic::parse_topic(&ct.falsifies_condition) {
+          Ok(t @ topic::Topic::AdversarialProperty(_)) => t,
+          _ => {
+            bad_condition_topics.push(ct.falsifies_condition);
+            continue;
+          }
+        };
       if cross_check_active {
         let valid_link = allowed_conditions
           .map(|allowed| allowed.contains(&ct.falsifies_condition))
@@ -3245,7 +3243,11 @@ mod conditions_parser_tests {
     let expected = expected_set(&[]);
     let got = vec![subject(
       "N10",
-      vec![cond("c", domain::ConditionKind::RestrictedReachability, &[])],
+      vec![cond(
+        "c",
+        domain::ConditionKind::RestrictedReachability,
+        &[],
+      )],
     )];
     validate_conditions_coverage(&expected, &got, "test");
   }
@@ -3256,7 +3258,11 @@ mod conditions_parser_tests {
     let got = vec![
       subject(
         "N10",
-        vec![cond("c1", domain::ConditionKind::RestrictedReachability, &[])],
+        vec![cond(
+          "c1",
+          domain::ConditionKind::RestrictedReachability,
+          &[],
+        )],
       ),
       subject(
         "N20",
@@ -3272,7 +3278,11 @@ mod conditions_parser_tests {
     let got = vec![
       subject(
         "N10",
-        vec![cond("c", domain::ConditionKind::RestrictedReachability, &[])],
+        vec![cond(
+          "c",
+          domain::ConditionKind::RestrictedReachability,
+          &[],
+        )],
       ),
       subject(
         "N99",
@@ -3548,7 +3558,13 @@ mod conditions_parser_tests {
       ConditionKind::Other,
     ]
     .into_iter()
-    .map(|k| serde_json::to_value(k).unwrap().as_str().unwrap().to_string())
+    .map(|k| {
+      serde_json::to_value(k)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
+    })
     .collect();
 
     // Enforce that the local list above is exhaustive over the enum.
@@ -3723,7 +3739,10 @@ mod threats_parser_tests {
       c0.threats[0].controlled_by,
       domain::ThreatActor::BlockProducer
     );
-    assert_eq!(c0.threats[0].evidence_topics, vec![topic::new_node_topic(&11)]);
+    assert_eq!(
+      c0.threats[0].evidence_topics,
+      vec![topic::new_node_topic(&11)]
+    );
     assert_eq!(c0.threats[1].controlled_by, domain::ThreatActor::AnyParty);
     assert_eq!(
       c0.threats[1].evidence_topics,
@@ -3745,8 +3764,7 @@ mod threats_parser_tests {
   #[test]
   fn parser_multiple_threats_targeting_same_condition_kept() {
     // 1:N — one condition can be the target of many threats. All kept.
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -3764,8 +3782,7 @@ mod threats_parser_tests {
 
   #[test]
   fn parser_rejects_subject_not_in_non_pure_subjects() {
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -3785,8 +3802,7 @@ mod threats_parser_tests {
 
   #[test]
   fn parser_dedupes_repeated_subject_first_wins() {
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -3808,8 +3824,7 @@ mod threats_parser_tests {
 
   #[test]
   fn parser_skips_malformed_subject_topic() {
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"NOT_A_TOPIC","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -3825,8 +3840,7 @@ mod threats_parser_tests {
   fn parser_skips_non_node_subject_topic() {
     // An A-prefixed topic in subject_topic must be rejected (subjects
     // are AST nodes only).
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"A5","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -3843,8 +3857,7 @@ mod threats_parser_tests {
     // The subject's inline conditions are {A5}. A response that cites
     // A99 must be dropped (the LLM hallucinated a non-existent
     // condition link).
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A99","threats":[
@@ -3868,8 +3881,7 @@ mod threats_parser_tests {
   fn parser_drops_non_a_prefixed_falsifies_condition() {
     // falsifies_condition must be A-prefixed. N-prefixed or malformed
     // values drop the condition entry.
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"N5","threats":[
@@ -3915,8 +3927,7 @@ mod threats_parser_tests {
 
   #[test]
   fn parser_keeps_empty_threats_with_rationale() {
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A5","threats":[],
@@ -3938,8 +3949,7 @@ mod threats_parser_tests {
     // Mutually-exclusive shape: non-empty threats + Some(rationale)
     // means the LLM contradicted itself. Keep the threats, drop the
     // rationale.
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -3959,8 +3969,7 @@ mod threats_parser_tests {
 
   #[test]
   fn parser_accepts_each_threat_actor_value() {
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -4020,8 +4029,7 @@ mod threats_parser_tests {
     // explicitly exclude state-reads from the topic walk). It must be
     // dropped; the threat itself is kept with the remaining valid
     // anchor.
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -4060,13 +4068,8 @@ mod threats_parser_tests {
 
   #[test]
   fn parser_keeps_modifier_topic_as_evidence() {
-    let batch = build_batch_envelope(
-      "N100",
-      "N10",
-      &["A5"],
-      &["N11"],
-      &["N200", "N201"],
-    );
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &["N200", "N201"]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -4082,8 +4085,7 @@ mod threats_parser_tests {
   #[test]
   fn parser_keeps_function_topic_as_evidence() {
     // The containing function (the member) is in-scope.
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -4098,8 +4100,7 @@ mod threats_parser_tests {
 
   #[test]
   fn parser_populates_subject_topic_when_evidence_empty() {
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -4120,8 +4121,7 @@ mod threats_parser_tests {
   fn parser_populates_subject_topic_when_all_evidence_invalid() {
     // Every cited topic is out of scope. After dropping, evidence is
     // empty → backfilled with subject_topic.
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -4136,8 +4136,7 @@ mod threats_parser_tests {
 
   #[test]
   fn parser_drops_threat_with_empty_description() {
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -4155,8 +4154,7 @@ mod threats_parser_tests {
   fn parser_keeps_threat_with_party_named_description_and_warns() {
     // Per spec: descriptions naming a party are kept (warning logged).
     // The warn-rate is the prompt-quality signal, not a drop condition.
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -4179,7 +4177,9 @@ mod threats_parser_tests {
     assert!(description_starts_with_party_noun(
       "the admin sets a malicious value"
     ));
-    assert!(description_starts_with_party_noun("the counterparty withdraws"));
+    assert!(description_starts_with_party_noun(
+      "the counterparty withdraws"
+    ));
     assert!(description_starts_with_party_noun(
       "a malicious counterparty withdraws"
     ));
@@ -4209,8 +4209,7 @@ mod threats_parser_tests {
 
   #[test]
   fn parser_handles_empty_subjects_array() {
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[]}"#;
     let entries = run_parse(json, &batch);
     assert!(entries.is_empty());
@@ -4322,8 +4321,7 @@ mod threats_parser_tests {
     // so the condition is dropped. With zero kept conditions, the
     // entire subject must be dropped from output — same "no signal"
     // policy as step 6's zero-conditions-subject rule.
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"N5","threats":[
@@ -4366,8 +4364,7 @@ mod threats_parser_tests {
     // serde-level guard is the safety net if the LLM (or a test
     // fixture) omits it. Field absent + threats present = no-op
     // rationale-wise.
-    let batch =
-      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"falsifies_condition":"A5","threats":[
@@ -4502,7 +4499,13 @@ mod threats_parser_tests {
       ThreatActor::Other,
     ]
     .into_iter()
-    .map(|a| serde_json::to_value(a).unwrap().as_str().unwrap().to_string())
+    .map(|a| {
+      serde_json::to_value(a)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
+    })
     .collect();
 
     fn _exhaustiveness_guard(a: ThreatActor) {

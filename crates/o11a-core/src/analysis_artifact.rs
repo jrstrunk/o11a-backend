@@ -48,9 +48,9 @@
 //! the artifact by re-running `o11a-analyze`.
 
 use crate::domain::{
-  AST, AuditData, FunctionModProperties, Invariant, Node,
-  ProjectPath, SolidityType, SourceContext, ThreatFeatureLink,
-  TopicMetadata, TopicNameIndex, topic,
+  AST, AuditData, FunctionModProperties, Invariant, Node, ProjectPath,
+  SolidityType, SourceContext, ThreatFeatureLink, TopicMetadata,
+  TopicNameIndex, topic,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};

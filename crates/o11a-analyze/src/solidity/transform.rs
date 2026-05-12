@@ -202,11 +202,12 @@ fn collect_definitions_from_node(
       }
     }
 
-    ASTNode::FunctionDefinition { node_id, signature, .. } => {
+    ASTNode::FunctionDefinition {
+      node_id, signature, ..
+    } => {
       let state_mutability = match signature.as_ref() {
         ASTNode::FunctionSignature {
-          state_mutability,
-          ..
+          state_mutability, ..
         } => Some(*state_mutability),
         _ => None,
       };
@@ -922,16 +923,15 @@ fn resolve_call_purity(
   expression: &ASTNode,
   context: &TransformContext,
 ) -> CallKind {
-  let effective_def = get_referenced_function_id(expression).and_then(
-    |def_id| {
+  let effective_def =
+    get_referenced_function_id(expression).and_then(|def_id| {
       let effective_id = context
         .interface_to_implementation
         .get(&def_id)
         .copied()
         .unwrap_or(def_id);
       context.callables.get(&effective_id)
-    },
-  );
+    });
 
   let Some(def) = effective_def else {
     return CallKind::NonPure;
@@ -942,9 +942,9 @@ fn resolve_call_purity(
   }
 
   match def.state_mutability {
-    Some(
-      FunctionStateMutability::Pure | FunctionStateMutability::View,
-    ) => CallKind::Pure,
+    Some(FunctionStateMutability::Pure | FunctionStateMutability::View) => {
+      CallKind::Pure
+    }
     _ => CallKind::NonPure,
   }
 }

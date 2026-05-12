@@ -2338,9 +2338,7 @@ impl TopicMetadata {
       | TopicMetadata::FunctionalPurposeTopic { created_at, .. }
       | TopicMetadata::PlacementRationaleTopic { created_at, .. }
       | TopicMetadata::ConditionTopic { created_at, .. }
-      | TopicMetadata::ThreatTopic { created_at, .. } => {
-        created_at.as_deref()
-      }
+      | TopicMetadata::ThreatTopic { created_at, .. } => created_at.as_deref(),
       _ => None,
     }
   }
@@ -3656,8 +3654,9 @@ mod tests {
 
     let metadata = TopicMetadata::ConditionTopic {
       topic: cond_topic,
-      description: "The caller carries the privilege the subject's purpose presumes."
-        .to_string(),
+      description:
+        "The caller carries the privilege the subject's purpose presumes."
+          .to_string(),
       subject_topic,
       kind: ConditionKind::InputIntegrity,
       evidence_topics: evidence.clone(),
@@ -3853,8 +3852,9 @@ mod tests {
       threat_ax,
       TopicMetadata::ThreatTopic {
         topic: threat_ax,
-        description: "the value can be reordered before the dependent read commits"
-          .to_string(),
+        description:
+          "the value can be reordered before the dependent read commits"
+            .to_string(),
         subject_topic: subject_a,
         falsifies_condition: cond_x,
         controlled_by: ThreatActor::BlockProducer,
@@ -4004,10 +4004,8 @@ mod tests {
     let threat_topic = topic::new_adversarial_property_topic(10);
     let subject_topic = topic::new_node_topic(&42);
     let falsifies_condition = topic::new_adversarial_property_topic(5);
-    let evidence = vec![
-      topic::new_node_topic(&42),
-      topic::new_node_topic(&101),
-    ];
+    let evidence =
+      vec![topic::new_node_topic(&42), topic::new_node_topic(&101)];
 
     let metadata = TopicMetadata::ThreatTopic {
       topic: threat_topic,
@@ -4071,8 +4069,9 @@ mod tests {
 
     let metadata = TopicMetadata::ThreatTopic {
       topic: threat_topic,
-      description: "the value can be reordered before the dependent read commits"
-        .to_string(),
+      description:
+        "the value can be reordered before the dependent read commits"
+          .to_string(),
       subject_topic,
       falsifies_condition,
       controlled_by: ThreatActor::Self_,

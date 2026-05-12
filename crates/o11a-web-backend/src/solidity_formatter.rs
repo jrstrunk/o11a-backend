@@ -2893,12 +2893,12 @@ fn storage_location_to_string(location: &StorageLocation) -> String {
 #[cfg(test)]
 mod effect_clause_tests {
   use super::*;
+  use o11a_core::domain::topic;
   use o11a_core::domain::{
     self, EffectiveRevert, EffectiveTopic, NamedTopicKind,
     NamedTopicVisibility, RevertConstraintKind, RevertInfo, Scope,
     TopicMetadata, VariableMutability,
   };
-  use o11a_core::domain::topic;
   use o11a_core::solidity::ast::{
     FunctionStateMutability, FunctionVisibility, SourceLocation,
   };
@@ -3051,13 +3051,25 @@ mod effect_clause_tests {
         calls: vec![],
         mutations: vec![],
         effective_mutations: vec![
-          EffectiveTopic { topic: state_a, origin },
-          EffectiveTopic { topic: state_b, origin },
+          EffectiveTopic {
+            topic: state_a,
+            origin,
+          },
+          EffectiveTopic {
+            topic: state_b,
+            origin,
+          },
         ],
         reads: vec![],
-        effective_reads: vec![EffectiveTopic { topic: state_a, origin }],
+        effective_reads: vec![EffectiveTopic {
+          topic: state_a,
+          origin,
+        }],
         events_emitted: vec![],
-        effective_events_emitted: vec![EffectiveTopic { topic: event, origin }],
+        effective_events_emitted: vec![EffectiveTopic {
+          topic: event,
+          origin,
+        }],
       },
     );
 
@@ -3269,8 +3281,14 @@ mod effect_clause_tests {
         mutations: vec![],
         // Same topic, two origins — should render once.
         effective_mutations: vec![
-          EffectiveTopic { topic: state_a, origin: origin_a },
-          EffectiveTopic { topic: state_a, origin: origin_b },
+          EffectiveTopic {
+            topic: state_a,
+            origin: origin_a,
+          },
+          EffectiveTopic {
+            topic: state_a,
+            origin: origin_b,
+          },
         ],
         reads: vec![],
         effective_reads: vec![],
@@ -3333,11 +3351,20 @@ mod effect_clause_tests {
         }],
         calls: vec![],
         mutations: vec![],
-        effective_mutations: vec![EffectiveTopic { topic: state, origin }],
+        effective_mutations: vec![EffectiveTopic {
+          topic: state,
+          origin,
+        }],
         reads: vec![],
-        effective_reads: vec![EffectiveTopic { topic: state, origin }],
+        effective_reads: vec![EffectiveTopic {
+          topic: state,
+          origin,
+        }],
         events_emitted: vec![],
-        effective_events_emitted: vec![EffectiveTopic { topic: event, origin }],
+        effective_events_emitted: vec![EffectiveTopic {
+          topic: event,
+          origin,
+        }],
       },
     );
     nodes_map.insert(member, domain::Node::Solidity(func.clone()));
@@ -3353,12 +3380,9 @@ mod effect_clause_tests {
       rendered.find(">returns<").expect("returns keyword present");
     let reverts_idx =
       rendered.find(">reverts<").expect("reverts clause present");
-    let writes_idx =
-      rendered.find(">writes<").expect("writes clause present");
-    let reads_idx =
-      rendered.find(">reads<").expect("reads clause present");
-    let emits_idx =
-      rendered.find(">emits<").expect("emits clause present");
+    let writes_idx = rendered.find(">writes<").expect("writes clause present");
+    let reads_idx = rendered.find(">reads<").expect("reads clause present");
+    let emits_idx = rendered.find(">emits<").expect("emits clause present");
 
     assert!(
       returns_idx < reverts_idx,
@@ -3471,7 +3495,10 @@ mod effect_clause_tests {
         mutations: vec![],
         effective_mutations: vec![],
         reads: vec![],
-        effective_reads: vec![EffectiveTopic { topic: owner, origin }],
+        effective_reads: vec![EffectiveTopic {
+          topic: owner,
+          origin,
+        }],
         events_emitted: vec![],
         effective_events_emitted: vec![],
       },

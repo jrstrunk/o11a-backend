@@ -116,10 +116,7 @@ pub fn compute_transitive_effects(
         mutations.as_slice()
       }
     },
-    |t, origin| EffectiveTopic {
-      topic: *t,
-      origin,
-    },
+    |t, origin| EffectiveTopic { topic: *t, origin },
     |e| (e.origin, e.topic),
   );
 
@@ -135,10 +132,7 @@ pub fn compute_transitive_effects(
         reads.as_slice()
       }
     },
-    |t, origin| EffectiveTopic {
-      topic: *t,
-      origin,
-    },
+    |t, origin| EffectiveTopic { topic: *t, origin },
     |e| (e.origin, e.topic),
   );
 
@@ -149,17 +143,12 @@ pub fn compute_transitive_effects(
     &full_scc_id,
     &full_adj,
     |props| match props {
-      FunctionModProperties::FunctionProperties {
-        events_emitted, ..
+      FunctionModProperties::FunctionProperties { events_emitted, .. }
+      | FunctionModProperties::ModifierProperties { events_emitted, .. } => {
+        events_emitted.as_slice()
       }
-      | FunctionModProperties::ModifierProperties {
-        events_emitted, ..
-      } => events_emitted.as_slice(),
     },
-    |t, origin| EffectiveTopic {
-      topic: *t,
-      origin,
-    },
+    |t, origin| EffectiveTopic { topic: *t, origin },
     |e| (e.origin, e.topic),
   );
 
@@ -214,9 +203,7 @@ fn build_call_adjacency(
 /// every node in `nodes`) won't be in the map; callers that index
 /// into this should use `.get(&topic).copied()` and treat absence as
 /// "outside any computed SCC."
-fn build_scc_index(
-  sccs: &[Vec<topic::Topic>],
-) -> HashMap<topic::Topic, usize> {
+fn build_scc_index(sccs: &[Vec<topic::Topic>]) -> HashMap<topic::Topic, usize> {
   let mut map = HashMap::new();
   for (idx, scc) in sccs.iter().enumerate() {
     for member in scc {
@@ -463,10 +450,7 @@ mod tests {
   /// Custom-error revert (e.g. `revert MyError(...)`). `statement` is
   /// the require/revert statement's node topic; `error` is the custom
   /// error declaration's topic.
-  fn custom_revert(
-    statement: topic::Topic,
-    error: topic::Topic,
-  ) -> RevertInfo {
+  fn custom_revert(statement: topic::Topic, error: topic::Topic) -> RevertInfo {
     RevertInfo {
       topic: statement,
       kind: RevertConstraintKind::Revert,
@@ -542,8 +526,16 @@ mod tests {
     let stmt = fn_topic(10);
     let err = fn_topic(20);
     let mut props = BTreeMap::new();
-    props
-      .insert(a, fn_props(vec![custom_revert(stmt, err)], vec![], vec![], vec![], vec![]));
+    props.insert(
+      a,
+      fn_props(
+        vec![custom_revert(stmt, err)],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+      ),
+    );
 
     let effects = compute_transitive_effects(&props, &empty_metadata());
     let a_reverts = &effects.reverts[&a];
@@ -561,8 +553,16 @@ mod tests {
     let err = fn_topic(20);
     let mut props = BTreeMap::new();
     props.insert(a, fn_props(vec![], vec![call(b)], vec![], vec![], vec![]));
-    props
-      .insert(b, fn_props(vec![custom_revert(stmt, err)], vec![], vec![], vec![], vec![]));
+    props.insert(
+      b,
+      fn_props(
+        vec![custom_revert(stmt, err)],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+      ),
+    );
 
     let effects = compute_transitive_effects(&props, &empty_metadata());
     let a_reverts = &effects.reverts[&a];
@@ -582,8 +582,16 @@ mod tests {
     let mut props = BTreeMap::new();
     props.insert(a, fn_props(vec![], vec![call(b)], vec![], vec![], vec![]));
     props.insert(b, fn_props(vec![], vec![call(c)], vec![], vec![], vec![]));
-    props
-      .insert(c, fn_props(vec![custom_revert(stmt, err)], vec![], vec![], vec![], vec![]));
+    props.insert(
+      c,
+      fn_props(
+        vec![custom_revert(stmt, err)],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+      ),
+    );
 
     let effects = compute_transitive_effects(&props, &empty_metadata());
     let a_reverts = &effects.reverts[&a];
@@ -741,8 +749,10 @@ mod tests {
     let c = fn_topic(3);
     let err = fn_topic(20);
     let mut props = BTreeMap::new();
-    props
-      .insert(a, fn_props(vec![], vec![call(b), call(c)], vec![], vec![], vec![]));
+    props.insert(
+      a,
+      fn_props(vec![], vec![call(b), call(c)], vec![], vec![], vec![]),
+    );
     props.insert(
       b,
       fn_props(
@@ -769,7 +779,12 @@ mod tests {
       .iter()
       .map(|e| (e.origin, e.revert.error_topic))
       .collect();
-    assert_eq!(a_set.len(), 2, "different origins for same error stay distinct: {:?}", a_set);
+    assert_eq!(
+      a_set.len(),
+      2,
+      "different origins for same error stay distinct: {:?}",
+      a_set
+    );
     assert!(a_set.contains(&(b, Some(err))));
     assert!(a_set.contains(&(c, Some(err))));
   }
@@ -791,8 +806,16 @@ mod tests {
       fn_props(
         vec![],
         vec![
-          CallInfo { site: fn_topic(100), callee: b, in_try_block: false },
-          CallInfo { site: fn_topic(101), callee: b, in_try_block: false },
+          CallInfo {
+            site: fn_topic(100),
+            callee: b,
+            in_try_block: false,
+          },
+          CallInfo {
+            site: fn_topic(101),
+            callee: b,
+            in_try_block: false,
+          },
         ],
         vec![],
         vec![],
@@ -860,7 +883,10 @@ mod tests {
     let y = var_topic(50);
     let err_b = fn_topic(22);
     let mut props = BTreeMap::new();
-    props.insert(a, fn_props(vec![], vec![try_call(b)], vec![], vec![], vec![]));
+    props.insert(
+      a,
+      fn_props(vec![], vec![try_call(b)], vec![], vec![], vec![]),
+    );
     props.insert(
       b,
       fn_props(
@@ -895,12 +921,17 @@ mod tests {
     let b = fn_topic(2);
     let x = var_topic(50);
     let mut props = BTreeMap::new();
-    props.insert(a, fn_props(vec![], vec![try_call(b)], vec![], vec![], vec![]));
+    props.insert(
+      a,
+      fn_props(vec![], vec![try_call(b)], vec![], vec![], vec![]),
+    );
     props.insert(b, fn_props(vec![], vec![], vec![], vec![x], vec![]));
 
     let effects = compute_transitive_effects(&props, &empty_metadata());
-    let a_reads: Vec<_> =
-      effects.reads[&a].iter().map(|e| (e.origin, e.topic)).collect();
+    let a_reads: Vec<_> = effects.reads[&a]
+      .iter()
+      .map(|e| (e.origin, e.topic))
+      .collect();
     assert_eq!(a_reads, vec![(b, x)]);
   }
 
@@ -910,7 +941,10 @@ mod tests {
     let b = fn_topic(2);
     let evt = ev_topic(60);
     let mut props = BTreeMap::new();
-    props.insert(a, fn_props(vec![], vec![try_call(b)], vec![], vec![], vec![]));
+    props.insert(
+      a,
+      fn_props(vec![], vec![try_call(b)], vec![], vec![], vec![]),
+    );
     props.insert(b, fn_props(vec![], vec![], vec![], vec![], vec![evt]));
 
     let effects = compute_transitive_effects(&props, &empty_metadata());
@@ -997,8 +1031,10 @@ mod tests {
     let c = fn_topic(3);
     let y = var_topic(50);
     let mut props = BTreeMap::new();
-    props
-      .insert(a, fn_props(vec![], vec![call(b), call(c)], vec![], vec![], vec![]));
+    props.insert(
+      a,
+      fn_props(vec![], vec![call(b), call(c)], vec![], vec![], vec![]),
+    );
     props.insert(b, fn_props(vec![], vec![], vec![y], vec![], vec![]));
     props.insert(c, fn_props(vec![], vec![], vec![y], vec![], vec![]));
 
@@ -1025,8 +1061,16 @@ mod tests {
       fn_props(
         vec![],
         vec![
-          CallInfo { site: fn_topic(100), callee: b, in_try_block: false },
-          CallInfo { site: fn_topic(101), callee: b, in_try_block: false },
+          CallInfo {
+            site: fn_topic(100),
+            callee: b,
+            in_try_block: false,
+          },
+          CallInfo {
+            site: fn_topic(101),
+            callee: b,
+            in_try_block: false,
+          },
         ],
         vec![],
         vec![],
@@ -1059,7 +1103,10 @@ mod tests {
     let evt = ev_topic(60);
 
     let mut props = BTreeMap::new();
-    props.insert(a, fn_props(vec![], vec![call(interface)], vec![], vec![], vec![]));
+    props.insert(
+      a,
+      fn_props(vec![], vec![call(interface)], vec![], vec![], vec![]),
+    );
     // Impl itself: in scope, raises/writes/emits.
     props.insert(
       impl_fn,
@@ -1082,7 +1129,10 @@ mod tests {
 
     let a_reverts = &effects.reverts[&a];
     assert_eq!(a_reverts.len(), 1);
-    assert_eq!(a_reverts[0].origin, impl_fn, "origin must be the impl, not the interface");
+    assert_eq!(
+      a_reverts[0].origin, impl_fn,
+      "origin must be the impl, not the interface"
+    );
     assert_eq!(a_reverts[0].revert.error_topic, Some(err));
 
     let a_muts = &effects.mutations[&a];
@@ -1208,8 +1258,10 @@ mod tests {
     let stmt = fn_topic(11);
     let err = fn_topic(21);
     let mut props = BTreeMap::new();
-    props
-      .insert(a, fn_props(vec![], vec![call(b), call(c)], vec![], vec![], vec![]));
+    props.insert(
+      a,
+      fn_props(vec![], vec![call(b), call(c)], vec![], vec![], vec![]),
+    );
     props.insert(b, fn_props(vec![], vec![call(d)], vec![], vec![], vec![]));
     props.insert(c, fn_props(vec![], vec![call(d)], vec![], vec![], vec![]));
     props.insert(
@@ -1245,14 +1297,20 @@ mod tests {
     let c_out = fn_topic(3);
     let mut props = BTreeMap::new();
     props.insert(a, fn_props(vec![], vec![call(b)], vec![], vec![], vec![]));
-    props.insert(b, fn_props(vec![], vec![call(c_out)], vec![], vec![], vec![]));
+    props.insert(
+      b,
+      fn_props(vec![], vec![call(c_out)], vec![], vec![], vec![]),
+    );
     // c_out intentionally NOT in props — represents an OZ-style dep.
 
     let effects = compute_transitive_effects(&props, &empty_metadata());
     assert!(
       effects.reverts[&a].is_empty(),
       "out-of-scope mid-chain must NOT leak unknown effects; got {:?}",
-      effects.reverts[&a].iter().map(|e| e.origin).collect::<Vec<_>>(),
+      effects.reverts[&a]
+        .iter()
+        .map(|e| e.origin)
+        .collect::<Vec<_>>(),
     );
     assert!(effects.mutations[&a].is_empty());
     assert!(effects.reads[&a].is_empty());

@@ -790,7 +790,8 @@ fn render_solidity_ast_snippet(
         let callee_transitive_events =
           collect_member_transitive_events(&callee_topic, audit_data);
         if !callee_transitive_events.is_empty() {
-          o["callee_transitive_events_emitted"] = json!(callee_transitive_events);
+          o["callee_transitive_events_emitted"] =
+            json!(callee_transitive_events);
         }
         let callee_transitive_reverts =
           collect_member_transitive_reverts(&callee_topic, audit_data);
@@ -7971,8 +7972,9 @@ mod batch_render_integration_tests {
       threat_a,
       TopicMetadata::ThreatTopic {
         topic: threat_a,
-        description: "the value can be reordered before the dependent read commits"
-          .to_string(),
+        description:
+          "the value can be reordered before the dependent read commits"
+            .to_string(),
         subject_topic: assignment_topic,
         falsifies_condition: cond_a,
         controlled_by: domain::ThreatActor::BlockProducer,
@@ -7986,8 +7988,9 @@ mod batch_render_integration_tests {
       threat_b,
       TopicMetadata::ThreatTopic {
         topic: threat_b,
-        description: "the unguarded entry permits reentry through the external call"
-          .to_string(),
+        description:
+          "the unguarded entry permits reentry through the external call"
+            .to_string(),
         subject_topic: assignment_topic,
         falsifies_condition: cond_b,
         // `Self_` must render as the on-wire `"Self"` token.
@@ -8270,7 +8273,10 @@ mod batch_render_integration_tests {
     let threats = find_threats_inline(&value, &assignment_topic.id())
       .expect("valid threat should appear");
     assert_eq!(threats.len(), 1, "orphan must be filtered out");
-    assert_eq!(threats[0]["topic"].as_str(), Some(valid_threat.id().as_str()));
+    assert_eq!(
+      threats[0]["topic"].as_str(),
+      Some(valid_threat.id().as_str())
+    );
     assert_eq!(threats[0]["description"].as_str(), Some("valid scenario"));
     assert_eq!(threats[0]["controlled_by"].as_str(), Some("Caller"));
     assert_eq!(

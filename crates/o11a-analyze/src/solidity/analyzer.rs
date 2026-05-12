@@ -105,8 +105,7 @@ pub fn analyze(
       transitive.reverts.get(topic).cloned().unwrap_or_default();
     let new_mutations =
       transitive.mutations.get(topic).cloned().unwrap_or_default();
-    let new_reads =
-      transitive.reads.get(topic).cloned().unwrap_or_default();
+    let new_reads = transitive.reads.get(topic).cloned().unwrap_or_default();
     let new_events = transitive
       .events_emitted
       .get(topic)
@@ -2988,7 +2987,9 @@ fn walk_call_expression_receiver_parts(
       );
     }
     ASTNode::FunctionCallOptions {
-      expression, options, ..
+      expression,
+      options,
+      ..
     } => {
       walk_call_expression_receiver_parts(
         expression,
@@ -4318,7 +4319,9 @@ fn populate_expanded_context(
 
   // Collect expanded references for each topic before mutating
   let expanded_refs_map: BTreeMap<topic::Topic, Vec<SourceContext>> =
-    topic_metadata.keys().map(|topic| {
+    topic_metadata
+      .keys()
+      .map(|topic| {
         let node_id = topic.numeric_id();
 
         // Get recursive ancestry (ancestors, descendants, and relatives tracked separately)
@@ -5746,8 +5749,11 @@ mod tests {
     assert_eq!(out.function_calls[0].callee_node, 200);
     assert!(!out.function_calls[0].in_try_block);
 
-    let reads: Vec<i32> =
-      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    let reads: Vec<i32> = out
+      .variable_reads
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
     assert!(
       !reads.contains(&200),
       "callee `foo` must not appear in variable_reads; got {:?}",
@@ -5780,8 +5786,16 @@ mod tests {
       .iter()
       .map(|r| r.referenced_node)
       .collect();
-    assert!(refs.contains(&100), "Lib should be referenced; got {:?}", refs);
-    assert!(refs.contains(&200), "foo should be referenced; got {:?}", refs);
+    assert!(
+      refs.contains(&100),
+      "Lib should be referenced; got {:?}",
+      refs
+    );
+    assert!(
+      refs.contains(&200),
+      "foo should be referenced; got {:?}",
+      refs
+    );
   }
 
   #[test]
@@ -5803,8 +5817,11 @@ mod tests {
     assert_eq!(out.function_calls[0].call_node, 14);
     assert_eq!(out.function_calls[0].callee_node, 200);
 
-    let reads: Vec<i32> =
-      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    let reads: Vec<i32> = out
+      .variable_reads
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
     assert!(
       !reads.contains(&200),
       "callee `foo` must not be in variable_reads; got {:?}",
@@ -5851,8 +5868,16 @@ mod tests {
 
     let callees: Vec<i32> =
       out.function_calls.iter().map(|c| c.callee_node).collect();
-    assert!(callees.contains(&200), "`b` must be called; got {:?}", callees);
-    assert!(callees.contains(&300), "`c` must be called; got {:?}", callees);
+    assert!(
+      callees.contains(&200),
+      "`b` must be called; got {:?}",
+      callees
+    );
+    assert!(
+      callees.contains(&300),
+      "`c` must be called; got {:?}",
+      callees
+    );
     assert_eq!(out.function_calls.len(), 2);
   }
 
@@ -5890,8 +5915,11 @@ mod tests {
       refs,
     );
 
-    let reads: Vec<i32> =
-      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    let reads: Vec<i32> = out
+      .variable_reads
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
     assert!(reads.contains(&200), "arg must be read; got {:?}", reads);
   }
 
@@ -5908,8 +5936,11 @@ mod tests {
     assert_eq!(out.function_calls.len(), 1);
     assert_eq!(out.function_calls[0].callee_node, 100);
 
-    let reads: Vec<i32> =
-      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    let reads: Vec<i32> = out
+      .variable_reads
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
     assert!(
       !reads.contains(&100),
       "callee `foo` must not be in variable_reads; got {:?}",
@@ -5962,8 +5993,11 @@ mod tests {
     let id = make_identifier(2, "x", 99);
     let body = make_block(1, vec![id]);
     let out = run_visitor_full(&body, Some(1));
-    let reads: Vec<i32> =
-      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    let reads: Vec<i32> = out
+      .variable_reads
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
     assert_eq!(reads, vec![99]);
   }
 
@@ -5973,10 +6007,7 @@ mod tests {
     // per reference site. `x` referenced twice must yield two entries.
     let body = make_block(
       1,
-      vec![
-        make_identifier(2, "x", 99),
-        make_identifier(3, "x", 99),
-      ],
+      vec![make_identifier(2, "x", 99), make_identifier(3, "x", 99)],
     );
     let out = run_visitor_full(&body, Some(1));
     let xs: Vec<i32> = out
@@ -6026,10 +6057,7 @@ mod tests {
     let body = make_block(1, vec![delete]);
     let out = run_visitor_full(&body, Some(1));
     assert!(
-      out
-        .variable_reads
-        .iter()
-        .all(|r| r.referenced_node != 99),
+      out.variable_reads.iter().all(|r| r.referenced_node != 99),
       "delete operand must not appear in variable_reads; got {:?}",
       out.variable_reads,
     );
@@ -6096,8 +6124,11 @@ mod tests {
     let body = make_block(1, vec![assign]);
     let out = run_visitor_full(&body, Some(1));
 
-    let reads: Vec<i32> =
-      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    let reads: Vec<i32> = out
+      .variable_reads
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
     assert!(
       !reads.contains(&99) && !reads.contains(&100),
       "tuple LHS bases must not appear in variable_reads; got {:?}",
@@ -6131,8 +6162,11 @@ mod tests {
     let body = make_block(1, vec![assign]);
     let out = run_visitor_full(&body, Some(1));
 
-    let reads: Vec<i32> =
-      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    let reads: Vec<i32> = out
+      .variable_reads
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
     assert!(
       !reads.contains(&99),
       "`a` is a write target, must not be a read; got {:?}",
@@ -6178,8 +6212,11 @@ mod tests {
     let body = make_block(1, vec![assign]);
     let out = run_visitor_full(&body, Some(1));
 
-    let reads: Vec<i32> =
-      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    let reads: Vec<i32> = out
+      .variable_reads
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
     for id in [99, 100, 101] {
       assert!(
         !reads.contains(&id),
@@ -6209,18 +6246,17 @@ mod tests {
   fn variable_reads_suppresses_member_access_write_target_chain() {
     // `s.field = 1`: neither `s` nor `field` should land in
     // variable_reads — the whole chain is the write target.
-    let lhs = make_member_access(
-      11,
-      make_identifier(12, "s", 99),
-      "field",
-      Some(50),
-    );
+    let lhs =
+      make_member_access(11, make_identifier(12, "s", 99), "field", Some(50));
     let rhs = make_identifier(13, "ONE", 200);
     let assign = make_assign(10, lhs, rhs, ast::AssignmentOperator::Assign);
     let body = make_block(1, vec![assign]);
     let out = run_visitor_full(&body, Some(1));
-    let reads: Vec<i32> =
-      out.variable_reads.iter().map(|r| r.referenced_node).collect();
+    let reads: Vec<i32> = out
+      .variable_reads
+      .iter()
+      .map(|r| r.referenced_node)
+      .collect();
     assert!(
       !reads.contains(&99),
       "MemberAccess base `s` must not be a read; got {:?}",
