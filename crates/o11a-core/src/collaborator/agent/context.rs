@@ -1540,14 +1540,15 @@ fn render_solidity_ast_snippet(
     }
   }
 
-  // Inline functional purpose, placement rationale, and conditions on
-  // non-pure subject nodes when previous pipeline steps have produced
-  // them. Conditions here are positive assertions (what must hold for
-  // purpose+placement to be fulfilled), not failure observations —
-  // step 7 (threats) generates adversarial inversions at output time.
+  // Inline functional purpose, placement rationale, conditions, and
+  // threats on non-pure subject nodes when previous pipeline steps have
+  // produced them. Conditions here are positive assertions (what must
+  // hold for purpose+placement to be fulfilled); threats are adversarial
+  // inversions of those conditions, 1:1 anchored to a `falsifies_condition`.
   // Field availability is data-flow driven: each lookup is gated on
   // presence in `audit_data`, so step 6's input naturally carries
-  // step 5's output and step 7+'s input naturally carries step 6's.
+  // step 5's output, step 7's input naturally carries step 6's, and
+  // step 8's input naturally carries step 7's.
   if is_non_pure {
     if let Some(p_topic) = audit_data.subject_purposes.get(&topic)
       && let Some(TopicMetadata::FunctionalPurposeTopic { description, .. }) =
@@ -1588,6 +1589,39 @@ fn render_solidity_ast_snippet(
         .collect();
       if !conditions.is_empty() {
         obj["conditions"] = json!(conditions);
+      }
+    }
+    // Inline threats for this non-pure subject from the reverse index.
+    // Stamped here so step 8 (invariants) inherits the threats payload
+    // for free — same shape as the conditions hook above, gated on
+    // presence (no placeholder values, orphan topics filtered out).
+    if let Some(threat_topics) = audit_data.subject_threats.get(&topic) {
+      let threats: Vec<serde_json::Value> = threat_topics
+        .iter()
+        .filter_map(|tt| {
+          if let Some(TopicMetadata::ThreatTopic {
+            topic: tt_id,
+            description,
+            falsifies_condition,
+            controlled_by,
+            evidence_topics,
+            ..
+          }) = audit_data.topic_metadata.get(tt)
+          {
+            Some(json!({
+              "topic": tt_id.id(),
+              "description": description,
+              "falsifies_condition": falsifies_condition.id(),
+              "controlled_by": controlled_by.as_str(),
+              "evidence_topics": evidence_topics.iter().map(|t| t.id()).collect::<Vec<_>>(),
+            }))
+          } else {
+            None
+          }
+        })
+        .collect();
+      if !threats.is_empty() {
+        obj["threats"] = json!(threats);
       }
     }
   }
@@ -7880,6 +7914,368 @@ mod batch_render_integration_tests {
     assert_eq!(
       conditions[0]["description"].as_str(),
       Some("valid assertion")
+    );
+  }
+
+  /// Recurse into `v` and find the first node whose `id` matches
+  /// `target_id`, returning its `threats` array (if any).
+  fn find_threats_inline(
+    v: &serde_json::Value,
+    target_id: &str,
+  ) -> Option<Vec<serde_json::Value>> {
+    match v {
+      serde_json::Value::Object(map) => {
+        if map.get("id").and_then(|v| v.as_str()) == Some(target_id)
+          && let Some(arr) = map.get("threats")
+        {
+          return arr.as_array().cloned();
+        }
+        map.values().find_map(|v| find_threats_inline(v, target_id))
+      }
+      serde_json::Value::Array(arr) => {
+        arr.iter().find_map(|v| find_threats_inline(v, target_id))
+      }
+      _ => None,
+    }
+  }
+
+  #[test]
+  fn render_inlines_threats_on_non_pure_subjects() {
+    // Non-pure subject with ThreatTopic entries in subject_threats must
+    // carry an inline `threats` array on the rendered node, shaped as
+    // {topic, description, falsifies_condition, controlled_by,
+    // evidence_topics}. Mirrors the conditions hook above; step 8 will
+    // consume this payload directly.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+
+    // Two threats on the same subject, targeting different conditions
+    // with different actors. Second threat carries non-empty evidence.
+    let cond_a = topic::new_adversarial_property_topic(10);
+    let cond_b = topic::new_adversarial_property_topic(11);
+    let threat_a = topic::new_adversarial_property_topic(100);
+    let threat_b = topic::new_adversarial_property_topic(101);
+    let evidence = vec![topic::new_node_topic(&200)];
+    audit.topic_metadata.insert(
+      threat_a,
+      TopicMetadata::ThreatTopic {
+        topic: threat_a,
+        description: "the value can be reordered before the dependent read commits"
+          .to_string(),
+        subject_topic: assignment_topic,
+        falsifies_condition: cond_a,
+        controlled_by: domain::ThreatActor::BlockProducer,
+        evidence_topics: vec![],
+        author: crate::collaborator::models::Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      threat_b,
+      TopicMetadata::ThreatTopic {
+        topic: threat_b,
+        description: "the unguarded entry permits reentry through the external call"
+          .to_string(),
+        subject_topic: assignment_topic,
+        falsifies_condition: cond_b,
+        // `Self_` must render as the on-wire `"Self"` token.
+        controlled_by: domain::ThreatActor::Self_,
+        evidence_topics: evidence.clone(),
+        author: crate::collaborator::models::Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+    // Populate the reverse index manually (normally rebuild_feature_context
+    // does this, but we're testing the renderer, not rebuild).
+    audit
+      .subject_threats
+      .insert(assignment_topic, vec![threat_a, threat_b]);
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    let threats = find_threats_inline(&value, &assignment_topic.id())
+      .expect("non-pure subject must carry inline threats");
+    assert_eq!(threats.len(), 2);
+
+    // First threat shape.
+    let t1 = &threats[0];
+    assert_eq!(t1["topic"].as_str(), Some(threat_a.id().as_str()));
+    assert_eq!(
+      t1["description"].as_str(),
+      Some("the value can be reordered before the dependent read commits")
+    );
+    assert_eq!(
+      t1["falsifies_condition"].as_str(),
+      Some(cond_a.id().as_str())
+    );
+    assert_eq!(t1["controlled_by"].as_str(), Some("BlockProducer"));
+    assert_eq!(t1["evidence_topics"].as_array().unwrap().len(), 0);
+
+    // Second threat shape — verifies `Self_` renders as `"Self"` and that
+    // evidence_topics carry through as string IDs.
+    let t2 = &threats[1];
+    assert_eq!(t2["topic"].as_str(), Some(threat_b.id().as_str()));
+    assert_eq!(
+      t2["falsifies_condition"].as_str(),
+      Some(cond_b.id().as_str())
+    );
+    assert_eq!(t2["controlled_by"].as_str(), Some("Self"));
+    let ev = t2["evidence_topics"].as_array().unwrap();
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].as_str(), Some(evidence[0].id().as_str()));
+  }
+
+  #[test]
+  fn render_omits_threats_when_subject_threats_is_empty() {
+    // Non-pure subject with no threats: the `threats` field must not
+    // appear on the rendered node. Same omit-on-empty contract as the
+    // conditions hook.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+    // subject_threats is empty (default) — no ThreatTopic entries.
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    assert!(
+      find_threats_inline(&value, &assignment_topic.id()).is_none(),
+      "non-pure subject without threats must not carry inline `threats`"
+    );
+  }
+
+  #[test]
+  fn render_threats_gracefully_handles_orphan_index_entry() {
+    // If subject_threats has an entry pointing at a topic that is
+    // missing from topic_metadata (e.g., after a partial rollback), the
+    // renderer should skip it without panicking. If all entries are
+    // orphans, the `threats` field must be omitted entirely.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+    // Orphan: topic exists in subject_threats but not in topic_metadata.
+    let orphan_threat = topic::new_adversarial_property_topic(999);
+    audit
+      .subject_threats
+      .insert(assignment_topic, vec![orphan_threat]);
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    assert!(
+      find_threats_inline(&value, &assignment_topic.id()).is_none(),
+      "orphan threat topic in subject_threats must not produce a threats array"
+    );
+  }
+
+  #[test]
+  fn render_threats_mixed_valid_and_orphan_only_emits_valid() {
+    // subject_threats has both a valid ThreatTopic and an orphan. Only
+    // the valid one should appear in the output. Mirrors the matching
+    // conditions test.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+
+    // Valid threat
+    let valid_threat = topic::new_adversarial_property_topic(100);
+    let cond = topic::new_adversarial_property_topic(50);
+    audit.topic_metadata.insert(
+      valid_threat,
+      TopicMetadata::ThreatTopic {
+        topic: valid_threat,
+        description: "valid scenario".to_string(),
+        subject_topic: assignment_topic,
+        falsifies_condition: cond,
+        controlled_by: domain::ThreatActor::Caller,
+        evidence_topics: vec![],
+        author: crate::collaborator::models::Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+    // Orphan — in subject_threats but not in topic_metadata
+    let orphan_threat = topic::new_adversarial_property_topic(999);
+    audit
+      .subject_threats
+      .insert(assignment_topic, vec![valid_threat, orphan_threat]);
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    let threats = find_threats_inline(&value, &assignment_topic.id())
+      .expect("valid threat should appear");
+    assert_eq!(threats.len(), 1, "orphan must be filtered out");
+    assert_eq!(threats[0]["topic"].as_str(), Some(valid_threat.id().as_str()));
+    assert_eq!(threats[0]["description"].as_str(), Some("valid scenario"));
+    assert_eq!(threats[0]["controlled_by"].as_str(), Some("Caller"));
+    assert_eq!(
+      threats[0]["falsifies_condition"].as_str(),
+      Some(cond.id().as_str())
     );
   }
 

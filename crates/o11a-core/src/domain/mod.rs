@@ -370,6 +370,56 @@ pub struct Requirement {
   pub documentation_topics: Vec<topic::Topic>,
 }
 
+/// The party whose action drives the threat scenario. One primary actor
+/// per threat; multi-actor coordination scenarios are captured in the
+/// threat's description prose. Loose taxonomy; the LLM picks; the auditor
+/// groups by actor in the review UI. `Other` is the escape hatch for
+/// scenarios that don't fit a named variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThreatActor {
+  /// An unauthenticated external caller of a public/external entry point.
+  Caller,
+  /// A role-gated party (admin, owner, governor, operator). The specific
+  /// role lives in the threat's description, not in this variant.
+  PrivilegedRole,
+  /// A third-party contract — typically the callee in an external call,
+  /// an oracle the subject reads from, or a token the subject interacts
+  /// with.
+  External,
+  /// A miner, sequencer, validator, or other party with control over
+  /// transaction ordering or inclusion.
+  BlockProducer,
+  /// A peer in the protocol's economic model (LP, borrower, counterparty
+  /// to a trade) whose interests differ from the subject's purpose.
+  Counterparty,
+  /// The contract itself reentering through an external call.
+  #[serde(rename = "Self")]
+  Self_,
+  /// No constraint on who triggers the scenario; permissionless.
+  AnyParty,
+  /// Genuinely novel actor classification; description carries the
+  /// structure.
+  Other,
+}
+
+impl ThreatActor {
+  /// Canonical display form. Matches the on-wire serde representation —
+  /// notably `Self_` renders as `"Self"`, not `"Self_"`, so display and
+  /// JSON agree.
+  pub fn as_str(self) -> &'static str {
+    match self {
+      ThreatActor::Caller => "Caller",
+      ThreatActor::PrivilegedRole => "PrivilegedRole",
+      ThreatActor::External => "External",
+      ThreatActor::BlockProducer => "BlockProducer",
+      ThreatActor::Counterparty => "Counterparty",
+      ThreatActor::Self_ => "Self",
+      ThreatActor::AnyParty => "AnyParty",
+      ThreatActor::Other => "Other",
+    }
+  }
+}
+
 /// Relationship type between a threat and a feature in impact analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThreatFeatureRelation {
@@ -474,6 +524,19 @@ pub struct AuditData {
   /// duplicates would already be distinct topics). Derived from
   /// `ConditionTopic.subject_topic`, rebuilt with `rebuild_feature_context`.
   pub subject_conditions: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Reverse index: non-pure subject topic → A-prefixed threat topics.
+  /// Each subject has zero or more threats; later writes append rather
+  /// than replace (a threat is its own topic, addressed by topic ID).
+  /// Derived from `ThreatTopic.subject_topic`, rebuilt with
+  /// `rebuild_feature_context`.
+  pub subject_threats: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Reverse index: A-prefixed condition topic → A-prefixed threat topics
+  /// that target it. Each condition has zero or more threats. Used for
+  /// the condition-detail UI ("show all threats falsifying this assertion")
+  /// and for re-derivation triggers (auditor edits condition X → re-run
+  /// threats anchored to X). Derived from `ThreatTopic.falsifies_condition`,
+  /// rebuilt with `rebuild_feature_context`.
+  pub condition_threats: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Impact analysis links between threats and features.
   pub threat_feature_links: Vec<ThreatFeatureLink>,
   /// Invariants keyed by A-prefixed topic ID. Each belongs to one threat.
@@ -1994,15 +2057,45 @@ pub enum TopicMetadata {
     /// `None` for pipeline-produced entities — see FeatureTopic for rationale.
     created_at: Option<String>,
   },
-  /// A threat on a non-pure source code subject
+  /// A threat on a non-pure source code subject. Generated in pipeline
+  /// step 7 as the adversarial inversion of a specific `ConditionTopic`:
+  /// each threat names exactly one condition it falsifies; a condition
+  /// can be the target of many threats. The reasoning chain is purpose
+  /// → conditions → threats → invariants; an auditor disagreeing with
+  /// this threat does not invalidate the underlying condition. See
+  /// SPEC's "Conditions vs. Invariants" for the role distinction with
+  /// InvariantTopic.
   ThreatTopic {
     topic: topic::Topic,
+    /// The scenario, in prose, phrased actor-agnostically (no "an
+    /// attacker," "a miner," etc.). Actor identity lives in
+    /// `controlled_by`, kept structurally separate so the auditor can
+    /// approve the description while disagreeing with the actor
+    /// (or vice versa).
     description: String,
-    /// The non-pure subject this threat belongs to
+    /// The non-pure subject this threat belongs to.
     subject_topic: topic::Topic,
+    /// The A-prefixed condition (assertion) this threat is the
+    /// adversarial inversion of. One threat targets exactly one
+    /// condition; one condition can be targeted by many threats.
+    falsifies_condition: topic::Topic,
+    /// The party whose action drives the scenario. One primary actor;
+    /// multi-actor coordination scenarios are captured in the
+    /// description prose.
+    controlled_by: ThreatActor,
+    /// Topic IDs the LLM cited as the vulnerable code surface this
+    /// threat plays out across. Constrained to the subject's containing
+    /// function: the subject node, its descendants, sibling statements
+    /// in the same semantic block, and the function's signature/
+    /// modifiers/parameters. Cross-function anchors are an
+    /// invariant-layer concern (step 8).
+    evidence_topics: Vec<topic::Topic>,
     author: crate::collaborator::models::Author,
-    created_at: String,
-    /// Severity is assigned during impact analysis; None means pending
+    /// `None` for pipeline-produced entities — see FeatureTopic for
+    /// rationale. (Following the FunctionalPurposeTopic / ConditionTopic
+    /// pattern.)
+    created_at: Option<String>,
+    /// Severity is assigned during impact analysis; None means pending.
     severity: Option<ThreatSeverity>,
   },
   /// A condition — an assertion that must hold for the non-pure subject's
@@ -2235,7 +2328,6 @@ impl TopicMetadata {
   pub fn created_at(&self) -> Option<&str> {
     match self {
       TopicMetadata::CommentTopic { created_at, .. }
-      | TopicMetadata::ThreatTopic { created_at, .. }
       | TopicMetadata::InvariantTopic { created_at, .. } => {
         Some(created_at.as_str())
       }
@@ -2245,7 +2337,8 @@ impl TopicMetadata {
       | TopicMetadata::FunctionalSemanticTopic { created_at, .. }
       | TopicMetadata::FunctionalPurposeTopic { created_at, .. }
       | TopicMetadata::PlacementRationaleTopic { created_at, .. }
-      | TopicMetadata::ConditionTopic { created_at, .. } => {
+      | TopicMetadata::ConditionTopic { created_at, .. }
+      | TopicMetadata::ThreatTopic { created_at, .. } => {
         created_at.as_deref()
       }
       _ => None,
@@ -2750,6 +2843,31 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }
   }
 
+  // Rebuild subject_threats and condition_threats from ThreatTopic entries.
+  // A threat carries both its non-pure subject and the condition it falsifies,
+  // so a single pass populates both indexes.
+  audit_data.subject_threats.clear();
+  audit_data.condition_threats.clear();
+  for (threat_topic, metadata) in &audit_data.topic_metadata {
+    if let TopicMetadata::ThreatTopic {
+      subject_topic,
+      falsifies_condition,
+      ..
+    } = metadata
+    {
+      audit_data
+        .subject_threats
+        .entry(*subject_topic)
+        .or_default()
+        .push(*threat_topic);
+      audit_data
+        .condition_threats
+        .entry(*falsifies_condition)
+        .or_default()
+        .push(*threat_topic);
+    }
+  }
+
   // Build reverse index: doc_topic -> [requirement_topics]
   let mut doc_to_requirements: HashMap<topic::Topic, Vec<topic::Topic>> =
     HashMap::new();
@@ -3204,6 +3322,8 @@ pub fn new_audit_data(
     subject_purposes: BTreeMap::new(),
     subject_placements: BTreeMap::new(),
     subject_conditions: BTreeMap::new(),
+    subject_threats: BTreeMap::new(),
+    condition_threats: BTreeMap::new(),
     threat_feature_links: Vec::new(),
     invariants: BTreeMap::new(),
     feature_requirement_links: BTreeMap::new(),
@@ -3710,5 +3830,358 @@ mod tests {
       audit.subject_conditions.is_empty(),
       "no ConditionTopic entries means empty subject_conditions"
     );
+  }
+
+  #[test]
+  fn rebuild_feature_context_populates_subject_and_condition_threats() {
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&10);
+    let subject_b = topic::new_node_topic(&20);
+    let cond_x = topic::new_adversarial_property_topic(1);
+    let cond_y = topic::new_adversarial_property_topic(2);
+
+    // Two threats on subject_a: one targeting cond_x, one targeting cond_y.
+    // One threat on subject_b also targeting cond_x — exercises the 1:N
+    // shape on the condition side.
+    let threat_ax = topic::new_adversarial_property_topic(11);
+    let threat_ay = topic::new_adversarial_property_topic(12);
+    let threat_bx = topic::new_adversarial_property_topic(13);
+
+    audit.topic_metadata.insert(
+      threat_ax,
+      TopicMetadata::ThreatTopic {
+        topic: threat_ax,
+        description: "the value can be reordered before the dependent read commits"
+          .to_string(),
+        subject_topic: subject_a,
+        falsifies_condition: cond_x,
+        controlled_by: ThreatActor::BlockProducer,
+        evidence_topics: vec![],
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      threat_ay,
+      TopicMetadata::ThreatTopic {
+        topic: threat_ay,
+        description: "the deterministic token address can be pre-computed"
+          .to_string(),
+        subject_topic: subject_a,
+        falsifies_condition: cond_y,
+        controlled_by: ThreatActor::AnyParty,
+        evidence_topics: vec![topic::new_node_topic(&77)],
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      threat_bx,
+      TopicMetadata::ThreatTopic {
+        topic: threat_bx,
+        description: "the unguarded entry permits unbounded loop growth"
+          .to_string(),
+        subject_topic: subject_b,
+        falsifies_condition: cond_x,
+        controlled_by: ThreatActor::Caller,
+        evidence_topics: vec![],
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+
+    // subject_a has two threats; subject_b has one.
+    let a_threats = audit
+      .subject_threats
+      .get(&subject_a)
+      .expect("subject_a should have threats");
+    assert_eq!(a_threats.len(), 2);
+    assert!(a_threats.contains(&threat_ax));
+    assert!(a_threats.contains(&threat_ay));
+    let b_threats = audit
+      .subject_threats
+      .get(&subject_b)
+      .expect("subject_b should have threats");
+    assert_eq!(b_threats.len(), 1);
+    assert_eq!(b_threats[0], threat_bx);
+
+    // cond_x is targeted by two threats (different subjects); cond_y by one.
+    let x_threats = audit
+      .condition_threats
+      .get(&cond_x)
+      .expect("cond_x should have threats");
+    assert_eq!(x_threats.len(), 2);
+    assert!(x_threats.contains(&threat_ax));
+    assert!(x_threats.contains(&threat_bx));
+    let y_threats = audit
+      .condition_threats
+      .get(&cond_y)
+      .expect("cond_y should have threats");
+    assert_eq!(y_threats.len(), 1);
+    assert_eq!(y_threats[0], threat_ay);
+
+    // A subject/condition with no threats is absent from the index.
+    let subject_c = topic::new_node_topic(&30);
+    let cond_z = topic::new_adversarial_property_topic(3);
+    assert!(!audit.subject_threats.contains_key(&subject_c));
+    assert!(!audit.condition_threats.contains_key(&cond_z));
+  }
+
+  #[test]
+  fn rebuild_feature_context_clears_threat_indexes_before_rebuilding() {
+    // Calling rebuild_feature_context twice must not accumulate stale
+    // entries — both threat indexes are always rebuilt from scratch.
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&10);
+    let cond_x = topic::new_adversarial_property_topic(1);
+    let threat_ax = topic::new_adversarial_property_topic(11);
+    audit.topic_metadata.insert(
+      threat_ax,
+      TopicMetadata::ThreatTopic {
+        topic: threat_ax,
+        description: "scenario".to_string(),
+        subject_topic: subject_a,
+        falsifies_condition: cond_x,
+        controlled_by: ThreatActor::Caller,
+        evidence_topics: vec![],
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+
+    // First rebuild populates both indexes.
+    rebuild_feature_context(&mut audit);
+    assert_eq!(
+      audit.subject_threats.get(&subject_a).map(|v| v.len()),
+      Some(1)
+    );
+    assert_eq!(
+      audit.condition_threats.get(&cond_x).map(|v| v.len()),
+      Some(1)
+    );
+
+    // Remove the threat topic and rebuild — both indexes must clear.
+    audit.topic_metadata.remove(&threat_ax);
+    rebuild_feature_context(&mut audit);
+    assert!(
+      !audit.subject_threats.contains_key(&subject_a),
+      "subject_threats must be cleared before rebuild"
+    );
+    assert!(
+      !audit.condition_threats.contains_key(&cond_x),
+      "condition_threats must be cleared before rebuild"
+    );
+  }
+
+  #[test]
+  fn rebuild_feature_context_with_no_threats_yields_empty_threat_indexes() {
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    rebuild_feature_context(&mut audit);
+    assert!(
+      audit.subject_threats.is_empty(),
+      "no ThreatTopic entries means empty subject_threats"
+    );
+    assert!(
+      audit.condition_threats.is_empty(),
+      "no ThreatTopic entries means empty condition_threats"
+    );
+  }
+
+  #[test]
+  fn threat_topic_round_trips_through_serde() {
+    use crate::collaborator::models::Author;
+
+    let threat_topic = topic::new_adversarial_property_topic(10);
+    let subject_topic = topic::new_node_topic(&42);
+    let falsifies_condition = topic::new_adversarial_property_topic(5);
+    let evidence = vec![
+      topic::new_node_topic(&42),
+      topic::new_node_topic(&101),
+    ];
+
+    let metadata = TopicMetadata::ThreatTopic {
+      topic: threat_topic,
+      description:
+        "the deterministic token address can be pre-computed and the pair created first, bricking deployment"
+          .to_string(),
+      subject_topic,
+      falsifies_condition,
+      controlled_by: ThreatActor::AnyParty,
+      evidence_topics: evidence.clone(),
+      author: Author::AgentLarge,
+      created_at: None,
+      severity: None,
+    };
+
+    let json = serde_json::to_string(&metadata).unwrap();
+    let back: TopicMetadata = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.topic(), &threat_topic);
+    assert_eq!(
+      back.description(),
+      Some(
+        "the deterministic token address can be pre-computed and the pair created first, bricking deployment"
+      )
+    );
+    // target_topic still resolves to subject_topic on ThreatTopic.
+    assert_eq!(back.target_topic(), Some(&subject_topic));
+    assert_eq!(back.author(), Some(Author::AgentLarge));
+    assert!(back.created_at().is_none());
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    audit.topic_metadata.insert(threat_topic, metadata);
+
+    let retrieved = audit.topic_metadata.get(&threat_topic).unwrap();
+    assert!(matches!(retrieved, TopicMetadata::ThreatTopic { .. }));
+    if let TopicMetadata::ThreatTopic {
+      falsifies_condition: fc,
+      controlled_by,
+      evidence_topics,
+      severity,
+      ..
+    } = retrieved
+    {
+      assert_eq!(*fc, falsifies_condition);
+      assert_eq!(*controlled_by, ThreatActor::AnyParty);
+      assert_eq!(*evidence_topics, evidence);
+      assert!(severity.is_none());
+    }
+  }
+
+  #[test]
+  fn threat_topic_round_trips_with_some_created_at_and_severity() {
+    // Counterpart to the all-None round-trip: confirms the `Option<String>`
+    // created_at carries `Some` through serde (the type flip from `String`
+    // to `Option<String>` is the load-bearing schema change in this phase),
+    // and that an assigned severity round-trips too.
+    use crate::collaborator::models::Author;
+
+    let threat_topic = topic::new_adversarial_property_topic(11);
+    let subject_topic = topic::new_node_topic(&7);
+    let falsifies_condition = topic::new_adversarial_property_topic(6);
+
+    let metadata = TopicMetadata::ThreatTopic {
+      topic: threat_topic,
+      description: "the value can be reordered before the dependent read commits"
+        .to_string(),
+      subject_topic,
+      falsifies_condition,
+      controlled_by: ThreatActor::Self_,
+      evidence_topics: vec![],
+      author: Author::AgentLarge,
+      created_at: Some("2026-05-12T12:00:00Z".to_string()),
+      severity: Some(ThreatSeverity::High),
+    };
+
+    let json = serde_json::to_string(&metadata).unwrap();
+    // `Self_` must serialize as the bare `Self` token, not as `Self_`.
+    assert!(
+      json.contains("\"controlled_by\":\"Self\""),
+      "Self_ must serialize as bare \"Self\" inside the metadata payload: {}",
+      json
+    );
+
+    let back: TopicMetadata = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.created_at(), Some("2026-05-12T12:00:00Z"));
+    if let TopicMetadata::ThreatTopic {
+      controlled_by,
+      evidence_topics,
+      severity,
+      ..
+    } = back
+    {
+      assert_eq!(controlled_by, ThreatActor::Self_);
+      assert!(evidence_topics.is_empty());
+      assert_eq!(severity, Some(ThreatSeverity::High));
+    } else {
+      panic!("expected ThreatTopic variant after round-trip");
+    }
+  }
+
+  #[test]
+  fn threat_actor_round_trips_for_each_variant() {
+    // Every variant must round-trip cleanly. `Self_` serializes as the
+    // bare `"Self"` token (Rust keyword workaround); all others use
+    // their PascalCase identifier verbatim.
+    let cases = [
+      (ThreatActor::Caller, "\"Caller\""),
+      (ThreatActor::PrivilegedRole, "\"PrivilegedRole\""),
+      (ThreatActor::External, "\"External\""),
+      (ThreatActor::BlockProducer, "\"BlockProducer\""),
+      (ThreatActor::Counterparty, "\"Counterparty\""),
+      (ThreatActor::Self_, "\"Self\""),
+      (ThreatActor::AnyParty, "\"AnyParty\""),
+      (ThreatActor::Other, "\"Other\""),
+    ];
+    for (actor, expected_json) in cases {
+      let json = serde_json::to_string(&actor).unwrap();
+      assert_eq!(
+        json, expected_json,
+        "serialized form for {:?} must match",
+        actor
+      );
+      let back: ThreatActor = serde_json::from_str(&json).unwrap();
+      assert_eq!(back, actor, "round-trip failed for {:?}", actor);
+    }
+  }
+
+  #[test]
+  fn threat_actor_self_parses_from_bare_self_token() {
+    // Explicitly confirm `"Self"` (not `"Self_"`) is the on-wire form.
+    let back: ThreatActor = serde_json::from_str("\"Self\"").unwrap();
+    assert_eq!(back, ThreatActor::Self_);
+
+    // The underscore form is not valid on the wire.
+    assert!(serde_json::from_str::<ThreatActor>("\"Self_\"").is_err());
+  }
+
+  #[test]
+  fn threat_actor_as_str_matches_serde_wire_form() {
+    // Display form and on-wire form must agree, so the API layer can
+    // render `controlled_by` without reaching into Debug (which would
+    // emit `Self_` for the keyword-escaped variant). Every variant is
+    // covered.
+    let cases = [
+      ThreatActor::Caller,
+      ThreatActor::PrivilegedRole,
+      ThreatActor::External,
+      ThreatActor::BlockProducer,
+      ThreatActor::Counterparty,
+      ThreatActor::Self_,
+      ThreatActor::AnyParty,
+      ThreatActor::Other,
+    ];
+    for actor in cases {
+      let wire = serde_json::to_value(actor).unwrap();
+      assert_eq!(
+        wire.as_str().expect("wire form is a string"),
+        actor.as_str(),
+        "as_str() must equal serde wire form for {:?}",
+        actor
+      );
+    }
+    // Spot-check the keyword-escaped variant explicitly.
+    assert_eq!(ThreatActor::Self_.as_str(), "Self");
+  }
+
+  #[test]
+  fn threat_actor_rejects_off_list_values() {
+    // The closed enum is the load-bearing safety net for the Phase 4 LLM
+    // call: off-list strings must fail deserialization so the
+    // post-processor's warn-and-skip path activates rather than silently
+    // accepting a free-form string. Same shape as the ConditionKind
+    // schema-enforcement test in step 6.
+    assert!(serde_json::from_str::<ThreatActor>("\"Admin\"").is_err());
+    assert!(serde_json::from_str::<ThreatActor>("\"caller\"").is_err());
+    assert!(serde_json::from_str::<ThreatActor>("\"\"").is_err());
   }
 }

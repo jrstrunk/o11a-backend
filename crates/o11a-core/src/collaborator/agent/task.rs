@@ -1994,6 +1994,824 @@ fn validate_conditions_coverage(
   }
 }
 
+// ============================================================================
+// Threats (Pipeline Step 7)
+// ============================================================================
+
+/// Prompt for generating threats — concrete adversarial scenarios that
+/// falsify a specific condition — for every condition on every non-pure
+/// subject in a single in-scope function/modifier. The input JSON is the
+/// output of `render_batch_for_extraction` called with a single-member
+/// slice; the envelope uses the `subject` shape. The unified renderer
+/// inlines a `conditions` array on each non-pure subject (step 6 phase 3
+/// wired this) — that array is the load-bearing input. Threats are 1:1
+/// to the condition they falsify; one condition can be the target of
+/// many threats. See SPEC's "Conditions vs. Invariants" and
+/// `threats-step-7.md`.
+const EXTRACT_THREATS_PROMPT: &str = "Below is one in-scope function or \
+modifier from a smart contract project. The function appears under the \
+`subject` field with:\n\
+- `topic`, `name`, `kind`, `visibility`, and a `modifiers` array of \
+`{topic, name}` entries.\n\
+- `state_reads`, `state_writes`, `events_emitted`, `reverts` and their \
+transitive counterparts (state and effects this function reads, writes, \
+emits, or reverts with — directly and through the call graph).\n\
+- `features`: an array of features this function contributes to. Each \
+feature has `topic`, `name`, `description`, and `requirements`.\n\
+- `behaviors`: what the function as a whole does (already extracted).\n\
+- `definition`: the function's signature and body as an AST. Non-pure \
+subjects in the body have `purity: \"non_pure\"`; function calls include \
+`purity: \"pure\"` or `purity: \"non_pure\"`. Reference nodes carry an \
+inline `semantic` when the referenced declaration has a project-specific \
+meaning. Call sites carry an inline `callee_behaviors` when the callee \
+is in-scope. **Each non-pure subject node carries inline \
+`functional_purpose`, `placement_rationale`, AND a `conditions` array of \
+`{topic, description, kind, evidence_topics}` entries describing the \
+assertions that must hold for that subject's purpose to be fulfilled. \
+The conditions array is the load-bearing input for this task.**\n\
+- `semantics`: top-level map keyed by declaration topic, deduped \
+enumeration of the inline annotations.\n\
+- `called_function_behaviors`: top-level map keyed by callee topic, \
+deduped enumeration of the inline call-site annotations.\n\n\
+The top-level **`non_pure_subjects`** array lists every non-pure subject \
+in this function. For **each subject** in that list, and for **each \
+condition** on that subject, produce zero or more **threats** — \
+concrete adversarial scenarios in which the named condition fails to \
+hold. A threat is the adversarial inversion of one condition: each \
+threat names exactly one condition it falsifies via \
+`falsifies_condition`; one condition can be the target of many threats. \
+The reasoning chain is purpose → conditions → threats → invariants \
+(invariants are a later pipeline step).\n\n\
+**Phrase each threat as a concrete scenario, not as a guard \
+recommendation.** Good: \"the deterministic token address can be \
+pre-computed and `createPair` called first, bricking deployment.\" Bad: \
+\"the function should use a commit-reveal scheme.\" If you find \
+yourself writing \"the code should …\" or \"the function must …\", \
+stop and re-state as the scenario being enabled.\n\n\
+**Description prose stays actor-agnostic.** The structured \
+`controlled_by` field is the canonical home for actor identity. The \
+description must NOT name the actor — no \"an attacker,\" \"a miner,\" \
+\"the admin,\" \"the caller,\" \"a user,\" \"a validator,\" \"a \
+sequencer,\" \"the owner,\" \"the operator,\" \"the counterparty.\" \
+Phrase scenarios in the passive or in terms of the mechanism: \"the \
+value can be reordered before the dependent read commits\" — not \"a \
+miner reorders the value before the dependent read commits.\" This \
+keeps the actor classification independently approvable: an auditor can \
+agree with the scenario and disagree with the actor (or vice versa) \
+without the prose forcing a paired interpretation. **Distinguishing \
+test:** if your description starts with \"an attacker,\" \"a miner,\" \
+\"the caller,\" or any other noun naming a party, restate the scenario \
+without naming the party.\n\n\
+**Bound the evidence scope strictly.** `evidence_topics` may reference \
+only topics inside the subject's containing function: the subject node \
+itself, its descendants in the AST, sibling statements in the same \
+semantic block, the function's signature, and the function's modifiers \
+and parameters. Cross-function topics — other functions, state-variable \
+declarations, documentation topics, called-function topics — are \
+**invalid for threats** and will be rejected. Those are invariant-layer \
+anchors (step 8 will produce invariants that point outside the subject \
+to the codebase-level defenses). Rationale: threats describe the \
+vulnerable surface; invariants describe the protections.\n\n\
+**Frame absence as in-subject evidence.** If the threat is enabled by \
+the absence of something (no reentrancy guard, no slippage check, no \
+access control modifier, no staleness check), point `evidence_topics` \
+at the subject node or the function's modifier list to anchor the \
+absence — do not point at the missing element, since by definition it \
+is not in the codebase. An empty `evidence_topics` array is also \
+acceptable for pure-absence threats; the post-processor will populate \
+the subject node as a fallback anchor.\n\n\
+For each threat, choose a `controlled_by` actor — the party whose \
+action drives the scenario. Pick the primary actor; multi-actor \
+coordination scenarios go in the description. The actors are:\n\
+- `Caller` — An unauthenticated external caller of a public/external \
+entry point.\n\
+- `PrivilegedRole` — A role-gated party (admin, owner, governor, \
+operator). The specific role lives in the description, not in this \
+token.\n\
+- `External` — A third-party contract: callee in an external call, an \
+oracle the subject reads from, or a token the subject interacts with.\n\
+- `BlockProducer` — Miner, sequencer, validator, or other party with \
+control over transaction ordering or inclusion.\n\
+- `Counterparty` — A peer in the protocol's economic model (LP, \
+borrower, counterparty to a trade) whose interests differ from the \
+subject's purpose.\n\
+- `Self` — The contract itself reentering through an external call.\n\
+- `AnyParty` — No constraint on who triggers the scenario; \
+permissionless.\n\
+- `Other` — Genuinely novel actor classification; description carries \
+the structure. Use `Other` only when no actor above fits, rather than \
+force-fitting to a near-match.\n\n\
+**Empty-threats handling.** If a condition has no plausible falsifying \
+scenario you can identify (because the assertion is enforced by \
+Solidity itself, by an upstream type constraint, or by a structural \
+property of the codebase that makes the violation infeasible), emit an \
+empty `threats` array AND a `no_threat_rationale` string explaining why \
+the condition is discharged. Do not invent threats to fill the slot; \
+the rationale is the audit signal that you considered the assertion and \
+found no falsifier. When you produce one or more threats for a \
+condition, set `no_threat_rationale` to `null`.\n\n\
+**Use the audit-wide security context.** Any `Security context` block \
+above this prompt names known threats, role definitions, and security \
+considerations specific to this audit. Use it to pick realistic actors \
+and to avoid restating defenses the auditor has already documented.\n\n\
+Return a JSON object with a `subjects` key whose value is an array. \
+Each entry has:\n\
+- `subject_topic`: a topic ID from the `non_pure_subjects` list\n\
+- `conditions`: an array of entries — one per condition on that \
+subject — each with:\n\
+  - `falsifies_condition`: the condition's A-prefixed topic ID, taken \
+from the subject's inline `conditions` array. Citing a condition topic \
+that is not on this subject is invalid and will be dropped.\n\
+  - `threats`: an array of `{description, controlled_by, \
+evidence_topics}` entries (may be empty).\n\
+  - `no_threat_rationale`: a string explaining the empty-threats \
+decision, or `null` when `threats` is non-empty.\n\n\
+If a subject has no conditions in the inline `conditions` array, omit \
+the subject from the response entirely. If the function has no \
+non-pure subjects, return `{\"subjects\": []}`.\n\n";
+
+#[derive(Deserialize)]
+struct LLMThreat {
+  description: String,
+  controlled_by: domain::ThreatActor,
+  evidence_topics: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct LLMConditionThreats {
+  falsifies_condition: String,
+  threats: Vec<LLMThreat>,
+  /// `None` when the LLM omits the field or sets it to `null`.
+  /// Validation enforces the mutually-exclusive shape:
+  /// `threats` non-empty ↔ `no_threat_rationale` is `None`.
+  #[serde(default)]
+  no_threat_rationale: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LLMSubjectThreats {
+  subject_topic: String,
+  conditions: Vec<LLMConditionThreats>,
+}
+
+#[derive(Deserialize)]
+struct LLMThreatsResponse {
+  subjects: Vec<LLMSubjectThreats>,
+}
+
+static THREATS_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
+  name: "extract_threats",
+  schema: json!({
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["subjects"],
+    "properties": {
+      "subjects": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subject_topic", "conditions"],
+          "properties": {
+            "subject_topic": { "type": "string" },
+            "conditions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "falsifies_condition",
+                  "threats",
+                  "no_threat_rationale"
+                ],
+                "properties": {
+                  "falsifies_condition": { "type": "string" },
+                  "threats": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "description",
+                        "controlled_by",
+                        "evidence_topics"
+                      ],
+                      "properties": {
+                        "description": { "type": "string" },
+                        "controlled_by": {
+                          "type": "string",
+                          "enum": [
+                            "Caller",
+                            "PrivilegedRole",
+                            "External",
+                            "BlockProducer",
+                            "Counterparty",
+                            "Self",
+                            "AnyParty",
+                            "Other"
+                          ]
+                        },
+                        "evidence_topics": {
+                          "type": "array",
+                          "items": { "type": "string" }
+                        }
+                      }
+                    }
+                  },
+                  "no_threat_rationale": {
+                    "type": ["string", "null"]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }),
+  empty_response: r#"{"subjects":[]}"#,
+});
+
+/// Result of threats extraction for one batch (one function in
+/// per-function mode). Each entry pairs a non-pure subject topic with
+/// its per-condition threat groupings.
+pub struct ParsedThreats {
+  pub entries: Vec<ParsedSubjectThreats>,
+}
+
+pub struct ParsedSubjectThreats {
+  pub subject_topic: topic::Topic,
+  pub conditions: Vec<ParsedConditionThreats>,
+}
+
+pub struct ParsedConditionThreats {
+  pub falsifies_condition: topic::Topic,
+  pub threats: Vec<ParsedThreat>,
+  /// Populated only when `threats` is empty; the LLM's explanation of
+  /// why no falsifier was found. The pipeline step posts this as an
+  /// agent comment on the condition topic so the rationale lands in
+  /// the auditor-visible discussion thread (see `threats-step-7.md`
+  /// Phase 5).
+  pub no_threat_rationale: Option<String>,
+}
+
+pub struct ParsedThreat {
+  pub description: String,
+  pub controlled_by: domain::ThreatActor,
+  pub evidence_topics: Vec<topic::Topic>,
+}
+
+/// Validation context derived from the rendered batch JSON. Carries the
+/// expected subject set, the in-function topic scope (subject + function
+/// topic + modifiers + all node-IDs reachable through the rendered AST
+/// definition), and the per-subject inline-condition map used to validate
+/// each `falsifies_condition` link.
+struct ThreatsValidationContext {
+  /// Subjects in the batch's top-level `non_pure_subjects` array.
+  expected_subjects: std::collections::HashSet<String>,
+  /// Every topic ID treated as "inside the containing function" for the
+  /// purposes of evidence-scope validation. Conservative superset: the
+  /// function's own topic, modifier topics, and every `id` field
+  /// reachable through `subject.definition`. State-variable topics
+  /// referenced via `referenced_declaration` (not `id`) are excluded by
+  /// design — those are cross-function anchors and are an invariant-
+  /// layer concern.
+  in_function_topics: std::collections::HashSet<String>,
+  /// Subject topic id → set of inline condition topic ids stamped on
+  /// that subject by step 6's renderer hook. Used to reject
+  /// `falsifies_condition` entries that don't actually belong to the
+  /// claimed subject.
+  subject_conditions:
+    std::collections::HashMap<String, std::collections::HashSet<String>>,
+}
+
+/// Run the threats LLM task against a single function rendered by
+/// `context::render_batch_for_extraction` in `subject` shape. `label`
+/// identifies the function for logs. `security_notes` is the
+/// audit-wide framing loaded from `security.md`; when `Some`, it is
+/// prepended to the prompt as a `Security context:` block so the LLM
+/// picks realistic actors. Validation drops bad entries but keeps the
+/// good — a batch with one malformed evidence topic still produces
+/// threats with the remaining valid topics. Same drop-and-warn shape
+/// as steps 5 and 6.
+pub async fn extract_threats_from_batch(
+  batch_json: &str,
+  label: &str,
+  security_notes: Option<&str>,
+) -> Result<ParsedThreats, TaskError> {
+  let prompt = match security_notes {
+    Some(notes) if !notes.trim().is_empty() => format!(
+      "Security context:\n{}\n\n{}Batch:\n{}",
+      notes.trim(),
+      EXTRACT_THREATS_PROMPT,
+      batch_json
+    ),
+    _ => format!("{}Batch:\n{}", EXTRACT_THREATS_PROMPT, batch_json),
+  };
+
+  let log_label = format!("threats_{}", label);
+  let response = router::chat_completion(
+    TaskSize::Large,
+    router::SYSTEM_MESSAGE_CODE,
+    &prompt,
+    Some(&log_label),
+    Some(&THREATS_SCHEMA),
+  )
+  .await?;
+
+  let wrapper: LLMThreatsResponse =
+    router::parse_response(&response, "threats", &prompt)?;
+
+  let ctx = build_threats_validation_context(batch_json);
+  validate_threats_coverage(&ctx.expected_subjects, &wrapper.subjects, label);
+
+  let entries = parse_threats_response(wrapper, &ctx, label);
+  Ok(ParsedThreats { entries })
+}
+
+/// Parse a single-subject batch JSON envelope into the validation
+/// context used by `parse_threats_response`. Returns an empty context
+/// on malformed JSON — the LLM call's outputs are then accepted
+/// permissively (same defensive default as `parse_non_pure_subjects`).
+fn build_threats_validation_context(
+  batch_json: &str,
+) -> ThreatsValidationContext {
+  let mut ctx = ThreatsValidationContext {
+    expected_subjects: std::collections::HashSet::new(),
+    in_function_topics: std::collections::HashSet::new(),
+    subject_conditions: std::collections::HashMap::new(),
+  };
+  let Ok(value) = serde_json::from_str::<serde_json::Value>(batch_json) else {
+    return ctx;
+  };
+  if let Some(arr) =
+    value.get("non_pure_subjects").and_then(|v| v.as_array())
+  {
+    ctx.expected_subjects = arr
+      .iter()
+      .filter_map(|item| item.as_str().map(String::from))
+      .collect();
+  }
+  if let Some(subject) = value.get("subject") {
+    if let Some(t) = subject.get("topic").and_then(|v| v.as_str()) {
+      ctx.in_function_topics.insert(t.to_string());
+    }
+    if let Some(mods) = subject.get("modifiers").and_then(|v| v.as_array()) {
+      for m in mods {
+        if let Some(t) = m.get("topic").and_then(|v| v.as_str()) {
+          ctx.in_function_topics.insert(t.to_string());
+        }
+      }
+    }
+    if let Some(def) = subject.get("definition") {
+      collect_in_function_ids(def, &mut ctx.in_function_topics);
+      collect_inline_conditions_per_subject(def, &mut ctx.subject_conditions);
+    }
+  }
+  ctx
+}
+
+/// Walk the rendered AST `definition` subtree and collect every `id`
+/// field value. These are the topic IDs of AST nodes that live *inside*
+/// the function — body subjects, descendants, parameter declarations,
+/// etc. By scoping the walk to `subject.definition` (and not
+/// `state_reads`, `semantics`, etc.), we exclude cross-function topics
+/// from the in-function scope by construction.
+fn collect_in_function_ids(
+  v: &serde_json::Value,
+  out: &mut std::collections::HashSet<String>,
+) {
+  match v {
+    serde_json::Value::Object(map) => {
+      if let Some(s) = map.get("id").and_then(|v| v.as_str()) {
+        out.insert(s.to_string());
+      }
+      for value in map.values() {
+        collect_in_function_ids(value, out);
+      }
+    }
+    serde_json::Value::Array(arr) => {
+      for elem in arr {
+        collect_in_function_ids(elem, out);
+      }
+    }
+    _ => {}
+  }
+}
+
+/// Walk the rendered AST `definition` subtree and, for each node that
+/// carries both an `id` (the subject's topic) and a `conditions` array
+/// (stamped by the step-6 renderer hook), map the subject topic to the
+/// set of condition topic IDs on that subject. Used by
+/// `parse_threats_response` to enforce that each `falsifies_condition`
+/// link refers to a condition actually attached to the claimed subject.
+fn collect_inline_conditions_per_subject(
+  v: &serde_json::Value,
+  out: &mut std::collections::HashMap<
+    String,
+    std::collections::HashSet<String>,
+  >,
+) {
+  match v {
+    serde_json::Value::Object(map) => {
+      if let (Some(id), Some(conds)) = (
+        map.get("id").and_then(|v| v.as_str()),
+        map.get("conditions").and_then(|v| v.as_array()),
+      ) {
+        let set: std::collections::HashSet<String> = conds
+          .iter()
+          .filter_map(|c| {
+            c.get("topic").and_then(|t| t.as_str()).map(String::from)
+          })
+          .collect();
+        if !set.is_empty() {
+          out.entry(id.to_string()).or_default().extend(set);
+        }
+      }
+      for value in map.values() {
+        collect_inline_conditions_per_subject(value, out);
+      }
+    }
+    serde_json::Value::Array(arr) => {
+      for elem in arr {
+        collect_inline_conditions_per_subject(elem, out);
+      }
+    }
+    _ => {}
+  }
+}
+
+/// Parse + dedupe + validate the raw LLM response against the batch's
+/// rendered envelope. Same "drop-on-defect, warn-on-defect, keep what
+/// remains" shape as `extract_conditions_from_batch`.
+fn parse_threats_response(
+  wrapper: LLMThreatsResponse,
+  ctx: &ThreatsValidationContext,
+  label: &str,
+) -> Vec<ParsedSubjectThreats> {
+  let mut entries: Vec<ParsedSubjectThreats> =
+    Vec::with_capacity(wrapper.subjects.len());
+  let mut seen_subjects: std::collections::HashSet<topic::Topic> =
+    std::collections::HashSet::new();
+  let mut duplicates: Vec<String> = Vec::new();
+  let mut rejected_unexpected: Vec<String> = Vec::new();
+  let mut malformed_evidence: Vec<String> = Vec::new();
+  let mut out_of_scope_evidence: Vec<String> = Vec::new();
+  let mut unknown_condition_links: Vec<String> = Vec::new();
+  let mut bad_condition_topics: Vec<String> = Vec::new();
+  let mut empty_threats_without_rationale: Vec<String> = Vec::new();
+  let mut rationale_dropped_alongside_threats: Vec<String> = Vec::new();
+  let mut empty_descriptions: Vec<String> = Vec::new();
+  let mut party_named_descriptions: Vec<String> = Vec::new();
+
+  for s in wrapper.subjects {
+    let subject_topic = match topic::parse_topic(&s.subject_topic) {
+      Ok(t @ topic::Topic::Node(_)) => t,
+      Ok(other) => {
+        tracing::warn!(
+          batch = %label,
+          "threats: subject_topic {:?} is not an N-prefixed topic; skipping",
+          other
+        );
+        continue;
+      }
+      Err(e) => {
+        tracing::warn!(
+          batch = %label,
+          "threats: failed to parse subject_topic {:?}: {}; skipping",
+          s.subject_topic,
+          e
+        );
+        continue;
+      }
+    };
+    if !ctx.expected_subjects.is_empty()
+      && !ctx.expected_subjects.contains(&s.subject_topic)
+    {
+      rejected_unexpected.push(s.subject_topic);
+      continue;
+    }
+    if !seen_subjects.insert(subject_topic) {
+      duplicates.push(s.subject_topic);
+      continue;
+    }
+
+    // Subject-scoped condition set from the renderer's inline stamp.
+    // `None` here means the subject node had no `conditions` array in the
+    // rendered batch JSON (either step 6 produced nothing for this
+    // subject, or the renderer omitted it). Under the spec's
+    // "falsifies_condition must appear in the subject's inline
+    // conditions array" rule, no link can be valid when the array is
+    // absent. We gate the strict cross-check on a populated
+    // `expected_subjects` set so a fully-malformed batch JSON (where
+    // every map ends up empty) still produces results — the dedupe and
+    // topic-prefix checks above remain the safety net in that case.
+    let allowed_conditions = ctx.subject_conditions.get(&s.subject_topic);
+    let cross_check_active = !ctx.expected_subjects.is_empty();
+
+    let mut conditions: Vec<ParsedConditionThreats> =
+      Vec::with_capacity(s.conditions.len());
+    for ct in s.conditions {
+      let falsifies_condition = match topic::parse_topic(&ct.falsifies_condition)
+      {
+        Ok(t @ topic::Topic::AdversarialProperty(_)) => t,
+        _ => {
+          bad_condition_topics.push(ct.falsifies_condition);
+          continue;
+        }
+      };
+      if cross_check_active {
+        let valid_link = allowed_conditions
+          .map(|allowed| allowed.contains(&ct.falsifies_condition))
+          .unwrap_or(false);
+        if !valid_link {
+          unknown_condition_links.push(ct.falsifies_condition);
+          continue;
+        }
+      }
+
+      let mut threats: Vec<ParsedThreat> = Vec::with_capacity(ct.threats.len());
+      for t in ct.threats {
+        let description = t.description.trim().to_string();
+        if description.is_empty() {
+          empty_descriptions
+            .push(format!("{}::{}", s.subject_topic, ct.falsifies_condition));
+          continue;
+        }
+        if description_starts_with_party_noun(&description) {
+          // Warn but keep — descriptions with party nouns still carry
+          // useful scenario content. If the warn rate spikes, tighten
+          // the prompt rather than dropping output.
+          party_named_descriptions.push(description.clone());
+        }
+        let mut evidence_topics: Vec<topic::Topic> =
+          Vec::with_capacity(t.evidence_topics.len());
+        for ev in t.evidence_topics {
+          let parsed = match topic::parse_topic(&ev) {
+            Ok(p) => p,
+            Err(_) => {
+              malformed_evidence.push(ev);
+              continue;
+            }
+          };
+          // In-function scope check. The set is empty only when the
+          // batch JSON was unparseable; in that case skip the scope
+          // check (we already accepted topic-string parsing as the
+          // safety net).
+          if !ctx.in_function_topics.is_empty()
+            && !ctx.in_function_topics.contains(&ev)
+          {
+            out_of_scope_evidence.push(ev);
+            continue;
+          }
+          evidence_topics.push(parsed);
+        }
+        // Post-processor fallback: every threat carries at least its
+        // own anchor. If the LLM emits zero topics or all topics fail
+        // validation, point evidence at the subject node so the
+        // auditor can still navigate from threat → site.
+        if evidence_topics.is_empty() {
+          evidence_topics.push(subject_topic);
+        }
+        threats.push(ParsedThreat {
+          description,
+          controlled_by: t.controlled_by,
+          evidence_topics,
+        });
+      }
+
+      // Enforce the mutually-exclusive shape between `threats` and
+      // `no_threat_rationale`. Same logic as the spec's validation
+      // rules: empty + None drops the entry; non-empty + Some drops
+      // the rationale and keeps the threats.
+      let no_threat_rationale = match (
+        threats.is_empty(),
+        ct.no_threat_rationale.as_ref().map(|s| s.trim()),
+      ) {
+        (true, Some(r)) if !r.is_empty() => Some(r.to_string()),
+        (true, _) => {
+          empty_threats_without_rationale.push(ct.falsifies_condition.clone());
+          continue;
+        }
+        (false, Some(r)) if !r.is_empty() => {
+          rationale_dropped_alongside_threats
+            .push(ct.falsifies_condition.clone());
+          // Drop the rationale; keep the threats.
+          None
+        }
+        (false, _) => None,
+      };
+
+      conditions.push(ParsedConditionThreats {
+        falsifies_condition,
+        threats,
+        no_threat_rationale,
+      });
+    }
+
+    if conditions.is_empty() {
+      // A subject with zero kept conditions is a no-signal entry —
+      // drop it from the output (the seen-marker still blocks
+      // duplicates, matching step 6's "first wins" semantics).
+      continue;
+    }
+
+    entries.push(ParsedSubjectThreats {
+      subject_topic,
+      conditions,
+    });
+  }
+
+  if !duplicates.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "threats: LLM returned {} duplicate subject_topic(s) (kept first, \
+       dropped subsequent): {:?}",
+      duplicates.len(),
+      duplicates
+    );
+  }
+  if !rejected_unexpected.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "threats: rejected {} subject_topic(s) outside the batch's \
+       non_pure_subjects list: {:?}",
+      rejected_unexpected.len(),
+      rejected_unexpected
+    );
+  }
+  if !bad_condition_topics.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "threats: dropped {} entry(ies) with malformed or non-A-prefixed \
+       falsifies_condition: {:?}",
+      bad_condition_topics.len(),
+      bad_condition_topics
+    );
+  }
+  if !unknown_condition_links.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "threats: dropped {} entry(ies) whose falsifies_condition is not \
+       on the claimed subject: {:?}",
+      unknown_condition_links.len(),
+      unknown_condition_links
+    );
+  }
+  if !malformed_evidence.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "threats: dropped {} malformed evidence_topic(s) across all \
+       threats: {:?}",
+      malformed_evidence.len(),
+      malformed_evidence
+    );
+  }
+  if !out_of_scope_evidence.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "threats: dropped {} evidence_topic(s) outside the subject's \
+       containing function: {:?}",
+      out_of_scope_evidence.len(),
+      out_of_scope_evidence
+    );
+  }
+  if !empty_threats_without_rationale.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "threats: dropped {} condition(s) with empty threats and no \
+       no_threat_rationale: {:?}",
+      empty_threats_without_rationale.len(),
+      empty_threats_without_rationale
+    );
+  }
+  if !rationale_dropped_alongside_threats.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "threats: dropped no_threat_rationale on {} condition(s) that \
+       also produced threats (kept the threats, discarded the \
+       contradictory rationale): {:?}",
+      rationale_dropped_alongside_threats.len(),
+      rationale_dropped_alongside_threats
+    );
+  }
+  if !empty_descriptions.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "threats: dropped {} threat(s) with empty descriptions: {:?}",
+      empty_descriptions.len(),
+      empty_descriptions
+    );
+  }
+  if !party_named_descriptions.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "threats: {} threat description(s) begin with a party-naming noun \
+       (actor identity should live in controlled_by; kept the threat \
+       — tighten the prompt if this rate spikes)",
+      party_named_descriptions.len()
+    );
+  }
+
+  entries
+}
+
+/// Log warnings for any input subject missing from the LLM output and
+/// for any output subject not in the input list. Same shape as step
+/// 5/6 coverage validators.
+fn validate_threats_coverage(
+  expected: &std::collections::HashSet<String>,
+  got: &[LLMSubjectThreats],
+  label: &str,
+) {
+  if expected.is_empty() {
+    return;
+  }
+  let received: std::collections::HashSet<String> =
+    got.iter().map(|s| s.subject_topic.clone()).collect();
+  let missing: Vec<&String> = expected.difference(&received).collect();
+  let extra: Vec<&String> = received.difference(expected).collect();
+  if !missing.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "threats: {} subject(s) in batch were not addressed by the LLM: {:?}",
+      missing.len(),
+      missing
+    );
+  }
+  if !extra.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "threats: {} subject(s) in LLM output were not in the batch's \
+       non_pure_subjects list: {:?}",
+      extra.len(),
+      extra
+    );
+  }
+}
+
+/// Lightweight heuristic: does the description's first phrase name a
+/// party? Used as a prompt-quality signal — flagged threats are still
+/// kept (the spec calls this out as the "one exception" to the drop-on-
+/// defect rule), since dropping a description with useful scenario
+/// content over a stylistic violation is worse than logging a warning
+/// and letting the auditor decide.
+fn description_starts_with_party_noun(desc: &str) -> bool {
+  let trimmed = desc.trim_start().to_lowercase();
+  const PARTY_PREFIXES: &[&str] = &[
+    "an attacker",
+    "a attacker",
+    "the attacker",
+    "an user",
+    "a user",
+    "the user",
+    "a caller",
+    "an caller",
+    "the caller",
+    "a miner",
+    "the miner",
+    "a validator",
+    "the validator",
+    "a sequencer",
+    "the sequencer",
+    "an admin",
+    "a admin",
+    "the admin",
+    "the owner",
+    "an owner",
+    "a owner",
+    "the operator",
+    "an operator",
+    "a operator",
+    "the contract",
+    "a contract",
+    "an external party",
+    "a counterparty",
+    "the counterparty",
+    "an actor",
+    "a malicious",
+    "the malicious",
+  ];
+  for prefix in PARTY_PREFIXES {
+    if let Some(rest) = trimmed.strip_prefix(prefix) {
+      // Word boundary: end of string, or the next char isn't a letter,
+      // digit, or underscore. Prevents `the operator` matching
+      // `the operators` only as a non-issue (it's still a party plural)
+      // while rejecting `the contracted` from matching `the contract`.
+      if rest.is_empty()
+        || !rest
+          .chars()
+          .next()
+          .map(|c| c.is_alphanumeric() || c == '_')
+          .unwrap_or(false)
+      {
+        return true;
+      }
+    }
+  }
+  false
+}
+
 /// Prompt for normalizing a documentation file for plain text readability.
 const NORMALIZE_DOCUMENTATION_PROMPT: &str = "Below is a documentation file from a smart contract \
 project. Your task is to normalize it for optimal plain text readability \
@@ -2778,6 +3596,955 @@ mod conditions_parser_tests {
        variants. Update both together — the schema is what the LLM is \
        constrained against; the Rust enum is what serde deserializes the \
        response into."
+    );
+  }
+}
+
+#[cfg(test)]
+mod threats_parser_tests {
+  use super::*;
+
+  /// Construct a single-subject batch envelope with one non-pure subject
+  /// (`subject_id`) carrying an inline `conditions` array (per the step-6
+  /// renderer hook) and a small synthetic body. `descendant_ids` are
+  /// AST-node topic IDs the renderer would have stamped inside the
+  /// function body (e.g. literal nodes); they become valid evidence
+  /// anchors. `member_id` is the containing function's topic. The
+  /// resulting JSON satisfies `build_threats_validation_context`.
+  fn build_batch_envelope(
+    member_id: &str,
+    subject_id: &str,
+    condition_ids: &[&str],
+    descendant_ids: &[&str],
+    modifier_ids: &[&str],
+  ) -> String {
+    let conditions: Vec<serde_json::Value> = condition_ids
+      .iter()
+      .map(|c| {
+        json!({
+          "topic": c,
+          "description": "an assertion",
+          "kind": "RestrictedReachability",
+          "evidence_topics": [],
+        })
+      })
+      .collect();
+    let body_descendants: Vec<serde_json::Value> = descendant_ids
+      .iter()
+      .map(|d| json!({ "type": "literal", "id": d, "kind": "number", "value": "1" }))
+      .collect();
+    let modifiers: Vec<serde_json::Value> = modifier_ids
+      .iter()
+      .map(|m| json!({ "topic": m, "name": "mod" }))
+      .collect();
+
+    // Subject AST node carries `id` (its topic) and the inline `conditions`
+    // array. When descendant_ids are supplied, the first one nests inside
+    // the subject (so it's a true subtree-descendant in the AST walker's
+    // sense) and the rest are siblings in the function body. Zero
+    // descendants is supported so tests can exercise the bare-subject
+    // case without indexing into an empty vec.
+    let mut body_descendants = body_descendants.into_iter();
+    let first_descendant = body_descendants.next();
+    let mut subject_node = json!({
+      "type": "assignment",
+      "id": subject_id,
+      "conditions": conditions,
+    });
+    if let Some(first) = first_descendant {
+      subject_node["right_hand_side"] = first;
+    }
+    let mut body_statements = vec![subject_node];
+    body_statements.extend(body_descendants);
+
+    let envelope = json!({
+      "non_pure_subjects": [subject_id],
+      "subject": {
+        "topic": member_id,
+        "name": "f",
+        "kind": "function",
+        "modifiers": modifiers,
+        "definition": {
+          "type": "function_definition",
+          "id": member_id,
+          "body": { "type": "block", "statements": body_statements },
+        },
+        "semantics": {},
+        "called_function_behaviors": {},
+        // External anchors that must NOT be in-function scope.
+        "state_reads": ["N9001"],
+        "state_writes": ["N9002"],
+      }
+    });
+    serde_json::to_string(&envelope).unwrap()
+  }
+
+  /// End-to-end parse-and-validate: parses the LLM response then runs it
+  /// through `parse_threats_response`. Mirrors the production path
+  /// without the LLM call.
+  fn run_parse(
+    json_response: &str,
+    batch_json: &str,
+  ) -> Vec<ParsedSubjectThreats> {
+    let wrapper: LLMThreatsResponse =
+      serde_json::from_str(json_response).expect("malformed test JSON");
+    let ctx = build_threats_validation_context(batch_json);
+    parse_threats_response(wrapper, &ctx, "test")
+  }
+
+  // --------- end-to-end response parsing ---------
+
+  #[test]
+  fn parser_round_trips_well_formed_response() {
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5", "A6"], &["N11", "N12"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"the value can be reordered before the dependent read commits","controlled_by":"BlockProducer","evidence_topics":["N11"]},
+          {"description":"the deterministic address can be pre-computed, bricking deployment","controlled_by":"AnyParty","evidence_topics":["N10","N12"]}
+        ],"no_threat_rationale":null},
+        {"falsifies_condition":"A6","threats":[],"no_threat_rationale":"the assertion is enforced by Solidity's type system"}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].subject_topic, topic::new_node_topic(&10));
+    assert_eq!(entries[0].conditions.len(), 2);
+
+    let c0 = &entries[0].conditions[0];
+    assert_eq!(
+      c0.falsifies_condition,
+      topic::new_adversarial_property_topic(5)
+    );
+    assert_eq!(c0.threats.len(), 2);
+    assert!(c0.no_threat_rationale.is_none());
+    assert_eq!(
+      c0.threats[0].controlled_by,
+      domain::ThreatActor::BlockProducer
+    );
+    assert_eq!(c0.threats[0].evidence_topics, vec![topic::new_node_topic(&11)]);
+    assert_eq!(c0.threats[1].controlled_by, domain::ThreatActor::AnyParty);
+    assert_eq!(
+      c0.threats[1].evidence_topics,
+      vec![topic::new_node_topic(&10), topic::new_node_topic(&12)]
+    );
+
+    let c1 = &entries[0].conditions[1];
+    assert_eq!(
+      c1.falsifies_condition,
+      topic::new_adversarial_property_topic(6)
+    );
+    assert!(c1.threats.is_empty());
+    assert_eq!(
+      c1.no_threat_rationale.as_deref(),
+      Some("the assertion is enforced by Solidity's type system")
+    );
+  }
+
+  #[test]
+  fn parser_multiple_threats_targeting_same_condition_kept() {
+    // 1:N — one condition can be the target of many threats. All kept.
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"scenario A","controlled_by":"Caller","evidence_topics":[]},
+          {"description":"scenario B","controlled_by":"External","evidence_topics":[]},
+          {"description":"scenario C","controlled_by":"Self","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].conditions.len(), 1);
+    assert_eq!(entries[0].conditions[0].threats.len(), 3);
+  }
+
+  #[test]
+  fn parser_rejects_subject_not_in_non_pure_subjects() {
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"ok","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]},
+      {"subject_topic":"N999","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"hallucinated subject","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].subject_topic, topic::new_node_topic(&10));
+  }
+
+  #[test]
+  fn parser_dedupes_repeated_subject_first_wins() {
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"first","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]},
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"second","controlled_by":"External","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].conditions.len(), 1);
+    assert_eq!(entries[0].conditions[0].threats.len(), 1);
+    assert_eq!(entries[0].conditions[0].threats[0].description, "first");
+  }
+
+  #[test]
+  fn parser_skips_malformed_subject_topic() {
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"NOT_A_TOPIC","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"ok","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert!(entries.is_empty());
+  }
+
+  #[test]
+  fn parser_skips_non_node_subject_topic() {
+    // An A-prefixed topic in subject_topic must be rejected (subjects
+    // are AST nodes only).
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"A5","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"ok","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert!(entries.is_empty());
+  }
+
+  #[test]
+  fn parser_drops_falsifies_condition_not_on_subject() {
+    // The subject's inline conditions are {A5}. A response that cites
+    // A99 must be dropped (the LLM hallucinated a non-existent
+    // condition link).
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A99","threats":[
+          {"description":"orphan link","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null},
+        {"falsifies_condition":"A5","threats":[
+          {"description":"valid link","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].conditions.len(), 1);
+    assert_eq!(
+      entries[0].conditions[0].falsifies_condition,
+      topic::new_adversarial_property_topic(5)
+    );
+  }
+
+  #[test]
+  fn parser_drops_non_a_prefixed_falsifies_condition() {
+    // falsifies_condition must be A-prefixed. N-prefixed or malformed
+    // values drop the condition entry.
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"N5","threats":[
+          {"description":"wrong prefix","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null},
+        {"falsifies_condition":"GARBAGE","threats":[
+          {"description":"unparseable","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null},
+        {"falsifies_condition":"A5","threats":[
+          {"description":"valid","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].conditions.len(), 1);
+    assert_eq!(
+      entries[0].conditions[0].falsifies_condition,
+      topic::new_adversarial_property_topic(5)
+    );
+  }
+
+  #[test]
+  fn parser_drops_empty_threats_without_rationale() {
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5", "A6"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[],"no_threat_rationale":null},
+        {"falsifies_condition":"A6","threats":[
+          {"description":"kept","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].conditions.len(), 1);
+    assert_eq!(
+      entries[0].conditions[0].falsifies_condition,
+      topic::new_adversarial_property_topic(6)
+    );
+  }
+
+  #[test]
+  fn parser_keeps_empty_threats_with_rationale() {
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[],
+         "no_threat_rationale":"enforced by Solidity's type system"}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    let c = &entries[0].conditions[0];
+    assert!(c.threats.is_empty());
+    assert_eq!(
+      c.no_threat_rationale.as_deref(),
+      Some("enforced by Solidity's type system")
+    );
+  }
+
+  #[test]
+  fn parser_drops_rationale_when_threats_present() {
+    // Mutually-exclusive shape: non-empty threats + Some(rationale)
+    // means the LLM contradicted itself. Keep the threats, drop the
+    // rationale.
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"scenario","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":"this should be discarded"}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    let c = &entries[0].conditions[0];
+    assert_eq!(c.threats.len(), 1);
+    assert!(
+      c.no_threat_rationale.is_none(),
+      "rationale must be dropped when threats are present"
+    );
+  }
+
+  #[test]
+  fn parser_accepts_each_threat_actor_value() {
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"a","controlled_by":"Caller","evidence_topics":[]},
+          {"description":"b","controlled_by":"PrivilegedRole","evidence_topics":[]},
+          {"description":"c","controlled_by":"External","evidence_topics":[]},
+          {"description":"d","controlled_by":"BlockProducer","evidence_topics":[]},
+          {"description":"e","controlled_by":"Counterparty","evidence_topics":[]},
+          {"description":"f","controlled_by":"Self","evidence_topics":[]},
+          {"description":"g","controlled_by":"AnyParty","evidence_topics":[]},
+          {"description":"h","controlled_by":"Other","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    let actors: Vec<domain::ThreatActor> = entries[0].conditions[0]
+      .threats
+      .iter()
+      .map(|t| t.controlled_by)
+      .collect();
+    assert_eq!(
+      actors,
+      vec![
+        domain::ThreatActor::Caller,
+        domain::ThreatActor::PrivilegedRole,
+        domain::ThreatActor::External,
+        domain::ThreatActor::BlockProducer,
+        domain::ThreatActor::Counterparty,
+        domain::ThreatActor::Self_,
+        domain::ThreatActor::AnyParty,
+        domain::ThreatActor::Other,
+      ]
+    );
+  }
+
+  #[test]
+  fn parser_rejects_off_list_controlled_by() {
+    // Schema enforces this at the LLM layer; serde is the safety net.
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"x","controlled_by":"NotARealActor","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let result: Result<LLMThreatsResponse, _> = serde_json::from_str(json);
+    assert!(
+      result.is_err(),
+      "off-list controlled_by must fail deserialization"
+    );
+  }
+
+  #[test]
+  fn parser_drops_evidence_outside_containing_function() {
+    // N9001 is in state_reads but NOT in the in-function scope (we
+    // explicitly exclude state-reads from the topic walk). It must be
+    // dropped; the threat itself is kept with the remaining valid
+    // anchor.
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"scenario","controlled_by":"Caller","evidence_topics":["N9001","N11"]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    let t = &entries[0].conditions[0].threats[0];
+    assert_eq!(t.evidence_topics, vec![topic::new_node_topic(&11)]);
+  }
+
+  #[test]
+  fn parser_keeps_subject_topic_and_descendants_as_evidence() {
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11", "N12"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"scenario","controlled_by":"Caller","evidence_topics":["N10","N11","N12"]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    let t = &entries[0].conditions[0].threats[0];
+    assert_eq!(
+      t.evidence_topics,
+      vec![
+        topic::new_node_topic(&10),
+        topic::new_node_topic(&11),
+        topic::new_node_topic(&12),
+      ]
+    );
+  }
+
+  #[test]
+  fn parser_keeps_modifier_topic_as_evidence() {
+    let batch = build_batch_envelope(
+      "N100",
+      "N10",
+      &["A5"],
+      &["N11"],
+      &["N200", "N201"],
+    );
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"scenario","controlled_by":"Caller","evidence_topics":["N200"]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    let t = &entries[0].conditions[0].threats[0];
+    assert_eq!(t.evidence_topics, vec![topic::new_node_topic(&200)]);
+  }
+
+  #[test]
+  fn parser_keeps_function_topic_as_evidence() {
+    // The containing function (the member) is in-scope.
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"scenario","controlled_by":"Caller","evidence_topics":["N100"]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    let t = &entries[0].conditions[0].threats[0];
+    assert_eq!(t.evidence_topics, vec![topic::new_node_topic(&100)]);
+  }
+
+  #[test]
+  fn parser_populates_subject_topic_when_evidence_empty() {
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"absence-anchored scenario","controlled_by":"Self","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    let t = &entries[0].conditions[0].threats[0];
+    assert_eq!(
+      t.evidence_topics,
+      vec![topic::new_node_topic(&10)],
+      "empty evidence must be backfilled with the subject topic"
+    );
+  }
+
+  #[test]
+  fn parser_populates_subject_topic_when_all_evidence_invalid() {
+    // Every cited topic is out of scope. After dropping, evidence is
+    // empty → backfilled with subject_topic.
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"scenario","controlled_by":"Caller","evidence_topics":["N9001","N9002"]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    let t = &entries[0].conditions[0].threats[0];
+    assert_eq!(t.evidence_topics, vec![topic::new_node_topic(&10)]);
+  }
+
+  #[test]
+  fn parser_drops_threat_with_empty_description() {
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"   ","controlled_by":"Caller","evidence_topics":[]},
+          {"description":"good","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries[0].conditions[0].threats.len(), 1);
+    assert_eq!(entries[0].conditions[0].threats[0].description, "good");
+  }
+
+  #[test]
+  fn parser_keeps_threat_with_party_named_description_and_warns() {
+    // Per spec: descriptions naming a party are kept (warning logged).
+    // The warn-rate is the prompt-quality signal, not a drop condition.
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"an attacker can drain the pool","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    let t = &entries[0].conditions[0].threats[0];
+    assert_eq!(t.description, "an attacker can drain the pool");
+  }
+
+  #[test]
+  fn description_starts_with_party_noun_detects_common_phrases() {
+    assert!(description_starts_with_party_noun("an attacker reorders X"));
+    assert!(description_starts_with_party_noun("An Attacker reorders X"));
+    assert!(description_starts_with_party_noun("the caller bypasses Y"));
+    assert!(description_starts_with_party_noun("a miner reorders Z"));
+    assert!(description_starts_with_party_noun(
+      "the admin sets a malicious value"
+    ));
+    assert!(description_starts_with_party_noun("the counterparty withdraws"));
+    assert!(description_starts_with_party_noun(
+      "a malicious counterparty withdraws"
+    ));
+  }
+
+  #[test]
+  fn description_starts_with_party_noun_skips_innocuous_openings() {
+    assert!(!description_starts_with_party_noun(
+      "the value can be reordered before the dependent read commits"
+    ));
+    assert!(!description_starts_with_party_noun(
+      "deterministic addresses can be pre-computed"
+    ));
+    assert!(!description_starts_with_party_noun(
+      "the unguarded entry permits reentry"
+    ));
+    // Word-boundary check: "the contracted party" must not match "the contract".
+    assert!(!description_starts_with_party_noun(
+      "the contracted balance overflows"
+    ));
+    // "the caller's" must still match because punctuation breaks the
+    // word-boundary check correctly.
+    assert!(description_starts_with_party_noun(
+      "the caller's allowance is bypassed"
+    ));
+  }
+
+  #[test]
+  fn parser_handles_empty_subjects_array() {
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[]}"#;
+    let entries = run_parse(json, &batch);
+    assert!(entries.is_empty());
+  }
+
+  #[test]
+  fn parser_rejects_all_links_when_subject_has_no_inline_conditions() {
+    // Batch is well-formed (expected_subjects populated) but the
+    // subject node was rendered without a `conditions` array (step 6
+    // produced no conditions for this subject, or the renderer omitted
+    // it). Under the strict "must appear in the inline conditions
+    // array" rule, no falsifies_condition can be valid — every entry
+    // must be dropped. Same intent as conditions parser's strict
+    // membership check.
+    let envelope = serde_json::json!({
+      "non_pure_subjects": ["N10"],
+      "subject": {
+        "topic": "N100",
+        "name": "f",
+        "kind": "function",
+        "modifiers": [],
+        // Subject node has `id` but no `conditions` field.
+        "definition": {
+          "type": "function_definition",
+          "id": "N100",
+          "body": {
+            "type": "block",
+            "statements": [
+              { "type": "assignment", "id": "N10" }
+            ]
+          }
+        }
+      }
+    });
+    let batch = serde_json::to_string(&envelope).unwrap();
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"hallucinated link","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert!(
+      entries.is_empty(),
+      "subject without inline conditions must reject every \
+       falsifies_condition link"
+    );
+  }
+
+  #[test]
+  fn parser_falls_back_permissive_when_batch_json_malformed() {
+    // Malformed batch JSON yields an empty validation context — no
+    // expected_subjects, no in_function_topics, no subject_conditions.
+    // The parser falls back to permissive: only the structural checks
+    // (N-prefixed subject, A-prefixed falsifies_condition, parseable
+    // evidence topics) gate output. This is the same "accept all when
+    // input list is empty" fallback the conditions parser uses for
+    // robustness against renderer changes.
+    let batch = "{ not valid json";
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"scenario","controlled_by":"Caller","evidence_topics":["N42"]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].subject_topic, topic::new_node_topic(&10));
+    assert_eq!(
+      entries[0].conditions[0].falsifies_condition,
+      topic::new_adversarial_property_topic(5)
+    );
+    // Permissive in-function check: N42 is accepted even though we
+    // have no scope reference, because in_function_topics is empty.
+    assert_eq!(
+      entries[0].conditions[0].threats[0].evidence_topics,
+      vec![topic::new_node_topic(&42)]
+    );
+  }
+
+  #[test]
+  fn parser_drops_unparseable_evidence_keeps_threat_with_valid_anchors() {
+    // A threat with one malformed evidence topic keeps the threat
+    // (with the valid topics) and surfaces the malformed one as a
+    // warning. Mirrors the conditions parser's same-shape test.
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11", "N12"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"scenario","controlled_by":"Caller","evidence_topics":["N11","GARBAGE","N12"]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    let t = &entries[0].conditions[0].threats[0];
+    assert_eq!(
+      t.evidence_topics,
+      vec![topic::new_node_topic(&11), topic::new_node_topic(&12)]
+    );
+  }
+
+  #[test]
+  fn parser_drops_subject_when_every_condition_was_dropped() {
+    // The condition's falsifies_condition is invalid (non-A-prefixed),
+    // so the condition is dropped. With zero kept conditions, the
+    // entire subject must be dropped from output — same "no signal"
+    // policy as step 6's zero-conditions-subject rule.
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"N5","threats":[
+          {"description":"wrong prefix","controlled_by":"Caller","evidence_topics":[]}
+        ],"no_threat_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert!(entries.is_empty());
+  }
+
+  #[test]
+  fn parser_no_threat_rationale_is_trimmed_and_empty_treated_as_absent() {
+    // Whitespace-only rationale alongside empty threats is treated as
+    // "no rationale" → condition dropped. The mutually-exclusive shape
+    // requires *meaningful* content in the rationale slot.
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5", "A6"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[],"no_threat_rationale":"   \n  "},
+        {"falsifies_condition":"A6","threats":[],"no_threat_rationale":"   real reason   "}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].conditions.len(), 1);
+    let c = &entries[0].conditions[0];
+    assert_eq!(
+      c.falsifies_condition,
+      topic::new_adversarial_property_topic(6)
+    );
+    assert_eq!(c.no_threat_rationale.as_deref(), Some("real reason"));
+  }
+
+  #[test]
+  fn parser_no_threat_rationale_field_absence_handled_gracefully() {
+    // `#[serde(default)]` lets the parser handle field absence
+    // gracefully. Schema strict mode requires the field, but the
+    // serde-level guard is the safety net if the LLM (or a test
+    // fixture) omits it. Field absent + threats present = no-op
+    // rationale-wise.
+    let batch =
+      build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","conditions":[
+        {"falsifies_condition":"A5","threats":[
+          {"description":"scenario","controlled_by":"Caller","evidence_topics":[]}
+        ]}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].conditions[0].no_threat_rationale.is_none());
+  }
+
+  #[test]
+  fn build_context_subject_with_empty_conditions_array_absent_from_map() {
+    // The renderer hook omits the `conditions` field when the inline
+    // array is empty (see context.rs:1590). The collector mirrors
+    // that: a subject node with no `conditions` key — or with an empty
+    // array — produces no entry in `subject_conditions`. This makes
+    // the "subject not in subject_conditions" state in
+    // `parse_threats_response` the canonical signal for "no inline
+    // conditions on this subject."
+    let envelope = serde_json::json!({
+      "non_pure_subjects": ["N10"],
+      "subject": {
+        "topic": "N100",
+        "definition": {
+          "type": "function_definition",
+          "id": "N100",
+          "body": {
+            "type": "block",
+            "statements": [
+              // No conditions key.
+              { "type": "assignment", "id": "N10" },
+              // Empty conditions array — also absent from map.
+              { "type": "assignment", "id": "N11", "conditions": [] },
+            ]
+          }
+        }
+      }
+    });
+    let batch = serde_json::to_string(&envelope).unwrap();
+    let ctx = build_threats_validation_context(&batch);
+    assert!(ctx.subject_conditions.is_empty());
+    assert!(ctx.in_function_topics.contains("N10"));
+    assert!(ctx.in_function_topics.contains("N11"));
+  }
+
+  #[test]
+  fn build_context_extracts_expected_subjects_and_topics() {
+    let batch = build_batch_envelope(
+      "N100",
+      "N10",
+      &["A5", "A6"],
+      &["N11", "N12"],
+      &["N200"],
+    );
+    let ctx = build_threats_validation_context(&batch);
+    assert!(ctx.expected_subjects.contains("N10"));
+    assert!(ctx.in_function_topics.contains("N100")); // member
+    assert!(ctx.in_function_topics.contains("N200")); // modifier
+    assert!(ctx.in_function_topics.contains("N10")); // subject
+    assert!(ctx.in_function_topics.contains("N11")); // body descendant
+    assert!(ctx.in_function_topics.contains("N12")); // body descendant
+    // State-reads and state-writes are NOT in-function scope.
+    assert!(!ctx.in_function_topics.contains("N9001"));
+    assert!(!ctx.in_function_topics.contains("N9002"));
+
+    let conds = ctx
+      .subject_conditions
+      .get("N10")
+      .expect("subject N10 inline conditions present");
+    assert!(conds.contains("A5"));
+    assert!(conds.contains("A6"));
+  }
+
+  #[test]
+  fn build_context_returns_empty_on_malformed_json() {
+    let ctx = build_threats_validation_context("{ malformed");
+    assert!(ctx.expected_subjects.is_empty());
+    assert!(ctx.in_function_topics.is_empty());
+    assert!(ctx.subject_conditions.is_empty());
+  }
+
+  #[test]
+  fn validate_coverage_no_op_when_expected_empty() {
+    let expected = std::collections::HashSet::new();
+    let got = vec![LLMSubjectThreats {
+      subject_topic: "N10".to_string(),
+      conditions: vec![],
+    }];
+    validate_threats_coverage(&expected, &got, "test");
+  }
+
+  #[test]
+  fn validate_coverage_handles_missing_and_extra() {
+    // Logs warnings but does not panic.
+    let mut expected = std::collections::HashSet::new();
+    expected.insert("N10".to_string());
+    expected.insert("N20".to_string());
+    let got = vec![
+      LLMSubjectThreats {
+        subject_topic: "N10".to_string(),
+        conditions: vec![],
+      },
+      LLMSubjectThreats {
+        subject_topic: "N99".to_string(),
+        conditions: vec![],
+      },
+    ];
+    validate_threats_coverage(&expected, &got, "test");
+  }
+
+  // --------- schema drift guard ---------
+
+  /// Drift guard: the JSON schema's `controlled_by.enum` array (which
+  /// the LLM is constrained against) must exactly match the Rust
+  /// `ThreatActor` variants by serialized name, in declaration order.
+  /// Same shape as the matching `CONDITIONS_SCHEMA` test — see its
+  /// docstring for why this guard is load-bearing.
+  #[test]
+  fn schema_controlled_by_enum_matches_rust_variants_exactly() {
+    use domain::ThreatActor;
+
+    let rust_variants: Vec<String> = [
+      ThreatActor::Caller,
+      ThreatActor::PrivilegedRole,
+      ThreatActor::External,
+      ThreatActor::BlockProducer,
+      ThreatActor::Counterparty,
+      ThreatActor::Self_,
+      ThreatActor::AnyParty,
+      ThreatActor::Other,
+    ]
+    .into_iter()
+    .map(|a| serde_json::to_value(a).unwrap().as_str().unwrap().to_string())
+    .collect();
+
+    fn _exhaustiveness_guard(a: ThreatActor) {
+      match a {
+        ThreatActor::Caller
+        | ThreatActor::PrivilegedRole
+        | ThreatActor::External
+        | ThreatActor::BlockProducer
+        | ThreatActor::Counterparty
+        | ThreatActor::Self_
+        | ThreatActor::AnyParty
+        | ThreatActor::Other => (),
+      }
+    }
+
+    let actor_enum = THREATS_SCHEMA
+      .schema
+      .pointer(
+        "/properties/subjects/items/properties/conditions/items/properties/threats/items/properties/controlled_by/enum",
+      )
+      .expect(
+        "THREATS_SCHEMA shape changed; update the JSON pointer in this \
+         test to match",
+      )
+      .as_array()
+      .expect("controlled_by.enum must be a JSON array");
+
+    let schema_strings: Vec<String> = actor_enum
+      .iter()
+      .map(|v| {
+        v.as_str()
+          .expect("controlled_by.enum entries must be strings")
+          .to_string()
+      })
+      .collect();
+
+    assert_eq!(
+      schema_strings, rust_variants,
+      "THREATS_SCHEMA's controlled_by.enum drifted from the Rust \
+       ThreatActor variants. Update both together — the schema is what \
+       the LLM is constrained against; the Rust enum is what serde \
+       deserializes the response into."
     );
   }
 }

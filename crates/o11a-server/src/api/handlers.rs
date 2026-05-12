@@ -619,9 +619,13 @@ pub struct ThreatTopicResponse {
   pub topic_id: String,
   pub description: String,
   pub subject_topic: String,
+  pub falsifies_condition: String,
+  pub controlled_by: String,
+  pub evidence_topics: Vec<String>,
   #[serde(rename = "author_id")]
   pub author: Author,
-  pub created_at: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<String>,
   pub severity: Option<String>,
 }
 
@@ -884,6 +888,9 @@ fn topic_metadata_to_response(
     o11a_core::domain::TopicMetadata::ThreatTopic {
       description,
       subject_topic,
+      falsifies_condition,
+      controlled_by,
+      evidence_topics,
       author: author_id,
       created_at,
       severity,
@@ -892,6 +899,9 @@ fn topic_metadata_to_response(
       topic_id: topic.id(),
       description: description.clone(),
       subject_topic: subject_topic.id(),
+      falsifies_condition: falsifies_condition.id(),
+      controlled_by: controlled_by.as_str().to_string(),
+      evidence_topics: evidence_topics.iter().map(|t| t.id()).collect(),
       author: *author_id,
       created_at: created_at.clone(),
       severity: severity.map(|s| s.as_str().to_string()),

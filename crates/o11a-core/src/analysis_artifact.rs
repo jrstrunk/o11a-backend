@@ -169,6 +169,8 @@ pub fn apply_snapshot(audit_data: &mut AuditData, snap: AuditDataSnapshot) {
   audit_data.subject_purposes.clear();
   audit_data.subject_placements.clear();
   audit_data.subject_conditions.clear();
+  audit_data.subject_threats.clear();
+  audit_data.condition_threats.clear();
 }
 
 /// Errors that can occur when reading, writing, or decoding an artifact.

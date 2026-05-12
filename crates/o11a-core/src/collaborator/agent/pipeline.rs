@@ -63,7 +63,7 @@ impl PipelineState {
 // Full-audit pipeline steps (used by the `analyze` endpoint)
 // ---------------------------------------------------------------------------
 
-/// Run the full analysis pipeline in six steps:
+/// Run the full analysis pipeline in seven steps:
 ///
 /// 1. **Semantic Linking** — establish functional semantics on declarations.
 /// 2. **Requirement Extraction** — pull documentation requirements with
@@ -77,8 +77,13 @@ impl PipelineState {
 /// 6. **Condition Generation** — for every non-pure subject with a purpose
 ///    and placement, generate the assertions that must hold for that
 ///    purpose and placement to be fulfilled (per-function). Each condition
-///    is its own A-prefixed topic; step 7 (threats) generates adversarial
-///    inversions of these assertions.
+///    is its own A-prefixed topic.
+/// 7. **Threat Generation** — for every condition on every non-pure subject,
+///    generate adversarial scenarios that falsify the assertion (per-
+///    function). Each threat is its own A-prefixed topic that names exactly
+///    one `falsifies_condition` and one `controlled_by` actor; one condition
+///    can be the target of many threats. Step 8 (invariants) will derive
+///    codebase-level defenses from these threats.
 ///
 /// Semantic linking runs first so functional semantics are available when
 /// rendering documentation for requirement extraction — inline code
@@ -86,7 +91,9 @@ impl PipelineState {
 /// Step 5 runs after feature synthesis so it can use both feature context
 /// (from step 4) and prior callee behaviors (from step 3); step 6 runs
 /// after step 5 because every condition is grounded in a subject's
-/// functional purpose and placement rationale.
+/// functional purpose and placement rationale; step 7 runs after step 6
+/// because every threat is the adversarial inversion of a specific
+/// condition.
 #[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
 pub async fn run_full_pipeline(
   state: &PipelineState,
@@ -94,23 +101,26 @@ pub async fn run_full_pipeline(
 ) -> Result<(), PipelineError> {
   tracing::info!("Starting full analysis pipeline for audit {}", audit_id);
 
-  tracing::info!("[1/6] Semantic Linking");
+  tracing::info!("[1/7] Semantic Linking");
   build_semantic_links(state, audit_id).await?;
 
-  tracing::info!("[2/6] Requirement Extraction");
+  tracing::info!("[2/7] Requirement Extraction");
   build_requirements(state, audit_id).await?;
 
-  tracing::info!("[3/6] Behavior Extraction");
+  tracing::info!("[3/7] Behavior Extraction");
   build_behaviors(state, audit_id).await?;
 
-  tracing::info!("[4/6] Feature Synthesis");
+  tracing::info!("[4/7] Feature Synthesis");
   synthesize_features(state, audit_id).await?;
 
-  tracing::info!("[5/6] Functional Purpose & Placement Generation");
+  tracing::info!("[5/7] Functional Purpose & Placement Generation");
   build_functional_properties(state, audit_id).await?;
 
-  tracing::info!("[6/6] Condition Generation");
+  tracing::info!("[6/7] Condition Generation");
   build_conditions(state, audit_id).await?;
+
+  tracing::info!("[7/7] Threat Generation");
+  build_threats(state, audit_id).await?;
 
   tracing::info!("Pipeline complete for audit {}", audit_id);
   Ok(())
@@ -1726,6 +1736,287 @@ pub async fn build_conditions(
   Ok(())
 }
 
+/// For every condition on every non-pure subject in every in-scope, feature-
+/// linked function or modifier, generate a list of **threats** — adversarial
+/// scenarios in which the named assertion fails to hold. Each threat is its
+/// own A-prefixed `ThreatTopic` that names exactly one `falsifies_condition`
+/// and one `controlled_by` actor; one condition can be the target of many
+/// threats. One LLM call per function (mirrors step 6's per-function
+/// granularity). Requires step 6 output: the renderer inlines `conditions`
+/// on each non-pure subject so the LLM grounds threats in concrete
+/// assertions. If step 6 produced nothing, this step skips cleanly.
+///
+/// Reruns proactively clear downstream invariant data: `InvariantTopic`
+/// entries are dropped from `topic_metadata` and `audit_data.invariants`
+/// is emptied — a deleted threat orphans its invariants, and the audit
+/// data must be internally consistent at step boundaries. Orphaned
+/// `threat_feature_links` (impact-analysis entries whose `threat_topic`
+/// no longer exists) are pruned; surviving non-orphaned links are kept,
+/// though in practice A-prefix reallocation on rerun makes most links
+/// orphaned. `no_threat_rationale` entries (the LLM's explicit "no
+/// falsifier exists" response) are posted as agent-authored comments on
+/// the condition topic so the audit signal persists in the auditor-
+/// visible discussion thread. See SPEC's "Conditions vs. Invariants"
+/// for the role distinction with invariants (step 8).
+#[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
+pub async fn build_threats(
+  state: &PipelineState,
+  audit_id: &str,
+) -> Result<(), PipelineError> {
+  use crate::collaborator::agent::{context, function_dag};
+  use crate::collaborator::synthetic;
+  use crate::domain::CommentType;
+
+  // Clear any prior ThreatTopic entries so re-runs don't accumulate stale
+  // generations. Also proactively clear InvariantTopic entries and the
+  // `audit_data.invariants` denormalization: a deleted threat orphans its
+  // invariants, and the audit data must be internally consistent at step
+  // boundaries (step 8 will repopulate). Prune `threat_feature_links` of
+  // any entry whose `threat_topic` no longer exists in `topic_metadata`
+  // after the clear — non-orphaned links survive so impact-analysis state
+  // re-attaches across re-runs that preserve threat topic IDs. Also pull
+  // the security_notes string so the LLM call can include it as system
+  // context. Early-return if step 6 produced nothing: threats are
+  // downstream of conditions, so without conditions there is nothing to
+  // invert.
+  let security_notes: Option<String> = {
+    let mut ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data = ctx.get_audit_mut(audit_id).ok_or_else(|| {
+      PipelineError::AuditNotFound {
+        audit_id: audit_id.to_string(),
+      }
+    })?;
+    audit_data.topic_metadata.retain(|_, m| {
+      !matches!(
+        m,
+        domain::TopicMetadata::ThreatTopic { .. }
+          | domain::TopicMetadata::InvariantTopic { .. }
+      )
+    });
+    audit_data.invariants.clear();
+    // Split the borrow: `mem::take` swaps the vec out so the
+    // `topic_metadata` lookup inside `retain` doesn't conflict with the
+    // mutable borrow on `threat_feature_links` that retain requires.
+    let mut links = std::mem::take(&mut audit_data.threat_feature_links);
+    links
+      .retain(|link| audit_data.topic_metadata.contains_key(&link.threat_topic));
+    audit_data.threat_feature_links = links;
+    domain::rebuild_feature_context(audit_data);
+
+    if audit_data.subject_conditions.is_empty() {
+      tracing::info!("No conditions found, skipping threat generation");
+      return Ok(());
+    }
+
+    audit_data.security_notes.clone()
+  };
+
+  // Reuse the DAG batches from behavior extraction to enumerate members
+  // in DAG-respecting order, then iterate each batch's members flat —
+  // step 7 is per-function, like step 5/6.
+  let batches = {
+    let ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data =
+      ctx
+        .get_audit(audit_id)
+        .ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
+    function_dag::build_batches(audit_data)
+  };
+
+  if batches.is_empty() {
+    tracing::info!("No in-scope functions found, skipping threat generation");
+    return Ok(());
+  }
+
+  // Render every eligible member up front under a single lock acquisition.
+  // Members without eligible subjects (no feature link, no non-pure
+  // subjects, or no conditions across any non-pure subject) are dropped
+  // here so they don't take a parallelism slot — there is nothing for the
+  // LLM to invert against.
+  let mut rendered_members: Vec<context::BatchForExtraction> = Vec::new();
+  let mut total_skipped_no_feature: usize = 0;
+  let mut total_skipped_no_conditions: usize = 0;
+  {
+    let ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data =
+      ctx
+        .get_audit(audit_id)
+        .ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
+    for batch in &batches {
+      for member in &batch.members {
+        if !context::member_has_feature_link(member, audit_data) {
+          total_skipped_no_feature += 1;
+          continue;
+        }
+        if let Some(rendered) =
+          context::render_batch_for_extraction(&[*member], audit_data)
+        {
+          if rendered.non_pure_subjects.is_empty() {
+            continue;
+          }
+          // Skip when no subject on this function has any conditions —
+          // step 6 left nothing for step 7 to invert. Without this gate
+          // a function with only pure-purpose subjects would burn an
+          // LLM call producing an empty response.
+          let any_subject_has_conditions =
+            rendered.non_pure_subjects.iter().any(|st| {
+              audit_data
+                .subject_conditions
+                .get(st)
+                .is_some_and(|v| !v.is_empty())
+            });
+          if !any_subject_has_conditions {
+            total_skipped_no_conditions += 1;
+            continue;
+          }
+          rendered_members.push(rendered);
+        }
+      }
+    }
+  }
+
+  let total_members = rendered_members.len();
+  tracing::info!(
+    "Generating threats for {} member(s) (per-function, in parallel)",
+    total_members
+  );
+
+  // Per-member calls have no inter-member dependencies — each generates
+  // threats from the inline conditions already stamped on every non-pure
+  // subject by step 6's renderer hook. Spawn all LLM calls concurrently.
+  // `security_notes` is cloned per call so each spawned future owns its
+  // copy without cross-task borrowing.
+  let mut handles = Vec::new();
+  for rendered in rendered_members {
+    let notes = security_notes.clone();
+    handles.push(tokio::spawn(async move {
+      let result = task::extract_threats_from_batch(
+        &rendered.json,
+        &rendered.label,
+        notes.as_deref(),
+      )
+      .await;
+      (rendered.label, result)
+    }));
+  }
+
+  let mut all_entries: Vec<task::ParsedSubjectThreats> = Vec::new();
+  for handle in handles {
+    match handle.await {
+      Ok((_label, Ok(parsed))) => all_entries.extend(parsed.entries),
+      Ok((label, Err(e))) => tracing::error!(
+        "extract_threats_from_batch failed for {}: {}",
+        label,
+        e
+      ),
+      Err(e) => tracing::error!("extract_threats_from_batch panicked: {}", e),
+    }
+  }
+
+  let total_subjects = all_entries.len();
+  let total_conditions_processed: usize =
+    all_entries.iter().map(|e| e.conditions.len()).sum();
+  let mut total_threats: usize = 0;
+  let mut total_no_threat_comments: usize = 0;
+  {
+    let mut ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data = ctx.get_audit_mut(audit_id).ok_or_else(|| {
+      PipelineError::AuditNotFound {
+        audit_id: audit_id.to_string(),
+      }
+    })?;
+    for entry in all_entries {
+      for cond_threats in entry.conditions {
+        // Allocate one A-topic per threat. A condition with three threats
+        // consumes three A-IDs; each threat is independently addressable,
+        // approvable, and (in step 8) linkable to invariants.
+        for threat in cond_threats.threats {
+          let threat_topic = topic::new_adversarial_property_topic(
+            ids::allocate_adversarial_property_id(),
+          );
+          audit_data.topic_metadata.insert(
+            threat_topic,
+            domain::TopicMetadata::ThreatTopic {
+              topic: threat_topic,
+              description: threat.description,
+              subject_topic: entry.subject_topic,
+              falsifies_condition: cond_threats.falsifies_condition,
+              controlled_by: threat.controlled_by,
+              evidence_topics: threat.evidence_topics,
+              author: Author::System,
+              created_at: None,
+              severity: None,
+            },
+          );
+          total_threats += 1;
+        }
+
+        // `no_threat_rationale` posts as a pipeline-authored Note on the
+        // condition topic. The `[step-7 / no-threat]` prefix lets the UI
+        // filter pipeline-emitted rationale comments from human
+        // discussion if filtering is added later. Author follows the
+        // step 5/6 convention (`Author::System` for pipeline-authored
+        // topics). Comments are not cleared by this step's re-run
+        // retain, so the rationale persists across reruns and the
+        // auditor can reply in-thread.
+        if let Some(rationale) = cond_threats.no_threat_rationale {
+          let body = format!("[step-7 / no-threat] {}", rationale);
+          synthetic::create_synthetic_dev_comment(
+            &cond_threats.falsifies_condition,
+            &body,
+            CommentType::Note,
+            Author::System,
+            audit_data,
+          );
+          total_no_threat_comments += 1;
+        }
+      }
+    }
+    domain::rebuild_feature_context(audit_data);
+  }
+
+  if total_skipped_no_feature > 0 {
+    tracing::warn!(
+      "Skipped {} member(s) with no feature link \u{2014} reconciliation gap",
+      total_skipped_no_feature
+    );
+  }
+  if total_skipped_no_conditions > 0 {
+    tracing::debug!(
+      "Skipped {} member(s) whose non-pure subjects had no conditions",
+      total_skipped_no_conditions
+    );
+  }
+  tracing::info!(
+    "Completed threat generation: {} threats and {} no-threat rationale \
+     comments across {} condition group(s) in {} subject(s) across {} \
+     member(s)",
+    total_threats,
+    total_no_threat_comments,
+    total_conditions_processed,
+    total_subjects,
+    total_members
+  );
+
+  Ok(())
+}
+
 #[cfg(test)]
 mod merge_condensed_entry_tests {
   use super::*;
@@ -1821,5 +2112,313 @@ mod merge_condensed_entry_tests {
     // sort is applied because we didn't compute the merged set.
     assert_eq!(ids, vec!["D42", "D7"]);
     assert_eq!(merged.match_source, MatchSource::Mechanical);
+  }
+}
+
+#[cfg(test)]
+mod build_threats_tests {
+  use super::*;
+  use crate::collaborator::models::Author;
+  use crate::domain::{
+    Invariant, ThreatActor, ThreatFeatureLink, ThreatFeatureRelation,
+    ThreatSeverity, TopicMetadata, new_data_context,
+  };
+  use std::collections::HashSet;
+
+  /// Exercises the proactive clear-on-rerun branch of `build_threats`.
+  /// Because `subject_conditions` is empty the function early-returns
+  /// before any LLM call — but only after running the clear block. So
+  /// every pre-seeded `ThreatTopic`/`InvariantTopic` topic, every
+  /// `audit_data.invariants` entry, and every now-orphaned
+  /// `threat_feature_links` entry must be gone afterward.
+  #[tokio::test]
+  async fn build_threats_clears_stale_threat_and_invariant_state_on_rerun() {
+    let mut ctx = new_data_context();
+    let audit_id = "test_audit";
+    assert!(ctx.create_audit(
+      audit_id.to_string(),
+      "Test".to_string(),
+      HashSet::new(),
+      None,
+    ));
+
+    let pre_threat_topic = topic::new_adversarial_property_topic(100);
+    let pre_invariant_topic = topic::new_adversarial_property_topic(200);
+    let subject_topic = topic::new_node_topic(&42);
+    let condition_topic = topic::new_adversarial_property_topic(50);
+
+    {
+      let audit_data = ctx.get_audit_mut(audit_id).unwrap();
+      audit_data.topic_metadata.insert(
+        pre_threat_topic,
+        TopicMetadata::ThreatTopic {
+          topic: pre_threat_topic,
+          description: "stale scenario from prior run".to_string(),
+          subject_topic,
+          falsifies_condition: condition_topic,
+          controlled_by: ThreatActor::Caller,
+          evidence_topics: vec![],
+          author: Author::AgentLarge,
+          created_at: None,
+          severity: None,
+        },
+      );
+      audit_data.topic_metadata.insert(
+        pre_invariant_topic,
+        TopicMetadata::InvariantTopic {
+          topic: pre_invariant_topic,
+          description: "stale invariant from prior run".to_string(),
+          threat_topic: pre_threat_topic,
+          author: Author::AgentLarge,
+          created_at: String::new(),
+          severity: None,
+        },
+      );
+      audit_data.invariants.insert(
+        pre_invariant_topic,
+        Invariant { source_topics: vec![] },
+      );
+      // Two impact-analysis links — one referring to the existing threat
+      // (will be orphaned once the clear runs), one already orphaned by
+      // a previous deletion that didn't prune. Both must be gone.
+      audit_data.threat_feature_links.push(ThreatFeatureLink {
+        threat_topic: pre_threat_topic,
+        feature_topic: topic::new_feature_topic(1),
+        relation: ThreatFeatureRelation::IsVulnerableTo,
+        severity: ThreatSeverity::Medium,
+      });
+      audit_data.threat_feature_links.push(ThreatFeatureLink {
+        threat_topic: topic::new_adversarial_property_topic(999),
+        feature_topic: topic::new_feature_topic(2),
+        relation: ThreatFeatureRelation::DefendsAgainst,
+        severity: ThreatSeverity::Low,
+      });
+      domain::rebuild_feature_context(audit_data);
+      // Sanity: indexes are populated before the call.
+      assert!(audit_data.subject_threats.contains_key(&subject_topic));
+      assert!(
+        audit_data.condition_threats.contains_key(&condition_topic),
+        "condition_threats must be populated before the rerun"
+      );
+      // No conditions exist — so build_threats will early-return after
+      // the clear runs.
+      assert!(audit_data.subject_conditions.is_empty());
+    }
+
+    let state = PipelineState::new(Arc::new(Mutex::new(ctx)));
+    build_threats(&state, audit_id)
+      .await
+      .expect("build_threats must early-return cleanly when no conditions");
+
+    let ctx = state.data_context.lock().unwrap();
+    let audit_data = ctx.get_audit(audit_id).unwrap();
+
+    // Every pre-seeded ThreatTopic/InvariantTopic entry is gone.
+    assert!(
+      !audit_data.topic_metadata.contains_key(&pre_threat_topic),
+      "stale ThreatTopic must be dropped on rerun"
+    );
+    assert!(
+      !audit_data.topic_metadata.contains_key(&pre_invariant_topic),
+      "stale InvariantTopic must be dropped on rerun"
+    );
+
+    // The `Invariant` denormalization is wiped.
+    assert!(
+      audit_data.invariants.is_empty(),
+      "audit_data.invariants must be cleared on rerun"
+    );
+
+    // Both impact-analysis links are gone — the first because its threat
+    // was just cleared, the second because it was already orphaned.
+    assert!(
+      audit_data.threat_feature_links.is_empty(),
+      "all orphaned threat_feature_links must be pruned"
+    );
+
+    // Reverse indexes must reflect the cleared state (the post-clear
+    // rebuild_feature_context inside build_threats handles this).
+    assert!(
+      audit_data.subject_threats.is_empty(),
+      "subject_threats must be empty after clearing all ThreatTopics"
+    );
+    assert!(
+      audit_data.condition_threats.is_empty(),
+      "condition_threats must be empty after clearing all ThreatTopics"
+    );
+  }
+
+  /// Two consecutive `build_threats` runs, each re-seeded with stale
+  /// threat/invariant state between calls, must leave the audit clean
+  /// without duplicate `ThreatTopic` or `InvariantTopic` entries. The
+  /// spec calls this out explicitly under Phase 5 ("the second run does
+  /// not produce duplicated `InvariantTopic` entries"); re-seeding
+  /// between calls is the unit-test equivalent of running the full
+  /// pipeline twice (which would itself repopulate via LLM output).
+  #[tokio::test]
+  async fn build_threats_clear_runs_on_every_call() {
+    let mut ctx = new_data_context();
+    let audit_id = "test_audit";
+    ctx.create_audit(
+      audit_id.to_string(),
+      "Test".to_string(),
+      HashSet::new(),
+      None,
+    );
+
+    let state = PipelineState::new(Arc::new(Mutex::new(ctx)));
+
+    for run in 0..2 {
+      // Re-seed stale state on each iteration to simulate "rerun after
+      // prior step-7 produced output, then re-run again." Re-using the
+      // same topic IDs is the worst-case for duplicate accumulation.
+      {
+        let mut c = state.data_context.lock().unwrap();
+        let audit_data = c.get_audit_mut(audit_id).unwrap();
+        let pre_threat = topic::new_adversarial_property_topic(100 + run);
+        let pre_invariant = topic::new_adversarial_property_topic(200 + run);
+        audit_data.topic_metadata.insert(
+          pre_threat,
+          TopicMetadata::ThreatTopic {
+            topic: pre_threat,
+            description: "stale".to_string(),
+            subject_topic: topic::new_node_topic(&1),
+            falsifies_condition: topic::new_adversarial_property_topic(50),
+            controlled_by: ThreatActor::Caller,
+            evidence_topics: vec![],
+            author: Author::AgentLarge,
+            created_at: None,
+            severity: None,
+          },
+        );
+        audit_data.topic_metadata.insert(
+          pre_invariant,
+          TopicMetadata::InvariantTopic {
+            topic: pre_invariant,
+            description: "stale".to_string(),
+            threat_topic: pre_threat,
+            author: Author::AgentLarge,
+            created_at: String::new(),
+            severity: None,
+          },
+        );
+        audit_data
+          .invariants
+          .insert(pre_invariant, Invariant { source_topics: vec![] });
+      }
+
+      build_threats(&state, audit_id).await.unwrap();
+
+      let c = state.data_context.lock().unwrap();
+      let audit_data = c.get_audit(audit_id).unwrap();
+      let threat_count = audit_data
+        .topic_metadata
+        .values()
+        .filter(|m| matches!(m, TopicMetadata::ThreatTopic { .. }))
+        .count();
+      let invariant_count = audit_data
+        .topic_metadata
+        .values()
+        .filter(|m| matches!(m, TopicMetadata::InvariantTopic { .. }))
+        .count();
+      assert_eq!(
+        threat_count, 0,
+        "run {}: stale ThreatTopic must be cleared",
+        run
+      );
+      assert_eq!(
+        invariant_count, 0,
+        "run {}: stale InvariantTopic must be cleared",
+        run
+      );
+      assert!(
+        audit_data.invariants.is_empty(),
+        "run {}: audit_data.invariants must be cleared",
+        run
+      );
+    }
+  }
+
+  /// The spec is explicit that comments are *not* cleared by step 7's
+  /// retain — the no-threat rationale comments posted on condition
+  /// topics must persist across reruns so the auditor can reply in-
+  /// thread. A future refactor that adds `CommentTopic` to the retain
+  /// filter would silently break this guarantee; this test pins the
+  /// behavior.
+  #[tokio::test]
+  async fn build_threats_preserves_comments_on_clear() {
+    use crate::collaborator::synthetic::create_synthetic_dev_comment;
+    use crate::domain::CommentType;
+
+    let mut ctx = new_data_context();
+    let audit_id = "test_audit";
+    ctx.create_audit(
+      audit_id.to_string(),
+      "Test".to_string(),
+      HashSet::new(),
+      None,
+    );
+
+    let condition_topic = topic::new_adversarial_property_topic(50);
+    // Insert a synthetic comment on the condition before handing the
+    // context to the pipeline. Capture the allocated comment topic
+    // (negative-id range) so we can assert it survives the clear.
+    let comment_topic_before: topic::Topic = {
+      let audit_data = ctx.get_audit_mut(audit_id).unwrap();
+      create_synthetic_dev_comment(
+        &condition_topic,
+        "[step-7 / no-threat] enforced by Solidity's checked arithmetic",
+        CommentType::Note,
+        Author::System,
+        audit_data,
+      );
+      *audit_data
+        .comment_index
+        .get(&condition_topic)
+        .and_then(|v| v.first())
+        .expect("synthetic comment must be indexed")
+    };
+
+    let state = PipelineState::new(Arc::new(Mutex::new(ctx)));
+    build_threats(&state, audit_id).await.unwrap();
+
+    let c = state.data_context.lock().unwrap();
+    let audit_data = c.get_audit(audit_id).unwrap();
+    assert!(
+      audit_data.topic_metadata.contains_key(&comment_topic_before),
+      "comment topic must survive build_threats clear"
+    );
+    assert!(
+      matches!(
+        audit_data.topic_metadata.get(&comment_topic_before),
+        Some(TopicMetadata::CommentTopic { .. })
+      ),
+      "preserved entry must still be a CommentTopic"
+    );
+    assert_eq!(
+      audit_data
+        .comment_index
+        .get(&condition_topic)
+        .map(|v| v.len()),
+      Some(1),
+      "comment_index entry must survive the clear"
+    );
+  }
+
+  /// `AuditNotFound` surfaces as a typed error rather than a panic when
+  /// the audit_id is unknown. Mirrors the error-path contract of every
+  /// other pipeline step; small but worth pinning because lock-acquire
+  /// + audit-lookup is repeated three times in `build_threats` and a
+  /// regression in any one of them would shape this error differently.
+  #[tokio::test]
+  async fn build_threats_returns_audit_not_found_for_unknown_audit() {
+    let state = PipelineState::new(Arc::new(Mutex::new(new_data_context())));
+    let err = build_threats(&state, "missing").await.unwrap_err();
+    match err {
+      PipelineError::AuditNotFound { audit_id } => {
+        assert_eq!(audit_id, "missing");
+      }
+      other => panic!("expected AuditNotFound, got {:?}", other),
+    }
   }
 }
