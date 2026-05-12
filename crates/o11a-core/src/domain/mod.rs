@@ -207,7 +207,9 @@ pub struct RevertInfo {
   pub error_topic: Option<topic::Topic>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+  Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub enum RevertConstraintKind {
   /// require(condition) - reverts when condition is false
   Require,

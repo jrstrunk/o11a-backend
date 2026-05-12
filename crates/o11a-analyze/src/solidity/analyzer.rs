@@ -1,5 +1,6 @@
 use foundry_compilers_artifacts::Visibility;
 
+use crate::solidity::effective_properties;
 use crate::solidity::parser;
 use crate::solidity::transform;
 use o11a_core::collaborator::models;
@@ -88,6 +89,51 @@ pub fn analyze(
     &mut audit_data.function_properties,
     &mut audit_data.variable_types,
   )?;
+
+  // Compute transitive effects per function/modifier. Runs after
+  // second_pass populates function_properties and topic_metadata, before
+  // downstream consumers (resolution graph extractor, pipeline steps)
+  // read the data. Reverts propagate over the non-try call graph;
+  // mutations / reads / events propagate over the full call graph —
+  // see `effective_properties.rs` for the algorithm.
+  let transitive = effective_properties::compute_transitive_effects(
+    &audit_data.function_properties,
+    &audit_data.topic_metadata,
+  );
+  for (topic, props) in audit_data.function_properties.iter_mut() {
+    let new_reverts =
+      transitive.reverts.get(topic).cloned().unwrap_or_default();
+    let new_mutations =
+      transitive.mutations.get(topic).cloned().unwrap_or_default();
+    let new_reads =
+      transitive.reads.get(topic).cloned().unwrap_or_default();
+    let new_events = transitive
+      .events_emitted
+      .get(topic)
+      .cloned()
+      .unwrap_or_default();
+    match props {
+      FunctionModProperties::FunctionProperties {
+        effective_reverts,
+        effective_mutations,
+        effective_reads,
+        effective_events_emitted,
+        ..
+      }
+      | FunctionModProperties::ModifierProperties {
+        effective_reverts,
+        effective_mutations,
+        effective_reads,
+        effective_events_emitted,
+        ..
+      } => {
+        *effective_reverts = new_reverts;
+        *effective_mutations = new_mutations;
+        *effective_reads = new_reads;
+        *effective_events_emitted = new_events;
+      }
+    }
+  }
 
   // Insert ASTs with stubbed nodes
   for (path, ast_list) in ast_map {

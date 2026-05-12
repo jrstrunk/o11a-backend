@@ -9,6 +9,7 @@ pub mod documentation {
 pub mod solidity {
   pub mod analyzer;
   pub mod dev_doc_resolution_pass;
+  pub mod effective_properties;
   pub mod parser;
   pub mod transform;
 }
