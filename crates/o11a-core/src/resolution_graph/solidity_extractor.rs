@@ -320,21 +320,43 @@ fn extract_function_property_edges(
       continue;
     }
 
-    let (calls, mutations, reverts, events) = match props {
+    let (
+      calls,
+      mutations,
+      reverts,
+      events,
+      effective_reverts,
+      effective_mutations,
+      effective_events_emitted,
+    ) = match props {
       FunctionModProperties::FunctionProperties {
         calls,
         mutations,
         reverts,
-        events_emitted,
+        events_emitted: events,
+        effective_reverts,
+        effective_mutations,
+        effective_events_emitted,
         ..
       }
       | FunctionModProperties::ModifierProperties {
         calls,
         mutations,
         reverts,
-        events_emitted,
+        events_emitted: events,
+        effective_reverts,
+        effective_mutations,
+        effective_events_emitted,
         ..
-      } => (calls, mutations, reverts, events_emitted),
+      } => (
+        calls,
+        mutations,
+        reverts,
+        events,
+        effective_reverts,
+        effective_mutations,
+        effective_events_emitted,
+      ),
     };
 
     // Per-source set of destinations covered by a typed edge — used to
@@ -363,6 +385,20 @@ fn extract_function_property_edges(
       );
       covered.insert(*state_var);
     }
+    for e in effective_mutations {
+      if covered.contains(&e.topic) {
+        continue;
+      }
+      add_directed(
+        audit_data,
+        graph,
+        emitted,
+        *src,
+        e.topic,
+        EdgeType::WritesState,
+      );
+      covered.insert(e.topic);
+    }
     for event in events {
       add_directed(
         audit_data,
@@ -374,10 +410,41 @@ fn extract_function_property_edges(
       );
       covered.insert(*event);
     }
+    for e in effective_events_emitted {
+      if covered.contains(&e.topic) {
+        continue;
+      }
+      add_directed(
+        audit_data,
+        graph,
+        emitted,
+        *src,
+        e.topic,
+        EdgeType::EventEmitted,
+      );
+      covered.insert(e.topic);
+    }
     for r in reverts {
       let Some(error_topic) = r.error_topic else {
         continue;
       };
+      add_directed(
+        audit_data,
+        graph,
+        emitted,
+        *src,
+        error_topic,
+        EdgeType::ErrorThrown,
+      );
+      covered.insert(error_topic);
+    }
+    for e in effective_reverts {
+      let Some(error_topic) = e.revert.error_topic else {
+        continue;
+      };
+      if covered.contains(&error_topic) {
+        continue;
+      }
       add_directed(
         audit_data,
         graph,
@@ -653,9 +720,9 @@ mod tests {
   use super::*;
 
   use crate::domain::{
-    ContractKind, FunctionKind, NamedTopicVisibility, ProjectPath, Reference,
-    RevertConstraintKind, RevertInfo, SourceContext, VariableMutability,
-    new_audit_data,
+    ContractKind, EffectiveRevert, EffectiveTopic, FunctionKind,
+    NamedTopicVisibility, ProjectPath, Reference, RevertConstraintKind,
+    RevertInfo, SourceContext, VariableMutability, new_audit_data,
   };
   use crate::solidity::ast::{
     FunctionStateMutability, FunctionVisibility, SolidityAST, SourceLocation,
@@ -1446,6 +1513,9 @@ mod tests {
     mutations: Vec<topic::Topic>,
     events: Vec<topic::Topic>,
     reverts: Vec<RevertInfo>,
+    effective_reverts: Vec<EffectiveRevert>,
+    effective_mutations: Vec<EffectiveTopic>,
+    effective_events_emitted: Vec<EffectiveTopic>,
   ) {
     let call_infos: Vec<crate::domain::CallInfo> = calls
       .into_iter()
@@ -1459,14 +1529,14 @@ mod tests {
       function_topic,
       FunctionModProperties::FunctionProperties {
         reverts,
-        effective_reverts: vec![],
+        effective_reverts,
         calls: call_infos,
         mutations,
-        effective_mutations: vec![],
+        effective_mutations,
         reads: vec![],
         effective_reads: vec![],
         events_emitted: events,
-        effective_events_emitted: vec![],
+        effective_events_emitted,
       },
     );
   }
@@ -1477,7 +1547,17 @@ mod tests {
     let contract = insert_contract(&mut audit, 1, "C");
     let f = insert_function(&mut audit, 2, "f", contract);
     let g = insert_function(&mut audit, 3, "g", contract);
-    insert_function_props(&mut audit, f, vec![g], vec![], vec![], vec![]);
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![g],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+    );
 
     let mut graph = ResolutionGraph::new();
     SolidityExtractor.extract(&audit, &mut graph);
@@ -1506,7 +1586,17 @@ mod tests {
     let g = insert_function(&mut audit, 3, "g", contract);
     // Same callee listed three times — the analyzer records each call
     // site, but the graph must end up with one Calls edge.
-    insert_function_props(&mut audit, f, vec![g, g, g], vec![], vec![], vec![]);
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![g, g, g],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+    );
 
     let mut graph = ResolutionGraph::new();
     SolidityExtractor.extract(&audit, &mut graph);
@@ -1545,6 +1635,9 @@ mod tests {
       vec![state_var],
       vec![],
       vec![],
+      vec![],
+      vec![],
+      vec![],
     );
 
     let mut graph = ResolutionGraph::new();
@@ -1577,7 +1670,17 @@ mod tests {
       "Pinged",
       None,
     );
-    insert_function_props(&mut audit, f, vec![], vec![], vec![event], vec![]);
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![],
+      vec![],
+      vec![event],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+    );
 
     let mut graph = ResolutionGraph::new();
     SolidityExtractor.extract(&audit, &mut graph);
@@ -1620,6 +1723,9 @@ mod tests {
         kind: RevertConstraintKind::Revert,
         error_topic: Some(err),
       }],
+      vec![],
+      vec![],
+      vec![],
     );
 
     let mut graph = ResolutionGraph::new();
@@ -1652,6 +1758,160 @@ mod tests {
         kind: RevertConstraintKind::Require,
         error_topic: None,
       }],
+      vec![],
+      vec![],
+      vec![],
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    assert!(
+      graph
+        .out_edges(f)
+        .iter()
+        .all(|e| e.edge_type != EdgeType::ErrorThrown)
+    );
+  }
+
+  // -----------------------------------------------------------------------
+  // transitive effects: error-thrown / writes-state / event-emitted
+  // -----------------------------------------------------------------------
+
+  #[test]
+  fn effective_revert_emits_error_thrown_edge() {
+    // A function with only a transitive (effective) revert must still
+    // produce an `ErrorThrown` edge to the error topic — the graph view
+    // matches the property view.
+    let mut audit = empty_audit();
+    let contract = insert_contract(&mut audit, 1, "C");
+    let f = insert_function(&mut audit, 2, "f", contract);
+    let g = insert_function(&mut audit, 3, "g", contract);
+    let err = insert_named(
+      &mut audit,
+      4,
+      NamedTopicKind::Error,
+      Scope::Member {
+        container: project_path("test.sol"),
+        component: contract,
+        member: t(4),
+        signature_container: None,
+      },
+      "BadStuff",
+      None,
+    );
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![EffectiveRevert {
+        revert: RevertInfo {
+          topic: t(99),
+          kind: RevertConstraintKind::Revert,
+          error_topic: Some(err),
+        },
+        origin: g,
+      }],
+      vec![],
+      vec![],
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    assert!(
+      graph
+        .out_edges(f)
+        .iter()
+        .any(|e| e.dest == err && e.edge_type == EdgeType::ErrorThrown)
+    );
+  }
+
+  #[test]
+  fn direct_and_effective_revert_for_same_error_dedupe_to_one_edge() {
+    let mut audit = empty_audit();
+    let contract = insert_contract(&mut audit, 1, "C");
+    let f = insert_function(&mut audit, 2, "f", contract);
+    let g = insert_function(&mut audit, 3, "g", contract);
+    let err = insert_named(
+      &mut audit,
+      4,
+      NamedTopicKind::Error,
+      Scope::Member {
+        container: project_path("test.sol"),
+        component: contract,
+        member: t(4),
+        signature_container: None,
+      },
+      "BadStuff",
+      None,
+    );
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![],
+      vec![],
+      vec![],
+      vec![RevertInfo {
+        topic: t(99),
+        kind: RevertConstraintKind::Revert,
+        error_topic: Some(err),
+      }],
+      vec![EffectiveRevert {
+        revert: RevertInfo {
+          topic: t(100),
+          kind: RevertConstraintKind::Revert,
+          error_topic: Some(err),
+        },
+        origin: g,
+      }],
+      vec![],
+      vec![],
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    let count = graph
+      .out_edges(f)
+      .iter()
+      .filter(|e| e.dest == err && e.edge_type == EdgeType::ErrorThrown)
+      .count();
+    assert_eq!(count, 1);
+  }
+
+  #[test]
+  fn effective_revert_without_error_topic_emits_no_edge() {
+    // A bare-revert / bare-require entry in `effective_reverts` has no
+    // `error_topic` and must not produce an `ErrorThrown` edge — same
+    // rule as for direct reverts.
+    let mut audit = empty_audit();
+    let contract = insert_contract(&mut audit, 1, "C");
+    let f = insert_function(&mut audit, 2, "f", contract);
+    let g = insert_function(&mut audit, 3, "g", contract);
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![EffectiveRevert {
+        revert: RevertInfo {
+          topic: t(99),
+          kind: RevertConstraintKind::Require,
+          error_topic: None,
+        },
+        origin: g,
+      }],
+      vec![],
+      vec![],
     );
 
     let mut graph = ResolutionGraph::new();
@@ -1667,6 +1927,349 @@ mod tests {
   }
 
   #[test]
+  fn effective_mutation_emits_writes_state_edge() {
+    let mut audit = empty_audit();
+    let contract = insert_contract(&mut audit, 1, "C");
+    let f = insert_function(&mut audit, 2, "f", contract);
+    let g = insert_function(&mut audit, 3, "g", contract);
+    let state_var = insert_named(
+      &mut audit,
+      4,
+      NamedTopicKind::StateVariable(VariableMutability::Mutable),
+      Scope::Member {
+        container: project_path("test.sol"),
+        component: contract,
+        member: t(4),
+        signature_container: None,
+      },
+      "x",
+      None,
+    );
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![EffectiveTopic {
+        topic: state_var,
+        origin: g,
+      }],
+      vec![],
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    assert!(
+      graph
+        .out_edges(f)
+        .iter()
+        .any(|e| e.dest == state_var && e.edge_type == EdgeType::WritesState)
+    );
+  }
+
+  #[test]
+  fn direct_and_effective_mutation_for_same_state_var_dedupe_to_one_edge() {
+    let mut audit = empty_audit();
+    let contract = insert_contract(&mut audit, 1, "C");
+    let f = insert_function(&mut audit, 2, "f", contract);
+    let g = insert_function(&mut audit, 3, "g", contract);
+    let state_var = insert_named(
+      &mut audit,
+      4,
+      NamedTopicKind::StateVariable(VariableMutability::Mutable),
+      Scope::Member {
+        container: project_path("test.sol"),
+        component: contract,
+        member: t(4),
+        signature_container: None,
+      },
+      "x",
+      None,
+    );
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![],
+      vec![state_var],
+      vec![],
+      vec![],
+      vec![],
+      vec![EffectiveTopic {
+        topic: state_var,
+        origin: g,
+      }],
+      vec![],
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    let count = graph
+      .out_edges(f)
+      .iter()
+      .filter(|e| e.dest == state_var && e.edge_type == EdgeType::WritesState)
+      .count();
+    assert_eq!(count, 1);
+  }
+
+  #[test]
+  fn effective_mutations_with_distinct_origins_same_topic_dedupe_to_one_edge() {
+    // The property's per-origin distinction is render-side only; the
+    // graph carries one edge per (src, dst, edge_type) triple regardless
+    // of how many origins contributed.
+    let mut audit = empty_audit();
+    let contract = insert_contract(&mut audit, 1, "C");
+    let f = insert_function(&mut audit, 2, "f", contract);
+    let g = insert_function(&mut audit, 3, "g", contract);
+    let h = insert_function(&mut audit, 4, "h", contract);
+    let state_var = insert_named(
+      &mut audit,
+      5,
+      NamedTopicKind::StateVariable(VariableMutability::Mutable),
+      Scope::Member {
+        container: project_path("test.sol"),
+        component: contract,
+        member: t(5),
+        signature_container: None,
+      },
+      "x",
+      None,
+    );
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![
+        EffectiveTopic {
+          topic: state_var,
+          origin: g,
+        },
+        EffectiveTopic {
+          topic: state_var,
+          origin: h,
+        },
+      ],
+      vec![],
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    let count = graph
+      .out_edges(f)
+      .iter()
+      .filter(|e| e.dest == state_var && e.edge_type == EdgeType::WritesState)
+      .count();
+    assert_eq!(count, 1);
+  }
+
+  #[test]
+  fn effective_event_emits_event_emitted_edge() {
+    let mut audit = empty_audit();
+    let contract = insert_contract(&mut audit, 1, "C");
+    let f = insert_function(&mut audit, 2, "f", contract);
+    let g = insert_function(&mut audit, 3, "g", contract);
+    let event = insert_named(
+      &mut audit,
+      4,
+      NamedTopicKind::Event,
+      Scope::Member {
+        container: project_path("test.sol"),
+        component: contract,
+        member: t(4),
+        signature_container: None,
+      },
+      "Pinged",
+      None,
+    );
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![EffectiveTopic {
+        topic: event,
+        origin: g,
+      }],
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    assert!(
+      graph
+        .out_edges(f)
+        .iter()
+        .any(|e| e.dest == event && e.edge_type == EdgeType::EventEmitted)
+    );
+  }
+
+  #[test]
+  fn direct_and_effective_event_for_same_topic_dedupe_to_one_edge() {
+    let mut audit = empty_audit();
+    let contract = insert_contract(&mut audit, 1, "C");
+    let f = insert_function(&mut audit, 2, "f", contract);
+    let g = insert_function(&mut audit, 3, "g", contract);
+    let event = insert_named(
+      &mut audit,
+      4,
+      NamedTopicKind::Event,
+      Scope::Member {
+        container: project_path("test.sol"),
+        component: contract,
+        member: t(4),
+        signature_container: None,
+      },
+      "Pinged",
+      None,
+    );
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![],
+      vec![],
+      vec![event],
+      vec![],
+      vec![],
+      vec![],
+      vec![EffectiveTopic {
+        topic: event,
+        origin: g,
+      }],
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    let count = graph
+      .out_edges(f)
+      .iter()
+      .filter(|e| e.dest == event && e.edge_type == EdgeType::EventEmitted)
+      .count();
+    assert_eq!(count, 1);
+  }
+
+  #[test]
+  fn transitive_covered_topic_suppresses_references_edge() {
+    // A topic covered by a transitive ErrorThrown / WritesState /
+    // EventEmitted edge must also suppress the `References` edge that
+    // the topic-context loop would otherwise emit. The `covered` set is
+    // shared across both loop families specifically to preserve this
+    // dedup. If the transitive loops stopped populating `covered`, a
+    // function with a scope reference to a transitively-written state
+    // var would get duplicate edges (one WritesState + one References).
+    let mut audit = empty_audit();
+    let contract = insert_contract(&mut audit, 1, "C");
+    let f = insert_function(&mut audit, 2, "f", contract);
+    let g = insert_function(&mut audit, 3, "g", contract);
+    let state_var = insert_named(
+      &mut audit,
+      4,
+      NamedTopicKind::StateVariable(VariableMutability::Mutable),
+      Scope::Member {
+        container: project_path("test.sol"),
+        component: contract,
+        member: t(4),
+        signature_container: None,
+      },
+      "x",
+      None,
+    );
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![EffectiveTopic {
+        topic: state_var,
+        origin: g,
+      }],
+      vec![],
+    );
+    // A scope reference to the same state var — without the shared
+    // `covered` dedup, this would emit a References edge alongside the
+    // WritesState edge.
+    audit.topic_context.insert(
+      f,
+      vec![SourceContext::new_with_scope_references(
+        contract,
+        Some(0),
+        true,
+        vec![Reference::project_reference(state_var, Some(0))],
+      )],
+    );
+
+    let mut graph = ResolutionGraph::new();
+    SolidityExtractor.extract(&audit, &mut graph);
+    graph.finalize();
+
+    let f_edges = graph.out_edges(f);
+    assert!(
+      f_edges
+        .iter()
+        .any(|e| e.dest == state_var && e.edge_type == EdgeType::WritesState),
+      "expected a transitive WritesState edge",
+    );
+    assert!(
+      f_edges
+        .iter()
+        .all(|e| !(e.dest == state_var && e.edge_type == EdgeType::References)),
+      "transitive-covered topic must not also produce a References edge",
+    );
+  }
+
+  #[test]
+  fn no_state_read_edge_variant_exists() {
+    // Lock down the decision that there is no state-read edge type
+    // (direct or transitive). Transitive state reads live on
+    // `FunctionModProperties::effective_reads`, not on the resolution
+    // graph. If a future contributor adds a state-read variant to
+    // `EdgeType`, this exhaustive match becomes non-exhaustive and
+    // forces them to find this test and the decision note in
+    // `transitive-effects.md` before extending the taxonomy.
+    fn assert_no_state_read_variant(e: EdgeType) {
+      match e {
+        EdgeType::ContainsMember
+        | EdgeType::ContainsLocal
+        | EdgeType::ContainsField
+        | EdgeType::Calls
+        | EdgeType::References
+        | EdgeType::Implements
+        | EdgeType::ProxyOf
+        | EdgeType::WritesState
+        | EdgeType::UsingFor
+        | EdgeType::ModifierApplied
+        | EdgeType::ErrorThrown
+        | EdgeType::EventEmitted
+        | EdgeType::Derives
+        | EdgeType::ReExports
+        | EdgeType::MutatesField => {}
+      }
+    }
+    assert_no_state_read_variant(EdgeType::Calls);
+  }
+
+  #[test]
   fn references_emits_only_for_uncovered_destinations() {
     // A reference to the same callee should NOT produce a References
     // edge in addition to the Calls edge — the spec deduplicates against
@@ -1676,7 +2279,17 @@ mod tests {
     let f = insert_function(&mut audit, 2, "f", contract);
     let g = insert_function(&mut audit, 3, "g", contract);
     let plain_ref = insert_function(&mut audit, 4, "h", contract);
-    insert_function_props(&mut audit, f, vec![g], vec![], vec![], vec![]);
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![g],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+    );
 
     audit.topic_context.insert(
       f,
@@ -1718,7 +2331,17 @@ mod tests {
     let contract = insert_contract(&mut audit, 1, "C");
     let f = insert_function(&mut audit, 2, "f", contract);
     let referent = insert_function(&mut audit, 3, "g", contract);
-    insert_function_props(&mut audit, f, vec![], vec![], vec![], vec![]);
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+    );
 
     audit.topic_context.insert(
       f,
@@ -2187,7 +2810,17 @@ mod tests {
     let contract = insert_contract(&mut audit, 1, "C");
     let f = insert_function(&mut audit, 2, "f", contract);
     let unknown = t(999);
-    insert_function_props(&mut audit, f, vec![unknown], vec![], vec![], vec![]);
+    insert_function_props(
+      &mut audit,
+      f,
+      vec![unknown],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+      vec![],
+    );
 
     let mut graph = ResolutionGraph::new();
     SolidityExtractor.extract(&audit, &mut graph);
@@ -2354,6 +2987,9 @@ mod tests {
         kind: RevertConstraintKind::Revert,
         error_topic: Some(err),
       }],
+      vec![],
+      vec![],
+      vec![],
     );
 
     // A scope reference unrelated to the typed edges, to drive References.
