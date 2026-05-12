@@ -63,36 +63,48 @@ impl PipelineState {
 // Full-audit pipeline steps (used by the `analyze` endpoint)
 // ---------------------------------------------------------------------------
 
-/// Run the full analysis pipeline in seven steps:
+/// Run the full analysis pipeline in eight steps:
 ///
 /// 1. **Semantic Linking** — establish functional semantics on declarations.
-/// 2. **Requirement Extraction** — pull documentation requirements with
-///    semantics in context.
+/// 2. **Requirement Extraction** — pull documentation requirements *and*
+///    system characteristics with semantics in context. Characteristics
+///    here are "raw extracted"; step 5 replaces them with a synthesized
+///    set.
 /// 3. **Behavior Extraction** — DAG-batched per-function behavior generation
 ///    with callee context.
-/// 4. **Feature Synthesis** — reconcile requirements and behaviors.
-/// 5. **Functional Purpose & Placement** — for every non-pure subject in
+/// 4. **Feature Synthesis** — reconcile requirements and behaviors. Feature
+///    synthesis is intentionally blind to characteristics; the boundary is
+///    enforced by what the renderers emit.
+/// 5. **Characteristic Synthesis** — consolidate and refine the raw
+///    characteristics extracted in step 2 against the audit's
+///    `security.md` notes. The threats step (8) consumes the
+///    `Security`-kind subset of the output as a rendered text block in
+///    place of the old raw `security_notes` blob.
+/// 6. **Functional Purpose & Placement** — for every non-pure subject in
 ///    every in-scope function with a feature link, generate purpose and
 ///    placement rationale (per-function).
-/// 6. **Condition Generation** — for every non-pure subject with a purpose
+/// 7. **Condition Generation** — for every non-pure subject with a purpose
 ///    and placement, generate the assertions that must hold for that
 ///    purpose and placement to be fulfilled (per-function). Each condition
 ///    is its own A-prefixed topic.
-/// 7. **Threat Generation** — for every condition on every non-pure subject,
+/// 8. **Threat Generation** — for every condition on every non-pure subject,
 ///    generate adversarial scenarios that falsify the assertion (per-
 ///    function). Each threat is its own A-prefixed topic that names exactly
 ///    one `falsifies_condition` and one `controlled_by` actor; one condition
-///    can be the target of many threats. Step 8 (invariants) will derive
-///    codebase-level defenses from these threats.
+///    can be the target of many threats.
 ///
 /// Semantic linking runs first so functional semantics are available when
 /// rendering documentation for requirement extraction — inline code
 /// references like `pID` get annotated with their project-specific meaning.
-/// Step 5 runs after feature synthesis so it can use both feature context
-/// (from step 4) and prior callee behaviors (from step 3); step 6 runs
-/// after step 5 because every condition is grounded in a subject's
-/// functional purpose and placement rationale; step 7 runs after step 6
-/// because every threat is the adversarial inversion of a specific
+/// Characteristic synthesis (step 5) runs *after* feature synthesis (step 4)
+/// so the two sets stay in disjoint contexts: feature synthesis sees only
+/// requirements and behaviors, characteristic synthesis sees only the
+/// extracted characteristics plus `security.md`. Step 6 runs after step 5
+/// only because the pipeline keeps spec-family steps contiguous; functional
+/// property generation reads features and behaviors, not characteristics.
+/// Step 7 runs after step 6 because every condition is grounded in a
+/// subject's functional purpose and placement rationale; step 8 runs after
+/// step 7 because every threat is the adversarial inversion of a specific
 /// condition.
 #[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
 pub async fn run_full_pipeline(
@@ -101,25 +113,28 @@ pub async fn run_full_pipeline(
 ) -> Result<(), PipelineError> {
   tracing::info!("Starting full analysis pipeline for audit {}", audit_id);
 
-  tracing::info!("[1/7] Semantic Linking");
+  tracing::info!("[1/8] Semantic Linking");
   build_semantic_links(state, audit_id).await?;
 
-  tracing::info!("[2/7] Requirement Extraction");
+  tracing::info!("[2/8] Requirement Extraction");
   build_requirements(state, audit_id).await?;
 
-  tracing::info!("[3/7] Behavior Extraction");
+  tracing::info!("[3/8] Behavior Extraction");
   build_behaviors(state, audit_id).await?;
 
-  tracing::info!("[4/7] Feature Synthesis");
+  tracing::info!("[4/8] Feature Synthesis");
   synthesize_features(state, audit_id).await?;
 
-  tracing::info!("[5/7] Functional Purpose & Placement Generation");
+  tracing::info!("[5/8] Characteristic Synthesis");
+  synthesize_characteristics(state, audit_id).await?;
+
+  tracing::info!("[6/8] Functional Purpose & Placement Generation");
   build_functional_properties(state, audit_id).await?;
 
-  tracing::info!("[6/7] Condition Generation");
+  tracing::info!("[7/8] Condition Generation");
   build_conditions(state, audit_id).await?;
 
-  tracing::info!("[7/7] Threat Generation");
+  tracing::info!("[8/8] Threat Generation");
   build_threats(state, audit_id).await?;
 
   tracing::info!("Pipeline complete for audit {}", audit_id);
@@ -153,81 +168,119 @@ pub async fn build_requirements(
   );
   let parsed =
     task::extract_requirements_from_documentation(&documentation_files).await?;
+  let section_count = parsed
+    .section_requirements
+    .keys()
+    .chain(parsed.section_characteristics.keys())
+    .collect::<std::collections::BTreeSet<_>>()
+    .len();
   tracing::info!(
-    "Extracted {} requirements across {} sections",
+    "Extracted {} requirements and {} characteristics across {} sections",
     parsed.requirements.len(),
-    parsed.section_requirements.len()
+    parsed.characteristics.len(),
+    section_count
   );
 
   // Re-key parsed entities with allocated IDs from the atomic counter.
-  // The parser assigns local S-topic IDs starting from 1; replace them with
-  // process-wide allocated IDs so pipeline runs don't collide with existing
-  // IDs already in the counter's range.
+  // The parser assigns local S-topic IDs starting from 1 (shared counter
+  // across requirements and characteristics, so the kinds never collide
+  // on a `Topic::Spec(_)` key); replace each with a process-wide allocated
+  // ID so pipeline runs don't clash with already-allocated IDs in the
+  // counter's range. Requirements and characteristics share one counter
+  // (`allocate_spec_id`) by design — both live in the unified `S` topic
+  // family alongside features and behaviors.
+  //
+  // Iteration order: `parsed_requirements` is a `BTreeMap` keyed by local
+  // `Topic::Spec`, and the parser allocates those local IDs in
+  // section-then-position order, so iterating `requirements` then
+  // `characteristics` reproduces the document-natural allocation order
+  // (requirements get the lower process-wide IDs, then characteristics).
   let task::ParsedRequirements {
     requirements: parsed_requirements,
     topic_metadata,
-    section_requirements: parsed_section_requirements,
+    section_requirements: _,
+    characteristics: parsed_characteristics,
+    section_characteristics: _,
   } = parsed;
 
   let mut id_remap: std::collections::HashMap<topic::Topic, topic::Topic> =
-    std::collections::HashMap::new();
+    std::collections::HashMap::with_capacity(
+      parsed_requirements.len() + parsed_characteristics.len(),
+    );
   let mut new_requirements: std::collections::BTreeMap<
     topic::Topic,
     domain::Requirement,
   > = std::collections::BTreeMap::new();
+  let mut new_characteristics: std::collections::BTreeMap<
+    topic::Topic,
+    domain::Characteristic,
+  > = std::collections::BTreeMap::new();
+
+  for (old_req_topic, requirement) in parsed_requirements {
+    let new_req_topic = topic::new_spec_topic(ids::allocate_spec_id());
+    id_remap.insert(old_req_topic, new_req_topic);
+    new_requirements.insert(new_req_topic, requirement);
+  }
+
+  for (old_char_topic, characteristic) in parsed_characteristics {
+    let new_char_topic = topic::new_spec_topic(ids::allocate_spec_id());
+    id_remap.insert(old_char_topic, new_char_topic);
+    new_characteristics.insert(new_char_topic, characteristic);
+  }
+
+  // Re-key the parser's topic_metadata. The parser already set the right
+  // `author` (`Author::System`) and `created_at` (`None`) — preserve them
+  // verbatim instead of rewriting authorship in a second pass. Only the
+  // `topic` field needs updating to the process-wide allocated ID.
   let mut new_topic_metadata: std::collections::BTreeMap<
     topic::Topic,
     domain::TopicMetadata,
   > = std::collections::BTreeMap::new();
-  let mut new_section_requirements: std::collections::BTreeMap<
-    topic::Topic,
-    Vec<topic::Topic>,
-  > = std::collections::BTreeMap::new();
-
-  for (section_topic, req_topics) in parsed_section_requirements {
-    let mut new_req_topics = Vec::with_capacity(req_topics.len());
-    for old_req_topic in req_topics {
-      let new_req_topic = *id_remap
-        .entry(old_req_topic)
-        .or_insert_with(|| topic::new_spec_topic(ids::allocate_spec_id()));
-      new_req_topics.push(new_req_topic);
-    }
-    new_section_requirements.insert(section_topic, new_req_topics);
-  }
-
-  for (old_req_topic, requirement) in parsed_requirements {
-    let new_req_topic = match id_remap.get(&old_req_topic) {
-      Some(t) => *t,
-      None => {
-        let t = topic::new_spec_topic(ids::allocate_spec_id());
-        id_remap.insert(old_req_topic, t);
-        t
-      }
-    };
-    new_requirements.insert(new_req_topic, requirement);
-  }
-
-  for (old_req_topic, metadata) in topic_metadata {
-    let new_req_topic = match id_remap.get(&old_req_topic) {
+  for (old_topic, metadata) in topic_metadata {
+    let new_topic = match id_remap.get(&old_topic) {
       Some(t) => *t,
       None => continue,
     };
-    if let domain::TopicMetadata::RequirementTopic {
-      description,
-      section_topic,
-      ..
-    } = metadata
-    {
-      new_topic_metadata.insert(
-        new_req_topic,
-        domain::TopicMetadata::RequirementTopic {
-          topic: new_req_topic,
-          description,
-          section_topic,
-          author: Author::System,
-          created_at: None,
-        },
-      );
+    match metadata {
+      domain::TopicMetadata::RequirementTopic {
+        description,
+        section_topic,
+        author,
+        created_at,
+        ..
+      } => {
+        new_topic_metadata.insert(
+          new_topic,
+          domain::TopicMetadata::RequirementTopic {
+            topic: new_topic,
+            description,
+            section_topic,
+            author,
+            created_at,
+          },
+        );
+      }
+      domain::TopicMetadata::CharacteristicTopic {
+        description,
+        kind,
+        section_topic,
+        author,
+        created_at,
+        ..
+      } => {
+        new_topic_metadata.insert(
+          new_topic,
+          domain::TopicMetadata::CharacteristicTopic {
+            topic: new_topic,
+            description,
+            kind,
+            section_topic,
+            author,
+            created_at,
+          },
+        );
+      }
+      _ => continue,
     }
   }
 
@@ -241,24 +294,37 @@ pub async fn build_requirements(
     }
   })?;
 
-  // Clear old feature/requirement metadata — requirements are being
-  // replaced and features will be re-synthesized against the new set.
+  // Clear old feature/requirement/characteristic metadata — requirements
+  // and characteristics are being replaced wholesale, and features will be
+  // re-synthesized against the new requirement set in the next pipeline
+  // step. Phase 4's characteristic synthesis will replace the characteristic
+  // set again; the clear here covers reruns of step 2 in isolation. The
+  // section_* reverse indexes are rebuilt from `topic_metadata` by
+  // `rebuild_feature_context` at the end of this function, so we don't
+  // mutate them directly.
   audit_data.topic_metadata.retain(|_, m| {
     !matches!(
       m,
       domain::TopicMetadata::FeatureTopic { .. }
         | domain::TopicMetadata::RequirementTopic { .. }
+        | domain::TopicMetadata::CharacteristicTopic { .. }
     )
   });
 
   let req_count = new_requirements.len();
+  let char_count = new_characteristics.len();
   audit_data.requirements = new_requirements;
+  audit_data.characteristics = new_characteristics;
   audit_data.topic_metadata.extend(new_topic_metadata);
   audit_data.feature_requirement_links.clear();
   audit_data.feature_behavior_links.clear();
   domain::rebuild_feature_context(audit_data);
 
-  tracing::info!("Stored {} requirements in DataContext", req_count);
+  tracing::info!(
+    "Stored {} requirements and {} characteristics in DataContext",
+    req_count,
+    char_count
+  );
   Ok(())
 }
 
@@ -377,6 +443,168 @@ pub async fn synthesize_features(
 
   domain::rebuild_feature_context(audit_data);
   tracing::info!("Stored {} features in DataContext", feature_count);
+
+  Ok(())
+}
+
+/// Synthesize the refined characteristic set from the raw `security.md`
+/// notes and the characteristics already extracted in step 2. Runs as
+/// step 5 of 8 — after feature synthesis (so the renderer for this step
+/// cannot accidentally leak feature context into the prompt) and before
+/// functional property generation (so the threats step's eventual
+/// consumer sees only the synthesized set).
+///
+/// **Boundary discipline.** The renderer (`render_characteristic_synthesis_context`)
+/// reads only `audit_data.security_notes` plus the existing
+/// `CharacteristicTopic` entries — never features, behaviors, requirements,
+/// purposes, placements, conditions, threats, or invariants. The
+/// permanent renderer-leak drift-guard test in
+/// `pipeline::characteristic_synthesis_tests` asserts that the renderers
+/// for steps 4 (features), 6 (functional properties), and 7 (conditions)
+/// do not emit `CharacteristicTopic` IDs into their prompts.
+///
+/// **Idempotent rerun.** Replaces the entire `CharacteristicTopic` set
+/// and the `audit_data.characteristics` map; the `section_characteristics`
+/// reverse index is rebuilt by `rebuild_feature_context` at the end. No
+/// other state is touched, so this step can rerun in isolation.
+///
+/// **Early skip.** Both inputs empty (no extracted characteristics *and*
+/// no `security.md`) is the only case where this step is a no-op. When
+/// only one side is empty we still run: cross-section consolidation is
+/// valuable without a `security.md`, and a `security.md` with no
+/// extracted set still needs its claims promoted to first-class topics.
+#[tracing::instrument(skip_all, fields(audit_id = %audit_id))]
+pub async fn synthesize_characteristics(
+  state: &PipelineState,
+  audit_id: &str,
+) -> Result<(), PipelineError> {
+  // Snapshot the renderer inputs under a read lock. The renderer returns
+  // owned strings so the lock is dropped before the LLM call.
+  let (security_notes, extracted_json, prior_count) = {
+    let ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    let audit_data =
+      ctx
+        .get_audit(audit_id)
+        .ok_or_else(|| PipelineError::AuditNotFound {
+          audit_id: audit_id.to_string(),
+        })?;
+    let prior_count = audit_data
+      .topic_metadata
+      .values()
+      .filter(|m| {
+        matches!(m, domain::TopicMetadata::CharacteristicTopic { .. })
+      })
+      .count();
+    let (notes, extracted) =
+      task::render_characteristic_synthesis_context(audit_data);
+    (notes, extracted, prior_count)
+  };
+
+  // Skip only when both inputs are empty. `prior_count` counts
+  // `CharacteristicTopic` entries already in `topic_metadata`; the
+  // renderer emits exactly those, so `prior_count == 0` is the
+  // structural equivalent of "extracted set is empty" without
+  // resorting to a string sentinel on the rendered JSON.
+  if security_notes.trim().is_empty() && prior_count == 0 {
+    tracing::info!("No characteristic input, skipping synthesis");
+    return Ok(());
+  }
+
+  tracing::info!(
+    "Synthesizing characteristics from {} extracted item(s) and {} byte(s) of security notes",
+    prior_count,
+    security_notes.len()
+  );
+  let synthesized =
+    task::synthesize_characteristics(&security_notes, &extracted_json).await?;
+
+  // Re-key synthesized characteristics with allocated process-wide S IDs.
+  // The task assigns local S-topic IDs starting from 1 (parallel to
+  // requirement extraction); each is reallocated here so subsequent
+  // pipeline runs of this step never collide with already-allocated IDs.
+  let task::SynthesizedCharacteristics {
+    topic_metadata: parsed_topic_metadata,
+    characteristics: parsed_characteristics,
+  } = synthesized;
+
+  let mut id_remap: std::collections::HashMap<topic::Topic, topic::Topic> =
+    std::collections::HashMap::with_capacity(parsed_characteristics.len());
+  let mut new_characteristics: std::collections::BTreeMap<
+    topic::Topic,
+    domain::Characteristic,
+  > = std::collections::BTreeMap::new();
+
+  for (old_topic, characteristic) in parsed_characteristics {
+    let new_topic = topic::new_spec_topic(ids::allocate_spec_id());
+    id_remap.insert(old_topic, new_topic);
+    new_characteristics.insert(new_topic, characteristic);
+  }
+
+  // Re-key parsed topic_metadata. The task already set the right `author`
+  // (`Author::AgentLarge`) and `created_at` (`None`) — preserve them
+  // verbatim instead of rewriting authorship in a second pass.
+  let mut new_topic_metadata: std::collections::BTreeMap<
+    topic::Topic,
+    domain::TopicMetadata,
+  > = std::collections::BTreeMap::new();
+  for (old_topic, metadata) in parsed_topic_metadata {
+    let new_topic = match id_remap.get(&old_topic) {
+      Some(t) => *t,
+      None => continue,
+    };
+    if let domain::TopicMetadata::CharacteristicTopic {
+      description,
+      kind,
+      section_topic,
+      author,
+      created_at,
+      ..
+    } = metadata
+    {
+      new_topic_metadata.insert(
+        new_topic,
+        domain::TopicMetadata::CharacteristicTopic {
+          topic: new_topic,
+          description,
+          kind,
+          section_topic,
+          author,
+          created_at,
+        },
+      );
+    }
+  }
+
+  let new_count = new_characteristics.len();
+
+  // Clear prior `CharacteristicTopic` metadata and the
+  // `audit_data.characteristics` map wholesale, then install the
+  // synthesized set. The `section_characteristics` reverse index is
+  // rebuilt from `topic_metadata` by `rebuild_feature_context`.
+  let mut ctx = state
+    .data_context
+    .lock()
+    .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+  let audit_data = ctx.get_audit_mut(audit_id).ok_or_else(|| {
+    PipelineError::AuditNotFound {
+      audit_id: audit_id.to_string(),
+    }
+  })?;
+  audit_data.topic_metadata.retain(|_, m| {
+    !matches!(m, domain::TopicMetadata::CharacteristicTopic { .. })
+  });
+  audit_data.characteristics = new_characteristics;
+  audit_data.topic_metadata.extend(new_topic_metadata);
+  domain::rebuild_feature_context(audit_data);
+
+  tracing::info!(
+    "Synthesized {} characteristic(s) (from {} prior extracted item(s))",
+    new_count,
+    prior_count
+  );
 
   Ok(())
 }
@@ -2427,6 +2655,214 @@ mod build_threats_tests {
         assert_eq!(audit_id, "missing");
       }
       other => panic!("expected AuditNotFound, got {:?}", other),
+    }
+  }
+}
+
+/// Permanent drift guard: no renderer other than characteristic
+/// synthesis itself may leak `CharacteristicTopic` IDs into a prompt.
+///
+/// The Phase 4 contract separates feature synthesis (sees requirements +
+/// behaviors only) from characteristic synthesis (sees the extracted
+/// characteristics + raw `security.md` only). The contract is enforced
+/// not by prose in the prompts but by what each step's renderer actually
+/// emits — if a renderer for steps 4 (features), 6 (functional
+/// properties), 7 (conditions), or 8 (threats) ever started including a
+/// `CharacteristicTopic` ID in its rendered context, the boundary would
+/// silently leak.
+///
+/// This module covers the two renderers that operate on the whole
+/// `AuditData` and could plausibly leak via a `topic_metadata` walk:
+/// step 4's `render_reconciliation_context` (negative case — must not
+/// leak) and step 5's `render_characteristic_synthesis_context`
+/// (positive case — *must* surface characteristics, so a regression
+/// that silently stops rendering them is also caught).
+///
+/// Steps 6, 7, and 8 render through `context::render_batch_for_extraction`,
+/// which is member-scoped and does not take a path through
+/// `audit_data.characteristics`. The realistic regression vector there
+/// is a prompt edit that asks the LLM to consider characteristics — that
+/// vector is guarded by `task::characteristic_synthesis_tests::
+/// other_pipeline_prompts_do_not_mention_characteristics`, which asserts
+/// the prompt constants for steps 4/6/7/8 never reference the word
+/// "characteristic".
+///
+/// Per the build plan, these drift-guard tests "stay in the suite
+/// permanently." Do not delete or weaken them without replacing them
+/// with a stricter mechanical guarantee (e.g., a typed renderer
+/// interface that statically excludes `CharacteristicTopic`).
+#[cfg(test)]
+mod characteristic_synthesis_tests {
+  use super::*;
+  use crate::collaborator::models::Author;
+  use crate::domain::{
+    SystemCharacteristicKind, TopicMetadata, new_data_context,
+  };
+  use std::collections::HashSet;
+
+  fn seed_audit_with_characteristics()
+  -> (PipelineState, String, Vec<topic::Topic>) {
+    let mut ctx = new_data_context();
+    let audit_id = "drift_guard_audit";
+    assert!(ctx.create_audit(
+      audit_id.to_string(),
+      "Drift Guard".to_string(),
+      HashSet::new(),
+      Some("Raw security.md notes for synthesis only.".to_string()),
+    ));
+
+    // Pick IDs in a high range so they can't accidentally collide with
+    // requirement/behavior IDs allocated by other tests in the same
+    // process. The shared `S` counter is reseeded by other tests; we use
+    // explicit literals here to keep the assertion list stable across
+    // test ordering.
+    let char_topics = vec![
+      topic::new_spec_topic(7001),
+      topic::new_spec_topic(7002),
+      topic::new_spec_topic(7003),
+    ];
+    let req_topic = topic::new_spec_topic(8001);
+    let beh_topic = topic::new_spec_topic(8002);
+    let section_topic = topic::Topic::Documentation(42);
+
+    let audit_data = ctx.get_audit_mut(audit_id).unwrap();
+    for (i, t) in char_topics.iter().enumerate() {
+      audit_data.topic_metadata.insert(
+        *t,
+        TopicMetadata::CharacteristicTopic {
+          topic: *t,
+          description: format!("Characteristic claim #{}", i + 1),
+          kind: SystemCharacteristicKind::Security,
+          section_topic: if i == 0 { Some(section_topic) } else { None },
+          author: Author::AgentLarge,
+          created_at: None,
+        },
+      );
+      audit_data.characteristics.insert(
+        *t,
+        domain::Characteristic {
+          documentation_topics: vec![section_topic],
+        },
+      );
+    }
+
+    // One requirement and one behavior so the reconciliation renderer has
+    // a non-empty payload. Without these, the renderer returns `[]` and
+    // the absence assertion below would be vacuously satisfied.
+    audit_data.topic_metadata.insert(
+      req_topic,
+      TopicMetadata::RequirementTopic {
+        topic: req_topic,
+        description: "A documented requirement.".to_string(),
+        section_topic,
+        author: Author::System,
+        created_at: None,
+      },
+    );
+    audit_data.requirements.insert(
+      req_topic,
+      domain::Requirement {
+        documentation_topics: vec![section_topic],
+      },
+    );
+
+    audit_data.topic_metadata.insert(
+      beh_topic,
+      TopicMetadata::BehaviorTopic {
+        topic: beh_topic,
+        description: "An observed behavior.".to_string(),
+        member_topic: topic::new_node_topic(&1),
+        author: Author::System,
+        created_at: None,
+      },
+    );
+
+    domain::rebuild_feature_context(audit_data);
+
+    let state = PipelineState::new(Arc::new(Mutex::new(ctx)));
+    (state, audit_id.to_string(), char_topics)
+  }
+
+  fn assert_no_characteristic_ids_in(
+    rendered: &str,
+    char_topics: &[topic::Topic],
+    renderer_name: &str,
+  ) {
+    for t in char_topics {
+      let id = t.id();
+      assert!(
+        !rendered.contains(&id),
+        "{} must not emit CharacteristicTopic {} into its prompt context — \
+         renderer leak would break the Phase 4 boundary contract. \
+         Rendered: {}",
+        renderer_name,
+        id,
+        rendered
+      );
+    }
+  }
+
+  /// Step 4 (feature synthesis) renderer must not leak characteristic
+  /// IDs. `render_reconciliation_context` walks `requirements` and
+  /// `member_behaviors`; if it ever started iterating `characteristics`
+  /// or scanning all `topic_metadata` for spec-family entries, every
+  /// `CharacteristicTopic` ID would leak into the feature prompt.
+  #[test]
+  fn step_4_reconciliation_renderer_excludes_characteristic_topics() {
+    let (state, audit_id, char_topics) = seed_audit_with_characteristics();
+    let ctx = state.data_context.lock().unwrap();
+    let audit_data = ctx.get_audit(&audit_id).unwrap();
+
+    let (requirements_json, behaviors_json) =
+      task::render_reconciliation_context(audit_data);
+
+    assert_no_characteristic_ids_in(
+      &requirements_json,
+      &char_topics,
+      "render_reconciliation_context::requirements_json",
+    );
+    assert_no_characteristic_ids_in(
+      &behaviors_json,
+      &char_topics,
+      "render_reconciliation_context::behaviors_json",
+    );
+
+    // Sanity-check the rendered payload is not vacuously empty — the
+    // negative assertion above means nothing if the renderer returned
+    // `[]` for unrelated reasons.
+    assert!(
+      requirements_json.contains("S8001"),
+      "seeded requirement S8001 must appear in the rendered context"
+    );
+  }
+
+  /// The characteristic synthesis renderer (step 5) is the *only*
+  /// renderer that's allowed to emit `CharacteristicTopic` IDs. This is
+  /// the positive half of the boundary contract — without it, a
+  /// regression could pass the negative checks above by silently
+  /// stopping rendering characteristics altogether.
+  #[test]
+  fn step_5_characteristic_synthesis_renderer_does_emit_characteristic_topics()
+  {
+    let (state, audit_id, char_topics) = seed_audit_with_characteristics();
+    let ctx = state.data_context.lock().unwrap();
+    let audit_data = ctx.get_audit(&audit_id).unwrap();
+
+    let (security_notes, extracted_json) =
+      task::render_characteristic_synthesis_context(audit_data);
+
+    assert!(
+      security_notes.contains("security.md notes"),
+      "render_characteristic_synthesis_context must surface security_notes"
+    );
+    for t in &char_topics {
+      let id = t.id();
+      assert!(
+        extracted_json.contains(&id),
+        "render_characteristic_synthesis_context must emit characteristic \
+         topic {} into the extracted_json payload",
+        id
+      );
     }
   }
 }

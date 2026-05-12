@@ -24,6 +24,8 @@
 //! 1. **Normalize** (`normalize_documentation`): Strip emojis, HTML, etc.
 //! 2. **Extract requirements** (`extract_requirements_from_documentation`):
 //!    Per-document extraction grouped by section, then consolidation.
+//!    Emits feature requirements *and* raw system characteristics as
+//!    parallel arrays per section.
 //! 3. **Semantic linking** (LLM steps 2/4/5 — steps 1 and 3 are mechanical /
 //!    BM25): Connect doc sections to code declarations across three LLM
 //!    synthesis steps that build on each other (`link_contracts` →
@@ -33,6 +35,12 @@
 //!    extraction with semantics + callee behaviors in context.
 //! 5. **Synthesize features** (`synthesize_features`): Single-pass LLM
 //!    reconciliation of all requirements and behaviors into features.
+//!    Characteristics are intentionally excluded from this prompt; see
+//!    Phase 4 boundary contract in `pipeline::synthesize_characteristics`.
+//! 6. **Synthesize characteristics** (`synthesize_characteristics`):
+//!    Consolidate the raw characteristics from step 2 with the audit's
+//!    `security.md` notes. The threats step consumes the
+//!    `Security`-kind subset.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -102,78 +110,116 @@ pub fn render_documentation_files(audit_data: &AuditData) -> Vec<String> {
   files
 }
 
-/// Prompt for extracting requirements from a single documentation file, grouped by section.
+/// Prompt for extracting feature requirements and system characteristics from
+/// a single documentation file, grouped by section.
 const EXTRACT_REQUIREMENTS_PROMPT: &str = "Below is a documentation file for a smart contract project, \
 rendered as structured JSON with topic IDs (D-prefixed, like \"D42\") \
 on each section, paragraph, list, and code block.\n\n\
-Your task is to extract **requirements** from this document. Requirements are \
-what the documentation claims the system does — each one captures a documented \
-behavior, constraint, access control rule, or security property.\n\n\
-These requirements will be used by independent security auditors to organize \
-their review of the codebase. The documentation is developer-provided and \
-**not trusted** — it represents claimed behavior, not verified truth.\n\n\
-Requirements define the **scope of what an auditor must verify**. State them \
-broadly enough that the auditor is not anchored to a developer's stated \
-implementation — the auditor should think critically and consider attack \
-vectors beyond what the documentation explicitly addresses. For example, \
-prefer \"withdrawals must be safe from reentrancy\" over \"balance must be \
-zeroed before the external call\", because the latter assumes a specific \
-implementation strategy.\n\n\
+Your task is to extract two parallel sets of claims from this document:\n\
+1. **Feature requirements** — what the documentation claims the system *does* \
+in the course of fulfilling a feature. Each requirement captures a documented \
+behavior, constraint, or behavioral guarantee that an auditor must verify is \
+correctly implemented for a particular code feature.\n\
+2. **System characteristics** — system-wide claims that an auditor must take \
+as developer-asserted ground truth when reasoning about adversarial scenarios. \
+Examples: trust assumptions, role definitions, threat-model statements, and \
+system-wide security properties that hold across the entire codebase rather \
+than scoped to one feature. Each characteristic has a `kind`; only \
+`\"security\"` is supported now.\n\n\
+Both feature requirements and system characteristics will be used by \
+independent security auditors organizing their review. The documentation is \
+developer-provided and **not trusted** — it represents claimed behavior, not \
+verified truth.\n\n\
+Feature requirements define the **scope of what an auditor must verify**. \
+State them broadly enough that the auditor is not anchored to a developer's \
+stated implementation — the auditor should think critically and consider \
+attack vectors beyond what the documentation explicitly addresses. For \
+example, prefer \"withdrawals must be safe from reentrancy\" over \"balance \
+must be zeroed before the external call\", because the latter assumes a \
+specific implementation strategy.\n\n\
 **Do not use code declaration names** (function names, variable names, contract \
-names) in requirements. Describe capabilities in behavioral terms. For example, \
-instead of \"invalidateParticipations() must only be callable by the authorized \
-relayer\", write \"Only the authorized relayer is allowed to invalidate \
-participations.\" The requirement should describe *what the system must do*, \
-not *which function does it*. The original declaration names are preserved in \
+names) in either array. Describe capabilities in behavioral terms. For \
+example, instead of \"invalidateParticipations() must only be callable by the \
+authorized relayer\", write \"Only the authorized relayer is allowed to \
+invalidate participations.\" The original declaration names are preserved in \
 the linked documentation topics for traceability.\n\n\
-**Each requirement must describe exactly one claim.** If a documentation passage \
-describes two distinct things (e.g., access control AND batching support), split \
-them into separate requirements. For example, \"Only the authorized relayer can \
-invalidate participations\" and \"Invalidating multiple participations in a \
-single call must be supported\" are two requirements, not one joined with \
+**Each item must describe exactly one claim.** If a documentation passage \
+describes two distinct things (e.g., access control AND batching support), \
+split them into separate items. For example, \"Only the authorized relayer \
+can invalidate participations\" and \"Invalidating multiple participations \
+in a single call must be supported\" are two items, not one joined with \
 \"and.\"\n\n\
-Group requirements under the documentation **section** they were extracted from, \
-using the section's D-prefixed topic ID. Each section that contains behavioral \
-content should produce one or more requirements.\n\n\
-Return a JSON object with a `sections` key whose value is an array of section \
-groups. Each section group has:\n\
+**Overlap rule.** A single documented claim that is both a feature-level \
+requirement *and* a system-wide security characteristic must be emitted twice \
+— once in `feature_requirements` (framed as feature behavior, e.g., \"The \
+withdraw flow must reject reentrant calls\") and once in \
+`system_characteristics` (framed as a system-wide guarantee or threat-model \
+statement, e.g., \"The protocol assumes no external call can re-enter a \
+state-mutating function before its caller frame completes\"). The same \
+`documentation_topics` may appear in both arrays.\n\n\
+Group both arrays under the documentation **section** they were extracted \
+from, using the section's D-prefixed topic ID.\n\n\
+Return a JSON object with a `sections` key whose value is an array of \
+section groups. Each section group has:\n\
 - `section_topic`: the D-prefixed topic ID of the section header (e.g., \"D5\")\n\
-- `requirements`: an array of requirement objects, each with:\n\
+- `feature_requirements`: an array of feature-level requirement objects, each with:\n\
   - `description`: a single, specific, testable statement of what the system must do or prevent\n\
   - `documentation_topics`: an array of D-prefixed topic IDs for every paragraph, \
-list, or code block within this section that informed this specific requirement\n\n\
+list, or code block within this section that informed this specific requirement\n\
+- `system_characteristics`: an array of system-wide characteristic objects, each with:\n\
+  - `description`: a single, specific statement of the system-wide guarantee, \
+trust assumption, role definition, or threat-model claim (framed as a \
+system-wide property, not as feature behavior)\n\
+  - `kind`: the characteristic kind (only `\"security\"` is supported now — \
+omit any characteristic whose kind would fall outside this set rather than \
+emitting a sentinel value)\n\
+  - `documentation_topics`: an array of D-prefixed topic IDs for every paragraph, \
+list, or code block within this section that informed this characteristic\n\n\
 Rules:\n\
 - Every documentation topic ID that describes system behavior, requirements, \
 constraints, security concerns, or invariants should appear in at least one \
-requirement. Exclude boilerplate like tables of contents, version history, \
-author credits, and headings.\n\
-- A documentation topic may appear in multiple requirements if relevant to more than one.\n\
+item across the two arrays. Exclude boilerplate like tables of contents, \
+version history, author credits, and headings.\n\
+- A documentation topic may appear in multiple items if relevant to more than one.\n\
 - Do not invent topic IDs. Only use IDs present in the documentation.\n\
-- Preserve the developer's specific terminology and phrasing nuances in \
-requirement descriptions. Subtle differences in how the documentation \
-describes constraints often reflect important design distinctions.\n\
-- Include both **happy-path** requirements (what the system should do) and \
-**non-happy-path** requirements (what the system must prevent).\n\
-- If the documentation describes security threats, attack vectors, access control \
-rules, or invariants, capture those as requirements.\n\
-- Each section group should have at least one requirement.\n\
+- Preserve the developer's specific terminology and phrasing nuances. \
+Subtle differences in how the documentation describes constraints often \
+reflect important design distinctions.\n\
+- Include both **happy-path** items (what the system should do) and \
+**non-happy-path** items (what the system must prevent).\n\
+- If the documentation describes security threats, attack vectors, access \
+control rules, or invariants that apply system-wide, capture those as system \
+characteristics; if they apply to a specific feature, capture them as feature \
+requirements; if both, emit twice per the overlap rule.\n\
+- Either array may be empty for a section that has no items of that kind, \
+but a section group should not be emitted unless at least one of its arrays \
+is non-empty.\n\
 - Sections with no behavioral content (boilerplate, navigation, etc.) should be omitted.\n\
 - If the document contains no behavioral content at all, return `{\"sections\": []}`.\n\n\
 Documentation:\n";
 
-/// Prompt for consolidating requirements extracted from multiple documents.
-const CONSOLIDATE_REQUIREMENTS_PROMPT: &str = "Below are requirements extracted independently \
+/// Prompt for consolidating feature requirements extracted from multiple
+/// documents. System characteristics bypass this consolidation step entirely
+/// — they accumulate across per-document responses and are consolidated later
+/// during characteristic synthesis (Phase 4), which has additional context
+/// (the raw `security.md`) that the LLM needs to merge characteristics well.
+/// Centralising characteristic consolidation in one step keeps the data model
+/// simple and avoids the LLM reasoning about characteristic merging twice.
+const CONSOLIDATE_REQUIREMENTS_PROMPT: &str = "Below are feature requirements extracted independently \
 from multiple documentation files for a smart contract project, grouped by \
 documentation section. Because each file was processed separately, some \
 requirements may overlap or describe the same claim.\n\n\
 Your task is to consolidate these into a single, deduplicated list of \
-requirements grouped by section. For each group of similar requirements \
-across different sections, merge them into the most specific section and \
-combine their documentation_topics.\n\n\
+feature requirements grouped by section. For each group of similar \
+requirements across different sections, merge them into the most specific \
+section and combine their documentation_topics.\n\n\
 Return a JSON object with a `sections` key whose value is an array of section \
 groups. Each section group has:\n\
 - `section_topic`: the D-prefixed topic ID\n\
-- `requirements`: array of requirement objects with `description` and `documentation_topics`\n\n\
+- `feature_requirements`: array of feature-requirement objects with \
+`description` and `documentation_topics`\n\
+- `system_characteristics`: an empty array (characteristics are consolidated \
+in a later pipeline step — emit `[]` here)\n\n\
 Rules:\n\
 - Merge duplicate requirements that describe the same claim, keeping the more \
 specific wording and combining documentation_topics. Preserve the developer's \
@@ -187,14 +233,32 @@ preserve the details and nuances of both perspectives.\n\
 in behavioral terms.\n\
 - Each requirement must describe exactly one claim. If a merged requirement \
 covers two distinct things, split it back into separate requirements.\n\
+- Every section group must include both `feature_requirements` and \
+`system_characteristics` keys; the latter is always `[]` at this stage.\n\
 - If no requirements remain after deduplication, return `{\"sections\": []}`.\n\n\
 Requirements to consolidate:\n";
 
-/// Raw section group as returned by the requirement extraction LLM.
+/// Raw characteristic as returned by the LLM (no topic ID yet).
+#[derive(Deserialize)]
+struct LLMCharacteristic {
+  description: String,
+  documentation_topics: Vec<String>,
+  /// Characteristic kind, parsed into `SystemCharacteristicKind` at materialise
+  /// time. Currently only `"security"` is supported; the JSON Schema enum
+  /// rejects other strings at the router boundary, but we re-validate here
+  /// so a malformed response surfaces as a `TaskError` rather than a panic.
+  kind: String,
+}
+
+/// Raw section group as returned by the requirement extraction LLM. Each
+/// section carries two parallel arrays: feature-level requirements (consumed
+/// by feature synthesis) and system-wide characteristics (consumed by
+/// characteristic synthesis in Phase 4, then by threats).
 #[derive(Deserialize)]
 struct LLMSectionGroup {
   section_topic: String,
-  requirements: Vec<LLMRequirement>,
+  feature_requirements: Vec<LLMRequirement>,
+  system_characteristics: Vec<LLMCharacteristic>,
 }
 
 #[derive(Deserialize)]
@@ -215,10 +279,14 @@ static REQUIREMENTS_SCHEMA: LazyLock<JsonSchema> =
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["section_topic", "requirements"],
+            "required": [
+              "section_topic",
+              "feature_requirements",
+              "system_characteristics"
+            ],
             "properties": {
               "section_topic": { "type": "string" },
-              "requirements": {
+              "feature_requirements": {
                 "type": "array",
                 "items": {
                   "type": "object",
@@ -226,6 +294,25 @@ static REQUIREMENTS_SCHEMA: LazyLock<JsonSchema> =
                   "required": ["description", "documentation_topics"],
                   "properties": {
                     "description": { "type": "string" },
+                    "documentation_topics": {
+                      "type": "array",
+                      "items": { "type": "string" }
+                    }
+                  }
+                }
+              },
+              "system_characteristics": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["description", "kind", "documentation_topics"],
+                  "properties": {
+                    "description": { "type": "string" },
+                    "kind": {
+                      "type": "string",
+                      "enum": ["security"]
+                    },
                     "documentation_topics": {
                       "type": "array",
                       "items": { "type": "string" }
@@ -241,15 +328,52 @@ static REQUIREMENTS_SCHEMA: LazyLock<JsonSchema> =
     empty_response: r#"{"sections":[]}"#,
   });
 
-/// Result of parsing LLM requirements: requirements grouped by section, no features.
+/// Result of parsing an extraction LLM response: feature requirements and
+/// system characteristics, both grouped by documentation section. Feature
+/// synthesis (step 4) consumes the requirement half; characteristic
+/// synthesis (step 5, Phase 4) consumes the characteristic half. Topic
+/// metadata for both kinds shares a single map — local Topic IDs are
+/// disjoint within one parse, so a merged `topic_metadata` is safe.
 pub struct ParsedRequirements {
   pub requirements: BTreeMap<topic::Topic, Requirement>,
   pub topic_metadata: BTreeMap<topic::Topic, domain::TopicMetadata>,
-  /// Section D-topic → S-topic list, preserving document structure
+  /// Section D-topic → S-topic list, preserving document structure.
   pub section_requirements: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Characteristics keyed by their (locally-allocated) S-prefixed topic.
+  /// Always carries `section_topic = Some(_)` at this stage; characteristic
+  /// synthesis (Phase 4) is the only step that introduces `None` entries
+  /// (claims originating from the raw `security.md` with no section anchor).
+  pub characteristics: BTreeMap<topic::Topic, domain::Characteristic>,
+  /// Section D-topic → S-topic list for characteristics.
+  pub section_characteristics: BTreeMap<topic::Topic, Vec<topic::Topic>>,
 }
 
-/// Parse the LLM response for section-grouped requirements.
+/// Parse the LLM response for section-grouped requirements and
+/// characteristics.
+///
+/// Feature requirements and system characteristics both materialise as
+/// `Topic::Spec(_)` entries in `topic_metadata`, distinguished by variant
+/// (`RequirementTopic` vs `CharacteristicTopic`). A single shared counter
+/// allocates local IDs across both so the merged metadata map cannot
+/// collide on a `Topic::Spec(_)` key.
+///
+/// Defensive parsing:
+/// - A malformed `section_topic` makes the whole section unusable (we'd have
+///   no way to anchor its requirements/characteristics back to the doc),
+///   so the section is logged and skipped.
+/// - A malformed `documentation_topic` on an otherwise-valid item is logged
+///   and dropped; the item itself is preserved (its description still
+///   captures the claim — traceability is partially lost but the security
+///   model isn't).
+/// - An unknown `SystemCharacteristicKind` fails the whole parse loudly
+///   per the build-plan decision: silent dropping is the wrong failure
+///   mode for security-relevant artifacts.
+///
+/// `Author::System` is set on extracted entities directly so the pipeline
+/// can preserve parser-produced metadata verbatim instead of rewriting
+/// authorship in a second pass. Characteristic synthesis (Phase 4) writes
+/// its own author (`AgentLarge` for `TaskSize::Large`) and is therefore
+/// the only step that needs to override.
 fn parse_requirements_response(
   response: &str,
   prompt: &str,
@@ -261,22 +385,35 @@ fn parse_requirements_response(
   let mut requirements = BTreeMap::new();
   let mut topic_metadata = BTreeMap::new();
   let mut section_requirements = BTreeMap::new();
-  let mut req_counter = 0i32;
+  let mut characteristics = BTreeMap::new();
+  let mut section_characteristics = BTreeMap::new();
+  let mut next_local_id = 0i32;
 
   for section in raw_sections {
-    let section_topic = topic::new_topic(&section.section_topic);
-    let mut section_req_topics = Vec::new();
+    let section_topic =
+      match topic::parse_documentation_topic(&section.section_topic) {
+        Ok(t) => t,
+        Err(e) => {
+          tracing::warn!(
+            "skipping section with malformed section_topic '{}': {}",
+            section.section_topic,
+            e
+          );
+          continue;
+        }
+      };
 
-    for raw_req in section.requirements {
-      req_counter += 1;
-      let req_topic = topic::new_spec_topic(req_counter);
+    let mut section_req_topics = Vec::new();
+    for raw_req in section.feature_requirements {
+      next_local_id += 1;
+      let req_topic = topic::new_spec_topic(next_local_id);
       section_req_topics.push(req_topic);
 
-      let doc_topics: Vec<topic::Topic> = raw_req
-        .documentation_topics
-        .into_iter()
-        .map(|id| topic::new_topic(&id))
-        .collect();
+      let doc_topics = parse_documentation_topic_list(
+        raw_req.documentation_topics,
+        "feature_requirement",
+        &section.section_topic,
+      );
 
       topic_metadata.insert(
         req_topic,
@@ -284,7 +421,7 @@ fn parse_requirements_response(
           topic: req_topic,
           description: raw_req.description,
           section_topic,
-          author: Author::AgentLarge,
+          author: Author::System,
           created_at: None,
         },
       );
@@ -296,9 +433,51 @@ fn parse_requirements_response(
         },
       );
     }
-
     if !section_req_topics.is_empty() {
       section_requirements.insert(section_topic, section_req_topics);
+    }
+
+    let mut section_char_topics = Vec::new();
+    for raw_char in section.system_characteristics {
+      let kind = domain::SystemCharacteristicKind::parse_str(&raw_char.kind)
+        .ok_or_else(|| {
+          TaskError::Other(format!(
+            "unknown SystemCharacteristicKind '{}' in section {}",
+            raw_char.kind, section.section_topic
+          ))
+        })?;
+
+      next_local_id += 1;
+      let char_topic = topic::new_spec_topic(next_local_id);
+      section_char_topics.push(char_topic);
+
+      let doc_topics = parse_documentation_topic_list(
+        raw_char.documentation_topics,
+        "system_characteristic",
+        &section.section_topic,
+      );
+
+      topic_metadata.insert(
+        char_topic,
+        domain::TopicMetadata::CharacteristicTopic {
+          topic: char_topic,
+          description: raw_char.description,
+          kind,
+          section_topic: Some(section_topic),
+          author: Author::System,
+          created_at: None,
+        },
+      );
+
+      characteristics.insert(
+        char_topic,
+        domain::Characteristic {
+          documentation_topics: doc_topics,
+        },
+      );
+    }
+    if !section_char_topics.is_empty() {
+      section_characteristics.insert(section_topic, section_char_topics);
     }
   }
 
@@ -306,10 +485,44 @@ fn parse_requirements_response(
     requirements,
     topic_metadata,
     section_requirements,
+    characteristics,
+    section_characteristics,
   })
 }
 
-/// Extract requirements from documentation files via LLM, grouped by section.
+/// Parse a list of D-prefixed documentation topic IDs returned by the
+/// extraction LLM. Malformed entries are dropped with a warning rather
+/// than aborting the parse — the schema only constrains entries to be
+/// strings, not to be well-formed topic IDs, so a hallucinated value
+/// must not take down the whole extraction pass.
+fn parse_documentation_topic_list(
+  ids: Vec<String>,
+  item_kind: &str,
+  section_id: &str,
+) -> Vec<topic::Topic> {
+  let mut topics = Vec::with_capacity(ids.len());
+  for id in ids {
+    match topic::parse_documentation_topic(&id) {
+      Ok(t) => topics.push(t),
+      Err(e) => {
+        tracing::warn!(
+          "ignoring malformed documentation_topic '{}' on {} in section {}: {}",
+          id,
+          item_kind,
+          section_id,
+          e
+        );
+      }
+    }
+  }
+  topics
+}
+
+/// Extract requirements and system characteristics from documentation files
+/// via LLM, grouped by section. Multi-document runs send only the requirement
+/// half through the consolidation LLM; characteristics accumulate verbatim
+/// across documents and are consolidated later in characteristic synthesis
+/// (Phase 4), which has the raw `security.md` as additional input.
 pub async fn extract_requirements_from_documentation(
   documentation_files: &[String],
 ) -> Result<ParsedRequirements, TaskError> {
@@ -383,8 +596,44 @@ pub async fn extract_requirements_from_documentation(
     );
   }
 
-  let combined = per_doc_results.join("\n");
-  let prompt = format!("{}{}", CONSOLIDATE_REQUIREMENTS_PROMPT, combined);
+  // Parse every per-doc response first so we can split the two arrays apart:
+  // feature requirements feed the consolidation LLM (existing behavior);
+  // characteristics bypass it and are merged in afterwards. This avoids the
+  // LLM having to reason about characteristic merging at two stages — Phase
+  // 4's `synthesize_characteristics` is the single canonical consolidation
+  // point and has access to the raw `security.md` that this step does not.
+  let mut parsed_per_doc: Vec<ParsedRequirements> =
+    Vec::with_capacity(per_doc_results.len());
+  for (i, raw) in per_doc_results.iter().enumerate() {
+    match parse_requirements_response(raw, EXTRACT_REQUIREMENTS_PROMPT) {
+      Ok(p) => parsed_per_doc.push(p),
+      Err(e) => {
+        tracing::error!(
+          "per-doc requirement response {} failed to parse: {}",
+          i,
+          e
+        );
+      }
+    }
+  }
+
+  if parsed_per_doc.is_empty() {
+    return Err(TaskError::Other(
+      "All document requirement responses failed to parse".to_string(),
+    ));
+  }
+
+  // If only one per-doc response actually parsed, skip the consolidation LLM
+  // — there's nothing to consolidate, and an LLM call with one input wastes
+  // tokens and risks the model dropping requirements it would otherwise
+  // emit verbatim.
+  if parsed_per_doc.len() == 1 {
+    return Ok(parsed_per_doc.into_iter().next().unwrap());
+  }
+
+  let consolidation_input = render_consolidation_input(&parsed_per_doc);
+  let prompt =
+    format!("{}{}", CONSOLIDATE_REQUIREMENTS_PROMPT, consolidation_input);
   let response = router::chat_completion(
     TaskSize::Large,
     router::SYSTEM_MESSAGE_DOCUMENTATION,
@@ -394,7 +643,496 @@ pub async fn extract_requirements_from_documentation(
   )
   .await?;
 
-  parse_requirements_response(&response, &prompt)
+  let mut consolidated = parse_requirements_response(&response, &prompt)?;
+
+  // The consolidation prompt instructs the LLM to emit
+  // `system_characteristics: []` because characteristics are consolidated
+  // later in Phase 4 with the raw `security.md` as additional context.
+  // Defensively drop any characteristics the LLM might still emit so the
+  // per-doc accumulation below is the single source of truth — otherwise
+  // a noncompliant LLM response would double-count characteristics.
+  consolidated.characteristics.clear();
+  consolidated.section_characteristics.clear();
+  consolidated.topic_metadata.retain(|_, m| {
+    !matches!(m, domain::TopicMetadata::CharacteristicTopic { .. })
+  });
+
+  // Merge characteristics from every per-doc parse into the consolidated
+  // result with fresh local IDs that don't collide with the consolidation's
+  // requirement IDs. The pipeline-level remap will reallocate process-wide
+  // IDs for everything regardless, so these local IDs need only be unique
+  // within the returned `ParsedRequirements`.
+  let mut next_local_id = consolidated
+    .topic_metadata
+    .keys()
+    .map(|t| t.numeric_id())
+    .max()
+    .unwrap_or(0);
+
+  for per_doc in parsed_per_doc {
+    let ParsedRequirements {
+      characteristics,
+      topic_metadata,
+      ..
+    } = per_doc;
+
+    for (old_topic, characteristic) in characteristics {
+      let (description, kind, section_topic) =
+        match topic_metadata.get(&old_topic) {
+          Some(domain::TopicMetadata::CharacteristicTopic {
+            description,
+            kind,
+            section_topic,
+            ..
+          }) => (description.clone(), *kind, *section_topic),
+          _ => continue,
+        };
+
+      next_local_id += 1;
+      let new_topic = topic::new_spec_topic(next_local_id);
+
+      consolidated.topic_metadata.insert(
+        new_topic,
+        domain::TopicMetadata::CharacteristicTopic {
+          topic: new_topic,
+          description,
+          kind,
+          section_topic,
+          author: Author::System,
+          created_at: None,
+        },
+      );
+      consolidated
+        .characteristics
+        .insert(new_topic, characteristic);
+
+      if let Some(st) = section_topic {
+        consolidated
+          .section_characteristics
+          .entry(st)
+          .or_default()
+          .push(new_topic);
+      }
+    }
+  }
+
+  Ok(consolidated)
+}
+
+#[cfg(test)]
+mod requirements_parser_tests {
+  use super::*;
+
+  #[test]
+  fn parses_feature_requirements_only_section() {
+    let response = r#"{
+      "sections": [
+        {
+          "section_topic": "D5",
+          "feature_requirements": [
+            {
+              "description": "Withdrawals must be safe from reentrancy.",
+              "documentation_topics": ["D6", "D7"]
+            }
+          ],
+          "system_characteristics": []
+        }
+      ]
+    }"#;
+
+    let parsed =
+      parse_requirements_response(response, "<prompt>").expect("parses");
+
+    assert_eq!(parsed.requirements.len(), 1);
+    assert_eq!(parsed.characteristics.len(), 0);
+    assert_eq!(parsed.section_requirements.len(), 1);
+    assert_eq!(parsed.section_characteristics.len(), 0);
+
+    // Parser sets `Author::System` directly so the pipeline can preserve
+    // parser metadata verbatim. If this ever flips back to `AgentLarge`,
+    // the pipeline's preserve-author assumption breaks silently.
+    match parsed.topic_metadata.values().next() {
+      Some(domain::TopicMetadata::RequirementTopic { author, .. }) => {
+        assert_eq!(*author, Author::System);
+      }
+      other => panic!("expected RequirementTopic, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_system_characteristics_only_section() {
+    let response = r#"{
+      "sections": [
+        {
+          "section_topic": "D5",
+          "feature_requirements": [],
+          "system_characteristics": [
+            {
+              "description": "The protocol assumes no external call can re-enter a state-mutating function before its caller frame completes.",
+              "kind": "security",
+              "documentation_topics": ["D9"]
+            }
+          ]
+        }
+      ]
+    }"#;
+
+    let parsed =
+      parse_requirements_response(response, "<prompt>").expect("parses");
+
+    assert_eq!(parsed.requirements.len(), 0);
+    assert_eq!(parsed.characteristics.len(), 1);
+
+    let (_, characteristic) = parsed.characteristics.iter().next().unwrap();
+    assert_eq!(
+      characteristic.documentation_topics,
+      vec![topic::Topic::Documentation(9)]
+    );
+
+    let metadata = parsed.topic_metadata.values().next().unwrap();
+    match metadata {
+      domain::TopicMetadata::CharacteristicTopic {
+        kind,
+        section_topic,
+        ..
+      } => {
+        assert_eq!(*kind, domain::SystemCharacteristicKind::Security);
+        assert_eq!(*section_topic, Some(topic::Topic::Documentation(5)));
+      }
+      other => panic!("expected CharacteristicTopic, got {:?}", other),
+    }
+
+    // section_characteristics index points to the same characteristic.
+    let chars = parsed
+      .section_characteristics
+      .get(&topic::Topic::Documentation(5));
+    assert_eq!(chars.map(|v| v.len()), Some(1));
+  }
+
+  #[test]
+  fn parses_both_arrays_with_disjoint_local_ids() {
+    let response = r#"{
+      "sections": [
+        {
+          "section_topic": "D1",
+          "feature_requirements": [
+            {
+              "description": "Only the authorized relayer is allowed to invalidate participations.",
+              "documentation_topics": ["D2"]
+            }
+          ],
+          "system_characteristics": [
+            {
+              "description": "The relayer key is treated as trusted within the system trust boundary.",
+              "kind": "security",
+              "documentation_topics": ["D2"]
+            }
+          ]
+        }
+      ]
+    }"#;
+
+    let parsed =
+      parse_requirements_response(response, "<prompt>").expect("parses");
+
+    // Both kinds produced one entry each.
+    assert_eq!(parsed.requirements.len(), 1);
+    assert_eq!(parsed.characteristics.len(), 1);
+
+    // Local topic IDs are disjoint within the shared `topic_metadata` map —
+    // the single shared counter ensures no `Topic::Spec(_)` collisions
+    // between the requirement and characteristic halves. If they ever
+    // collide, the BTreeMap insert silently overwrites and the metadata
+    // count drops below the sum of the two kinds.
+    assert_eq!(
+      parsed.topic_metadata.len(),
+      parsed.requirements.len() + parsed.characteristics.len(),
+      "topic_metadata must contain every requirement and every characteristic without collision"
+    );
+
+    // The requirement's metadata key must match the requirement entry's
+    // own key — same for the characteristic.
+    let req_topic = *parsed.requirements.keys().next().unwrap();
+    let char_topic = *parsed.characteristics.keys().next().unwrap();
+    assert_ne!(req_topic, char_topic, "kinds must have distinct topics");
+    assert!(matches!(
+      parsed.topic_metadata.get(&req_topic),
+      Some(domain::TopicMetadata::RequirementTopic { .. })
+    ));
+    assert!(matches!(
+      parsed.topic_metadata.get(&char_topic),
+      Some(domain::TopicMetadata::CharacteristicTopic { .. })
+    ));
+
+    // The same documentation topic can appear on both sides — that's an
+    // explicitly supported overlap pattern.
+    let req_doc_topics = parsed
+      .requirements
+      .values()
+      .next()
+      .unwrap()
+      .documentation_topics
+      .clone();
+    let char_doc_topics = parsed
+      .characteristics
+      .values()
+      .next()
+      .unwrap()
+      .documentation_topics
+      .clone();
+    assert_eq!(req_doc_topics, vec![topic::Topic::Documentation(2)]);
+    assert_eq!(char_doc_topics, vec![topic::Topic::Documentation(2)]);
+  }
+
+  #[test]
+  fn rejects_unknown_characteristic_kind() {
+    let response = r#"{
+      "sections": [
+        {
+          "section_topic": "D1",
+          "feature_requirements": [],
+          "system_characteristics": [
+            {
+              "description": "An untyped characteristic.",
+              "kind": "performance",
+              "documentation_topics": ["D2"]
+            }
+          ]
+        }
+      ]
+    }"#;
+
+    let err = match parse_requirements_response(response, "<prompt>") {
+      Ok(_) => panic!("unknown kind should fail to parse"),
+      Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+      msg.contains("performance"),
+      "error should name the offending kind, got: {}",
+      msg
+    );
+  }
+
+  #[test]
+  fn parses_empty_sections() {
+    let response = r#"{"sections": []}"#;
+    let parsed =
+      parse_requirements_response(response, "<prompt>").expect("parses");
+    assert!(parsed.requirements.is_empty());
+    assert!(parsed.characteristics.is_empty());
+    assert!(parsed.topic_metadata.is_empty());
+    assert!(parsed.section_requirements.is_empty());
+    assert!(parsed.section_characteristics.is_empty());
+  }
+
+  #[test]
+  fn skips_section_with_malformed_section_topic() {
+    // The schema only constrains `section_topic` to be a string; an LLM
+    // hallucination that emits a non-topic string must not panic the
+    // pipeline. The whole section is skipped (its requirements/
+    // characteristics would be unanchored), but other valid sections in
+    // the same response still parse.
+    let response = r#"{
+      "sections": [
+        {
+          "section_topic": "not-a-topic",
+          "feature_requirements": [
+            {
+              "description": "Should be dropped along with its section.",
+              "documentation_topics": ["D2"]
+            }
+          ],
+          "system_characteristics": []
+        },
+        {
+          "section_topic": "D5",
+          "feature_requirements": [
+            {
+              "description": "Valid section keeps its requirements.",
+              "documentation_topics": ["D6"]
+            }
+          ],
+          "system_characteristics": []
+        }
+      ]
+    }"#;
+
+    let parsed =
+      parse_requirements_response(response, "<prompt>").expect("parses");
+
+    assert_eq!(parsed.requirements.len(), 1);
+    assert_eq!(parsed.section_requirements.len(), 1);
+    let (only_section, _) = parsed.section_requirements.iter().next().unwrap();
+    assert_eq!(*only_section, topic::Topic::Documentation(5));
+  }
+
+  #[test]
+  fn rejects_section_topic_with_wrong_prefix() {
+    // A topic that parses as a valid `Topic` but isn't `Documentation`
+    // (e.g. `S5`, `N5`) is also skipped — the parser is strict about
+    // documentation-topic anchors because cross-prefix confusion would
+    // corrupt the `section_requirements` reverse index.
+    let response = r#"{
+      "sections": [
+        {
+          "section_topic": "S5",
+          "feature_requirements": [
+            {
+              "description": "Belongs to a misclassified section.",
+              "documentation_topics": ["D2"]
+            }
+          ],
+          "system_characteristics": []
+        }
+      ]
+    }"#;
+
+    let parsed =
+      parse_requirements_response(response, "<prompt>").expect("parses");
+    assert!(parsed.requirements.is_empty());
+    assert!(parsed.section_requirements.is_empty());
+  }
+
+  #[test]
+  fn drops_malformed_documentation_topics_keeping_requirement() {
+    // A bad `documentation_topic` entry on a valid requirement loses
+    // traceability for that entry but the requirement itself survives —
+    // its description still captures the documented claim. Other valid
+    // documentation_topics in the same list are preserved.
+    let response = r#"{
+      "sections": [
+        {
+          "section_topic": "D1",
+          "feature_requirements": [
+            {
+              "description": "Requirement with a partially bad doc list.",
+              "documentation_topics": ["D2", "not-a-topic", "S5", "D7"]
+            }
+          ],
+          "system_characteristics": []
+        }
+      ]
+    }"#;
+
+    let parsed =
+      parse_requirements_response(response, "<prompt>").expect("parses");
+
+    assert_eq!(parsed.requirements.len(), 1);
+    let req = parsed.requirements.values().next().unwrap();
+    assert_eq!(
+      req.documentation_topics,
+      vec![
+        topic::Topic::Documentation(2),
+        topic::Topic::Documentation(7)
+      ],
+      "only well-formed D-prefixed topics should survive"
+    );
+  }
+
+  #[test]
+  fn drops_malformed_documentation_topics_on_characteristic() {
+    // Same defensive parsing for characteristic documentation_topics —
+    // the entry is kept, malformed IDs are silently dropped.
+    let response = r#"{
+      "sections": [
+        {
+          "section_topic": "D1",
+          "feature_requirements": [],
+          "system_characteristics": [
+            {
+              "description": "Characteristic with a bad doc list.",
+              "kind": "security",
+              "documentation_topics": ["D9", "garbage", "D11"]
+            }
+          ]
+        }
+      ]
+    }"#;
+
+    let parsed =
+      parse_requirements_response(response, "<prompt>").expect("parses");
+
+    assert_eq!(parsed.characteristics.len(), 1);
+    let ch = parsed.characteristics.values().next().unwrap();
+    assert_eq!(
+      ch.documentation_topics,
+      vec![
+        topic::Topic::Documentation(9),
+        topic::Topic::Documentation(11)
+      ]
+    );
+  }
+}
+
+/// Render the per-doc parsed requirements as a feature-requirements-only
+/// JSON payload for the consolidation LLM. System characteristics are
+/// omitted from the input entirely — they consolidate later in Phase 4.
+/// Each document becomes one object with its own `sections` array; the LLM
+/// merges across documents into a single output stream. Documents whose
+/// requirement extraction yielded nothing are dropped so the LLM doesn't
+/// waste reasoning on noise.
+///
+/// The input shape is *not* the response shape: the LLM receives an array
+/// of per-document section groups and must produce a single flat `sections`
+/// array per `REQUIREMENTS_SCHEMA`. The output preserves the
+/// `system_characteristics: []` field because the schema requires it.
+fn render_consolidation_input(per_doc: &[ParsedRequirements]) -> String {
+  let mut docs: Vec<serde_json::Value> = Vec::with_capacity(per_doc.len());
+
+  for (i, parsed) in per_doc.iter().enumerate() {
+    let mut sections: Vec<serde_json::Value> = Vec::new();
+
+    for (section_topic, req_topics) in &parsed.section_requirements {
+      let mut reqs: Vec<serde_json::Value> =
+        Vec::with_capacity(req_topics.len());
+      for req_topic in req_topics {
+        let description = match parsed.topic_metadata.get(req_topic) {
+          Some(domain::TopicMetadata::RequirementTopic {
+            description, ..
+          }) => description.clone(),
+          _ => continue,
+        };
+        let doc_topics: Vec<String> = parsed
+          .requirements
+          .get(req_topic)
+          .map(|r| {
+            r.documentation_topics
+              .iter()
+              .map(|t| t.to_string())
+              .collect()
+          })
+          .unwrap_or_default();
+        reqs.push(json!({
+          "description": description,
+          "documentation_topics": doc_topics,
+        }));
+      }
+
+      if reqs.is_empty() {
+        continue;
+      }
+      sections.push(json!({
+        "section_topic": section_topic.to_string(),
+        "feature_requirements": reqs,
+        "system_characteristics": [],
+      }));
+    }
+
+    // Skip documents that contributed no feature requirements — they'd be
+    // pure noise to the consolidation LLM (per-doc characteristics still
+    // flow through the accumulation path regardless).
+    if sections.is_empty() {
+      continue;
+    }
+
+    docs.push(json!({
+      "document_index": i,
+      "sections": sections,
+    }));
+  }
+
+  serde_json::to_string(&docs).unwrap_or_default()
 }
 
 // ============================================================================
@@ -1182,6 +1920,513 @@ pub async fn synthesize_features(
     feature_requirement_links,
     feature_behavior_links,
   })
+}
+
+// ============================================================================
+// Characteristic Synthesis (Phase 4)
+// ============================================================================
+
+/// Prompt for consolidating and refining the system characteristics extracted
+/// in step 2 against the raw `security.md` notes. This is the single
+/// canonical consolidation point for characteristics — per-doc extraction
+/// emits raw items and the multi-doc consolidation pass deliberately bypasses
+/// them, so any cross-section dedup, cross-document merging, or promotion of
+/// `security.md`-only claims happens here.
+///
+/// Inputs (formatted into the prompt below):
+/// - `Extracted characteristics:` — JSON list of every `CharacteristicTopic`
+///   currently in `topic_metadata`. Each item has its current S-topic ID for
+///   reference; the synthesizer is free to merge, drop, or refine, and the
+///   pipeline reallocates fresh S-IDs from the output regardless.
+/// - `Security notes:` — verbatim content of `security.md` (may be empty
+///   when the audit didn't ship one). Claims here that don't appear in the
+///   extracted set get promoted to first-class characteristics with
+///   `section_topic: null`.
+///
+/// The output preserves `documentation_topics` for characteristics that
+/// trace to a documentation section and emits `section_topic: null` for any
+/// item whose only source is `security.md`.
+const SYNTHESIZE_CHARACTERISTICS_PROMPT: &str = "Below are two inputs from a smart contract audit:\n\n\
+1. **Extracted characteristics** — system-wide claims (security \
+properties, trust assumptions, role definitions, threat-model statements) \
+already extracted from the project's documentation, each carrying an \
+S-prefixed topic ID, an optional D-prefixed section anchor, and a list of \
+D-prefixed documentation topics that informed it.\n\
+2. **Security notes** — the raw, free-form contents of the project's \
+`security.md` (or equivalent). May be empty.\n\n\
+Your task is to produce a **refined, consolidated** set of system \
+characteristics that captures every distinct security-relevant claim across \
+both inputs.\n\n\
+Rules:\n\
+- **Merge overlapping claims** from the extracted set and `security.md` \
+into a single characteristic. When merging, preserve the \
+`documentation_topics` from the extracted side and prefer the most specific \
+wording across the inputs. If the merged characteristic still anchors to a \
+documentation section, set `section_topic` to that section's D-prefixed ID; \
+if the claim originated only in `security.md`, set `section_topic` to \
+`null`.\n\
+- **Promote any claim present only in `security.md`** to a first-class \
+characteristic with `kind: \"security\"`, `section_topic: null`, and an \
+empty `documentation_topics` array. Do not invent doc-topic IDs.\n\
+- **Refine descriptions for clarity**. Each item must describe exactly one \
+system-wide claim. If an extracted item conflates two claims, split it. \
+Aim for concise, specific, auditor-actionable language; do not pad and do \
+not summarize away meaningful detail.\n\
+- **Preserve every distinct claim**. If you are unsure whether two items \
+describe the same claim, keep them separate. It is better to leave a \
+near-duplicate than to drop a unique constraint, trust assumption, or \
+threat-model statement.\n\
+- **Do not use code declaration names** (function names, contract names, \
+variable names) in descriptions. State the system-wide property in \
+behavioral terms; the linked `documentation_topics` carry the traceability \
+back to specific declarations.\n\
+- **Kind**: only `\"security\"` is supported. Omit any claim that does not \
+fit this kind rather than emitting a sentinel value.\n\
+- **Documentation topics**: only use D-prefixed IDs that appear on at \
+least one extracted characteristic in the input. Never invent IDs. The \
+`documentation_topics` array on a refined item is the union of the \
+documentation topics from every extracted characteristic merged into it.\n\
+- **Section topic**: if an item is derived from one or more documentation \
+sections, set `section_topic` to the single most-specific D-prefixed \
+section ID it anchors to. If a claim spans several sections, pick the \
+section that best matches the claim and include the rest as \
+`documentation_topics`. Use `null` only for `security.md`-only claims.\n\
+- If both inputs are empty (no extracted characteristics and no security \
+notes), return `{\"characteristics\": []}`.\n\n\
+Return a JSON object with a `characteristics` key whose value is an array \
+of characteristic objects. Each characteristic has:\n\
+- `description`: a single, specific statement of the system-wide claim\n\
+- `kind`: always `\"security\"` for the current pipeline\n\
+- `section_topic`: a D-prefixed topic ID, or `null` for `security.md`-only \
+claims\n\
+- `documentation_topics`: array of D-prefixed topic IDs that informed this \
+characteristic (empty for `security.md`-only claims)\n\n";
+
+/// Raw characteristic as returned by the synthesis LLM. Shares the
+/// `LLMCharacteristic` shape from extraction with the addition of an
+/// optional `section_topic` (extraction always anchors to a section; the
+/// synthesizer may emit `null` for `security.md`-only claims).
+#[derive(Deserialize)]
+struct LLMSynthesizedCharacteristic {
+  description: String,
+  kind: String,
+  section_topic: Option<String>,
+  documentation_topics: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct LLMCharacteristicsResponse {
+  characteristics: Vec<LLMSynthesizedCharacteristic>,
+}
+
+static CHARACTERISTICS_SCHEMA: LazyLock<JsonSchema> =
+  LazyLock::new(|| JsonSchema {
+    name: "synthesize_characteristics",
+    schema: json!({
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["characteristics"],
+      "properties": {
+        "characteristics": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "description",
+              "kind",
+              "section_topic",
+              "documentation_topics"
+            ],
+            "properties": {
+              "description": { "type": "string" },
+              "kind": {
+                "type": "string",
+                "enum": ["security"]
+              },
+              "section_topic": {
+                "type": ["string", "null"]
+              },
+              "documentation_topics": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }),
+    empty_response: r#"{"characteristics":[]}"#,
+  });
+
+/// Result of characteristic synthesis.
+///
+/// `topic_metadata` carries `CharacteristicTopic` variants keyed by
+/// locally-allocated `Topic::Spec(_)` IDs; the pipeline reallocates
+/// process-wide IDs before inserting into `audit_data`. The matching
+/// `Characteristic` entries (with their `documentation_topics`) live in
+/// `characteristics`, keyed by the same local IDs.
+pub struct SynthesizedCharacteristics {
+  pub topic_metadata: BTreeMap<topic::Topic, domain::TopicMetadata>,
+  pub characteristics: BTreeMap<topic::Topic, domain::Characteristic>,
+}
+
+/// Render the synthesis inputs from `AuditData` as `(security_notes,
+/// extracted_json)`. Called while holding the data-context lock; returns
+/// owned strings so the lock can be dropped before the LLM call.
+///
+/// `security_notes` is `audit_data.security_notes` verbatim (or the empty
+/// string when absent). `extracted_json` is a JSON array of every
+/// `CharacteristicTopic` in `topic_metadata`, sorted by topic ID for
+/// determinism (snapshot/diff stability across runs of the same input).
+pub fn render_characteristic_synthesis_context(
+  audit_data: &AuditData,
+) -> (String, String) {
+  let security_notes = audit_data.security_notes.clone().unwrap_or_default();
+
+  let mut entries: Vec<(topic::Topic, serde_json::Value)> = Vec::new();
+  for (topic, metadata) in &audit_data.topic_metadata {
+    if let domain::TopicMetadata::CharacteristicTopic {
+      description,
+      kind,
+      section_topic,
+      ..
+    } = metadata
+    {
+      let doc_topics: Vec<String> = audit_data
+        .characteristics
+        .get(topic)
+        .map(|c| c.documentation_topics.iter().map(|t| t.id()).collect())
+        .unwrap_or_default();
+
+      entries.push((
+        *topic,
+        json!({
+          "topic": topic.id(),
+          "description": description,
+          // Lowercase to match the synthesizer's output schema
+          // (`enum: ["security"]`). If we sent the capitalized
+          // display form, the LLM could mirror it in output and the
+          // OpenRouter-side schema validation would reject the
+          // response. See `SystemCharacteristicKind::wire_name`.
+          "kind": kind.wire_name(),
+          "section_topic": section_topic.map(|t| t.id()),
+          "documentation_topics": doc_topics,
+        }),
+      ));
+    }
+  }
+
+  entries.sort_by_key(|(t, _)| t.numeric_id());
+  let extracted: Vec<serde_json::Value> =
+    entries.into_iter().map(|(_, v)| v).collect();
+  let extracted_json =
+    serde_json::to_string(&extracted).unwrap_or_else(|_| "[]".to_string());
+
+  (security_notes, extracted_json)
+}
+
+/// Synthesize the refined characteristic set from the raw `security.md`
+/// notes plus the characteristics already extracted in step 2. A single
+/// LLM call consolidates across both inputs and produces the final
+/// `CharacteristicTopic` set the pipeline persists.
+///
+/// The caller is expected to skip this step when both inputs are empty;
+/// when only one side is empty the step still runs (cross-section
+/// consolidation is valuable even without a `security.md`, and a
+/// `security.md` with no documentation-extracted characteristics still
+/// needs its claims promoted to first-class topics).
+///
+/// Author resolution: every synthesized entry carries
+/// `Author::AgentLarge` because this function uses `TaskSize::Large`,
+/// matching `extract_requirements_from_documentation`. If the task size
+/// ever changes, also update the `Author` literal here so the on-wire
+/// authorship stays consistent with the model that produced the text.
+pub async fn synthesize_characteristics(
+  security_notes: &str,
+  extracted_json: &str,
+) -> Result<SynthesizedCharacteristics, TaskError> {
+  let prompt = format!(
+    "{}Extracted characteristics:\n{}\n\nSecurity notes:\n{}",
+    SYNTHESIZE_CHARACTERISTICS_PROMPT, extracted_json, security_notes
+  );
+
+  let response = router::chat_completion(
+    TaskSize::Large,
+    router::SYSTEM_MESSAGE_DOCUMENTATION,
+    &prompt,
+    Some("synthesize_characteristics"),
+    Some(&CHARACTERISTICS_SCHEMA),
+  )
+  .await?;
+
+  let wrapper: LLMCharacteristicsResponse =
+    router::parse_response(&response, "synthesized characteristics", &prompt)?;
+
+  let mut topic_metadata = BTreeMap::new();
+  let mut characteristics = BTreeMap::new();
+
+  for (i, raw) in wrapper.characteristics.into_iter().enumerate() {
+    // An unknown kind is a loud failure here per the build-plan decision:
+    // silent dropping is the wrong failure mode for a security-relevant
+    // artifact. The JSON Schema enum already restricts the value space at
+    // the router boundary, so this is a defense-in-depth check that
+    // surfaces drift between the schema and the parsed type.
+    let kind = domain::SystemCharacteristicKind::parse_str(&raw.kind)
+      .ok_or_else(|| {
+        TaskError::Other(format!(
+          "unknown SystemCharacteristicKind '{}' in synthesized characteristic {}",
+          raw.kind, i
+        ))
+      })?;
+
+    // Optional section anchor: only well-formed D-prefixed IDs survive.
+    // A malformed value drops the anchor but keeps the characteristic —
+    // its description still captures the claim.
+    let section_topic = match raw.section_topic.as_deref() {
+      None | Some("") => None,
+      Some(id) => match topic::parse_documentation_topic(id) {
+        Ok(t) => Some(t),
+        Err(e) => {
+          tracing::warn!(
+            "ignoring malformed section_topic '{}' on synthesized characteristic {}: {}",
+            id,
+            i,
+            e
+          );
+          None
+        }
+      },
+    };
+
+    let doc_topics = parse_documentation_topic_list(
+      raw.documentation_topics,
+      "synthesized_characteristic",
+      &section_topic
+        .map(|t| t.id())
+        .unwrap_or_else(|| "<none>".to_string()),
+    );
+
+    // Local topic IDs are 1-based and dense; the pipeline remap reallocates
+    // process-wide IDs before insertion, so local-id collisions across
+    // pipeline runs aren't possible.
+    let char_topic = topic::new_spec_topic((i + 1) as i32);
+
+    topic_metadata.insert(
+      char_topic,
+      domain::TopicMetadata::CharacteristicTopic {
+        topic: char_topic,
+        description: raw.description,
+        kind,
+        section_topic,
+        author: Author::AgentLarge,
+        created_at: None,
+      },
+    );
+
+    characteristics.insert(
+      char_topic,
+      domain::Characteristic {
+        documentation_topics: doc_topics,
+      },
+    );
+  }
+
+  Ok(SynthesizedCharacteristics {
+    topic_metadata,
+    characteristics,
+  })
+}
+
+#[cfg(test)]
+mod characteristic_synthesis_tests {
+  use super::*;
+
+  #[test]
+  fn renders_empty_when_no_characteristics_or_notes() {
+    use crate::domain::ProjectPath;
+    use std::collections::HashSet;
+
+    let audit_data = domain::new_audit_data(
+      "test".to_string(),
+      HashSet::<ProjectPath>::new(),
+      None,
+    );
+
+    let (notes, extracted) =
+      render_characteristic_synthesis_context(&audit_data);
+    assert_eq!(notes, "");
+    assert_eq!(extracted, "[]");
+  }
+
+  #[test]
+  fn renders_security_notes_and_extracted_in_topic_order() {
+    use crate::domain::ProjectPath;
+    use std::collections::HashSet;
+
+    let mut audit_data = domain::new_audit_data(
+      "test".to_string(),
+      HashSet::<ProjectPath>::new(),
+      Some("# Roles\nThe relayer key is trusted.".to_string()),
+    );
+
+    // Insert two characteristics with non-monotonic insertion order to
+    // confirm the renderer sorts by numeric topic ID.
+    let s2 = topic::new_spec_topic(2);
+    let s1 = topic::new_spec_topic(1);
+
+    audit_data.topic_metadata.insert(
+      s2,
+      domain::TopicMetadata::CharacteristicTopic {
+        topic: s2,
+        description: "Second claim.".to_string(),
+        kind: domain::SystemCharacteristicKind::Security,
+        section_topic: Some(topic::Topic::Documentation(7)),
+        author: Author::System,
+        created_at: None,
+      },
+    );
+    audit_data.characteristics.insert(
+      s2,
+      domain::Characteristic {
+        documentation_topics: vec![topic::Topic::Documentation(7)],
+      },
+    );
+
+    audit_data.topic_metadata.insert(
+      s1,
+      domain::TopicMetadata::CharacteristicTopic {
+        topic: s1,
+        description: "First claim.".to_string(),
+        kind: domain::SystemCharacteristicKind::Security,
+        section_topic: None,
+        author: Author::System,
+        created_at: None,
+      },
+    );
+    audit_data.characteristics.insert(
+      s1,
+      domain::Characteristic {
+        documentation_topics: vec![],
+      },
+    );
+
+    let (notes, extracted_json) =
+      render_characteristic_synthesis_context(&audit_data);
+    assert!(notes.contains("relayer key is trusted"));
+
+    let parsed: serde_json::Value =
+      serde_json::from_str(&extracted_json).expect("valid JSON");
+    let arr = parsed.as_array().expect("array");
+    assert_eq!(arr.len(), 2);
+    // Sorted by numeric ID: S1 first, S2 second.
+    assert_eq!(arr[0]["topic"], "S1");
+    assert_eq!(arr[1]["topic"], "S2");
+    assert_eq!(arr[0]["section_topic"], serde_json::Value::Null);
+    assert_eq!(arr[1]["section_topic"], "D7");
+    // Lowercase wire form — matches CHARACTERISTICS_SCHEMA's
+    // `enum: ["security"]`. If this ever flips back to capitalized
+    // `"Security"`, the synthesizer LLM may mirror the case and emit
+    // a response that fails OpenRouter's strict-schema validation.
+    assert_eq!(arr[0]["kind"], "security");
+    assert_eq!(arr[1]["kind"], "security");
+  }
+
+  #[test]
+  fn parses_merged_characteristics_with_and_without_section() {
+    // A minimal end-to-end exercise of the response parser used by
+    // `synthesize_characteristics`. We bypass the LLM call by invoking the
+    // schema's response-shape directly through the same deserialization
+    // path — this is the post-LLM parse the function executes.
+    let response = r#"{
+      "characteristics": [
+        {
+          "description": "The relayer key is treated as trusted within the system trust boundary.",
+          "kind": "security",
+          "section_topic": "D5",
+          "documentation_topics": ["D5", "D7"]
+        },
+        {
+          "description": "The protocol assumes no external call can re-enter a state-mutating function before its caller frame completes.",
+          "kind": "security",
+          "section_topic": null,
+          "documentation_topics": []
+        }
+      ]
+    }"#;
+
+    let wrapper: LLMCharacteristicsResponse = router::parse_response(
+      response,
+      "synthesized characteristics",
+      "<prompt>",
+    )
+    .expect("parses");
+    assert_eq!(wrapper.characteristics.len(), 2);
+    assert_eq!(
+      wrapper.characteristics[0].section_topic.as_deref(),
+      Some("D5")
+    );
+    assert_eq!(wrapper.characteristics[1].section_topic, None);
+    assert_eq!(wrapper.characteristics[1].documentation_topics.len(), 0);
+  }
+
+  /// Permanent drift guard for the Phase 4 boundary contract.
+  ///
+  /// Characteristic synthesis is the *only* pipeline step whose prompt
+  /// is allowed to mention characteristics. Feature synthesis (step 4),
+  /// functional property generation (step 6), condition generation
+  /// (step 7), and threat generation (step 8) consume their inputs from
+  /// disjoint sources (requirements + behaviors for step 4; member-scoped
+  /// AST + per-step prior outputs for steps 6/7/8). If any of those
+  /// prompts ever started saying "and these system characteristics: …",
+  /// the prompt author would also need to wire a renderer change to
+  /// populate the JSON field — but the prompt change alone is enough to
+  /// invalidate the boundary contract.
+  ///
+  /// This is the strongest mechanical guard available at the unit level:
+  /// it doesn't require constructing real AST nodes (which would be
+  /// needed to exercise `render_batch_for_extraction` end-to-end), and it
+  /// catches the realistic regression vector — a prompt edit that
+  /// surfaces characteristics into a downstream step.
+  ///
+  /// Per the build-plan decision: "This test stays in the suite
+  /// permanently as the drift guard." Strengthen it if a stricter
+  /// mechanical guarantee becomes available; do not weaken or delete.
+  #[test]
+  fn other_pipeline_prompts_do_not_mention_characteristics() {
+    let prompts: &[(&str, &str)] = &[
+      (
+        "SYNTHESIZE_FEATURES_PROMPT (step 4)",
+        SYNTHESIZE_FEATURES_PROMPT,
+      ),
+      (
+        "EXTRACT_FUNCTIONAL_PROPERTIES_PROMPT (step 6)",
+        EXTRACT_FUNCTIONAL_PROPERTIES_PROMPT,
+      ),
+      (
+        "EXTRACT_CONDITIONS_PROMPT (step 7)",
+        EXTRACT_CONDITIONS_PROMPT,
+      ),
+      ("EXTRACT_THREATS_PROMPT (step 8)", EXTRACT_THREATS_PROMPT),
+    ];
+
+    // Case-insensitive substring search. Lowercasing both sides
+    // catches the obvious vectors ("Characteristic", "characteristic",
+    // "characteristics", "CHARACTERISTICS").
+    for (name, prompt) in prompts {
+      let lc = prompt.to_lowercase();
+      assert!(
+        !lc.contains("characteristic"),
+        "{} must not mention 'characteristic' — Phase 4 boundary \
+         contract requires that only the characteristic synthesis step \
+         renders characteristics into its prompt. If you're adding a \
+         legitimate cross-step reference, update the build-plan first \
+         and write a renderer-side test that proves no CharacteristicTopic \
+         IDs leak into the rendered JSON.",
+        name,
+      );
+    }
+  }
 }
 
 // ============================================================================

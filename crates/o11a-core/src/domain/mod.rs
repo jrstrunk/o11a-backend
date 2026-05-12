@@ -379,9 +379,25 @@ pub enum SystemCharacteristicKind {
 }
 
 impl SystemCharacteristicKind {
+  /// Canonical display / database string form (capitalized: `"Security"`).
+  /// Used for DB column values, log lines, and any human-facing
+  /// rendering. The matching deserializer is `parse_str`.
   pub fn as_str(self) -> &'static str {
     match self {
       SystemCharacteristicKind::Security => "Security",
+    }
+  }
+
+  /// Lowercase JSON-wire form (`"security"`) used in LLM prompts and
+  /// JSON Schema enum constraints. Kept separate from `as_str` because
+  /// the LLM prompts and `response_format` schemas across this codebase
+  /// consistently use lowercase kind/enum names, while DB columns and
+  /// display contexts use the capitalized variant form. Mixing them
+  /// would cause OpenRouter's strict JSON Schema validation to reject
+  /// responses where the model mirrors the casing of its input.
+  pub fn wire_name(self) -> &'static str {
+    match self {
+      SystemCharacteristicKind::Security => "security",
     }
   }
 
