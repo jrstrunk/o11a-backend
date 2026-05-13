@@ -222,9 +222,10 @@ pub struct DocumentationPanelRequest {
 
 /// POST /api/v1/audits/:audit_id/documentation
 /// Returns rendered HTML panel of documentation linked to the given topics.
-/// Accepts feature (F), requirement (R), or any other topic IDs.
+/// Accepts feature, requirement, characteristic, or any other topic IDs.
 /// - Feature topics: collect documentation from all their requirements
 /// - Requirement topics: use their documentation_topics directly
+/// - Characteristic topics: use their documentation_topics directly
 /// - Other topics: look up features via feature_behavior_links, then requirements
 pub async fn get_documentation_panel(
   State(state): State<FrontendState>,
@@ -280,6 +281,18 @@ pub async fn get_documentation_panel(
     ) && let Some(req) = audit_data.requirements.get(&t)
     {
       for dt in &req.documentation_topics {
+        if !mention_topics.contains(dt) {
+          mention_topics.push(*dt);
+        }
+      }
+    }
+
+    if matches!(
+      audit_data.topic_metadata.get(&t),
+      Some(domain::TopicMetadata::CharacteristicTopic { .. })
+    ) && let Some(ch) = audit_data.characteristics.get(&t)
+    {
+      for dt in &ch.documentation_topics {
         if !mention_topics.contains(dt) {
           mention_topics.push(*dt);
         }

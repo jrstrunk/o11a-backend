@@ -105,6 +105,14 @@ pub fn create_router(state: AppState) -> Router {
       get(handlers::get_behavior),
     )
     .route(
+      "/api/v1/audits/:audit_id/characteristics",
+      get(handlers::get_characteristics),
+    )
+    .route(
+      "/api/v1/audits/:audit_id/characteristics/:topic_id",
+      get(handlers::get_characteristic),
+    )
+    .route(
       "/api/v1/audits/:audit_id/functional_semantics",
       get(handlers::get_all_functional_semantics)
         .post(handlers::create_user_functional_semantic),

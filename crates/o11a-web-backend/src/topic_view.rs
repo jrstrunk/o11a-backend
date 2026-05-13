@@ -3,8 +3,8 @@ use serde::Serialize;
 use o11a_core::domain::{
   self, AuditData, BlockAnnotationKind, ContractKind, ControlFlowBranch,
   ControlFlowStatementKind, FunctionKind, NamedTopicKind, NamedTopicVisibility,
-  Node, Reference, Scope, SourceChild, SourceContext, TitledTopicKind,
-  TopicMetadata, UnnamedTopicKind, VariableMutability, topic,
+  Node, Reference, Scope, SourceChild, SourceContext, SystemCharacteristicKind,
+  TitledTopicKind, TopicMetadata, UnnamedTopicKind, VariableMutability, topic,
 };
 
 use crate::formatting::{self, html_escape};
@@ -43,6 +43,7 @@ pub enum ConversationEntryKind {
   FunctionalSemantics,
   Behavior,
   Requirement,
+  Characteristic,
   Threat,
   Invariant,
   Comment,
@@ -439,6 +440,21 @@ fn get_breadcrumb_parts<'a>(
     ];
   }
 
+  // Characteristics: parent section then kind label (e.g. "Security
+  // Characteristic"). Characteristics whose only source is `security.md`
+  // have no section anchor and fall through to the scope-based default.
+  if let TopicMetadata::CharacteristicTopic {
+    section_topic: Some(section),
+    kind,
+    ..
+  } = metadata
+  {
+    return vec![
+      BreadcrumbPart::Topic(section),
+      BreadcrumbPart::Text(characteristic_breadcrumb_label(*kind)),
+    ];
+  }
+
   // Threats: parent feature then "Threat" label
   if matches!(metadata, TopicMetadata::ThreatTopic { .. })
     && let Some(feature_topic) = metadata.target_topic()
@@ -629,6 +645,9 @@ fn authored_topic_label(
     TopicMetadata::BehaviorTopic { .. } => {
       Some(("behavior".to_string(), "behavior"))
     }
+    TopicMetadata::CharacteristicTopic { kind, .. } => {
+      Some((characteristic_keyword(*kind).to_string(), "characteristic"))
+    }
     TopicMetadata::FunctionalSemanticTopic { .. } => {
       Some(("semantics".to_string(), "semantic"))
     }
@@ -647,6 +666,24 @@ fn authored_topic_label(
       Some((format!("inv [{}]", sev), "invariant"))
     }
     _ => None,
+  }
+}
+
+/// Short keyword for the authored-topic block header (e.g. "security" for
+/// `SystemCharacteristicKind::Security`).
+fn characteristic_keyword(kind: SystemCharacteristicKind) -> &'static str {
+  match kind {
+    SystemCharacteristicKind::Security => "security",
+  }
+}
+
+/// Standalone label for breadcrumb and topic-panel-prefix titles
+/// (e.g. "Security Characteristic" for `SystemCharacteristicKind::Security`).
+fn characteristic_breadcrumb_label(
+  kind: SystemCharacteristicKind,
+) -> &'static str {
+  match kind {
+    SystemCharacteristicKind::Security => "Security Characteristic",
   }
 }
 
@@ -1390,16 +1427,23 @@ pub fn build_topic_panel_prefix(
       m
     }
     Some(m @ TopicMetadata::RequirementTopic { .. }) => m,
+    Some(m @ TopicMetadata::CharacteristicTopic { .. }) => m,
     Some(m @ TopicMetadata::ThreatTopic { .. }) => m,
     Some(m @ TopicMetadata::InvariantTopic { .. }) => m,
     _ => return String::new(),
   };
 
-  // For requirements/threats/invariants, render as a standalone entry.
-  let standalone = match metadata {
+  // For requirements/characteristics/threats/invariants, render as a
+  // standalone entry.
+  let standalone: Option<(&'static str, ConversationEntryKind)> = match metadata
+  {
     TopicMetadata::RequirementTopic { .. } => {
       Some(("Requirement", ConversationEntryKind::Requirement))
     }
+    TopicMetadata::CharacteristicTopic { kind, .. } => Some((
+      characteristic_breadcrumb_label(*kind),
+      ConversationEntryKind::Characteristic,
+    )),
     TopicMetadata::ThreatTopic { .. } => {
       Some(("Threat", ConversationEntryKind::Threat))
     }
@@ -1669,6 +1713,7 @@ pub fn render_entry_html(
     }
     ConversationEntryKind::Requirement => "requirement",
     ConversationEntryKind::Behavior => "behavior",
+    ConversationEntryKind::Characteristic => "characteristic",
     ConversationEntryKind::FunctionalSemantics => "functional-semantics",
     ConversationEntryKind::Threat => "threat",
     ConversationEntryKind::Invariant => "invariant",
@@ -1737,6 +1782,9 @@ fn entry_kind_for(metadata: &TopicMetadata) -> Option<ConversationEntryKind> {
     TopicMetadata::BehaviorTopic { .. } => {
       Some(ConversationEntryKind::Behavior)
     }
+    TopicMetadata::CharacteristicTopic { .. } => {
+      Some(ConversationEntryKind::Characteristic)
+    }
     TopicMetadata::FunctionalSemanticTopic { .. } => {
       Some(ConversationEntryKind::FunctionalSemantics)
     }
@@ -1768,13 +1816,15 @@ pub fn build_conversation(
 
   let mut entries: Vec<ConversationEntry> = Vec::new();
 
-  // Functional semantics, behaviors, and requirements via reverse indexes.
+  // Functional semantics, behaviors, requirements, and characteristics via
+  // reverse indexes.
   let related_iter = audit_data
     .declaration_semantics
     .get(&resolved_topic)
     .into_iter()
     .chain(audit_data.member_behaviors.get(&resolved_topic))
     .chain(audit_data.section_requirements.get(&resolved_topic))
+    .chain(audit_data.section_characteristics.get(&resolved_topic))
     .flatten();
   for rt in related_iter {
     let Some(metadata) = audit_data.topic_metadata.get(rt) else {

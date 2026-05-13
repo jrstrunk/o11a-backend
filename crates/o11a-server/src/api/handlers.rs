@@ -1892,6 +1892,71 @@ pub async fn get_behaviors(
 }
 
 // ============================================
+// Characteristic routes
+// ============================================
+
+/// GET /api/v1/audits/:audit_id/characteristics/:topic_id
+/// Gets a single characteristic.
+pub async fn get_characteristic(
+  State(state): State<AppState>,
+  Path((audit_id, topic_id)): Path<(String, String)>,
+) -> Result<Json<TopicMetadataResponse>, StatusCode> {
+  let char_topic = topic::parse_spec_topic(&topic_id).map_err(|e| {
+    tracing::warn!("Invalid topic ID in path: {}", e);
+    StatusCode::BAD_REQUEST
+  })?;
+  tracing::debug!(
+    "GET /api/v1/audits/{}/characteristics/{}",
+    audit_id,
+    topic_id
+  );
+
+  let ctx = state.data_context.lock().map_err(|e| {
+    tracing::error!("Mutex poisoned in get_characteristic: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?;
+
+  let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+  let metadata = audit_data
+    .topic_metadata
+    .get(&char_topic)
+    .ok_or(StatusCode::NOT_FOUND)?;
+
+  Ok(Json(topic_metadata_to_response(&char_topic, metadata)))
+}
+
+/// GET /api/v1/audits/:audit_id/characteristics
+/// Returns all characteristics for an audit. Read-only: user-authored
+/// characteristic creation is deferred to a follow-up.
+pub async fn get_characteristics(
+  State(state): State<AppState>,
+  Path(audit_id): Path<String>,
+) -> Result<Json<Vec<TopicMetadataResponse>>, StatusCode> {
+  tracing::debug!("GET /api/v1/audits/{}/characteristics", audit_id);
+
+  let ctx = state.data_context.lock().map_err(|e| {
+    tracing::error!("Mutex poisoned in get_characteristics: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?;
+
+  let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+
+  let characteristics: Vec<TopicMetadataResponse> = audit_data
+    .topic_metadata
+    .iter()
+    .filter_map(|(ct, m)| {
+      if matches!(m, domain::TopicMetadata::CharacteristicTopic { .. }) {
+        Some(topic_metadata_to_response(ct, m))
+      } else {
+        None
+      }
+    })
+    .collect();
+
+  Ok(Json(characteristics))
+}
+
+// ============================================
 // User entity creation
 // ============================================
 
