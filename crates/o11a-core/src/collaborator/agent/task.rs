@@ -2408,6 +2408,10 @@ mod characteristic_synthesis_tests {
         EXTRACT_CONDITIONS_PROMPT,
       ),
       ("EXTRACT_THREATS_PROMPT (step 8)", EXTRACT_THREATS_PROMPT),
+      (
+        "EXTRACT_INVARIANTS_PROMPT (step 9)",
+        EXTRACT_INVARIANTS_PROMPT,
+      ),
     ];
 
     // Case-insensitive substring search. Lowercasing both sides
@@ -4064,6 +4068,695 @@ fn description_starts_with_party_noun(desc: &str) -> bool {
       {
         return true;
       }
+    }
+  }
+  false
+}
+
+// ============================================================================
+// Invariants (Pipeline Step 8)
+// ============================================================================
+
+/// Prompt for generating invariants — codebase-level defensive properties
+/// stated against the threats produced in step 7 — for every threat on
+/// every non-pure subject in a single in-scope function/modifier. The
+/// input JSON is the output of `render_batch_for_extraction` called with
+/// a single-member slice; the envelope uses the `subject` shape. The
+/// unified renderer inlines a `conditions` array (step 6) AND a `threats`
+/// array (step 7) on each non-pure subject — the threats array is the
+/// load-bearing input. Invariants are 1:N to the threat they defend; one
+/// threat can carry many invariants. Invariants carry no `evidence_topics`
+/// at generation time — whether each property actually holds in the code
+/// is the subject of a deferred later pipeline step (re-check
+/// propagation). See SPEC's "Conditions vs. Invariants" and
+/// `invariants-step-8.md`.
+const EXTRACT_INVARIANTS_PROMPT: &str = "Below is one in-scope function \
+or modifier from a smart contract project. The function appears under \
+the `subject` field with:\n\
+- `topic`, `name`, `kind`, `visibility`, and a `modifiers` array of \
+`{topic, name}` entries.\n\
+- `state_reads`, `state_writes`, `events_emitted`, `reverts` and their \
+transitive counterparts (state and effects this function reads, writes, \
+emits, or reverts with — directly and through the call graph).\n\
+- `features`: an array of features this function contributes to. Each \
+feature has `topic`, `name`, `description`, and `requirements`.\n\
+- `behaviors`: what the function as a whole does (already extracted).\n\
+- `definition`: the function's signature and body as an AST. Non-pure \
+subjects in the body have `purity: \"non_pure\"`; function calls include \
+`purity: \"pure\"` or `purity: \"non_pure\"`. Reference nodes carry an \
+inline `semantic` when the referenced declaration has a project-specific \
+meaning. Call sites carry an inline `callee_behaviors` when the callee \
+is in-scope. **Each non-pure subject node carries inline \
+`functional_purpose`, `placement_rationale`, a `conditions` array of \
+`{topic, description, kind, evidence_topics}` entries, AND a `threats` \
+array of `{topic, description, falsifies_condition, controlled_by, \
+evidence_topics}` entries describing the adversarial scenarios that \
+violate those conditions. The threats array is the load-bearing input \
+for this task.**\n\
+- `semantics`: top-level map keyed by declaration topic, deduped \
+enumeration of the inline annotations.\n\
+- `called_function_behaviors`: top-level map keyed by callee topic, \
+deduped enumeration of the inline call-site annotations.\n\n\
+The top-level **`non_pure_subjects`** array lists every non-pure subject \
+in this function. For **each subject** in that list, and for **each \
+threat** on that subject, produce zero or more **invariants** — \
+codebase-level defensive properties the threat scenario violates. An \
+invariant names exactly one parent threat it defends via `threat_topic`; \
+one threat can be defended by many invariants. The reasoning chain is \
+purpose → conditions → threats → invariants.\n\n\
+**Phrase each invariant as the property the codebase must enforce, not \
+as a code recommendation.** Good: \"every privileged-state-modifying \
+function checks ownership before mutating state.\" Good: \"the price \
+returned by the oracle is read no more than `STALENESS_WINDOW` seconds \
+after its latest update.\" Bad: \"add `onlyOwner` to this setter.\" Bad: \
+\"implement a staleness check on the price feed.\" The invariant is \
+what must hold; how the code enforces it is a separate concern.\n\n\
+**Distinguishing test:** if your invariant reads as a fix recommendation \
+(\"add a guard,\" \"use a check,\" \"implement X,\" \"enforce by Y\"), \
+restate as the property the fix would enforce (\"the operation is \
+guarded by a check on X,\" \"the operation is preceded by a Y check\"). \
+If your invariant reads as a scenario (\"the caller might bypass X,\" \
+\"the value could be stale\"), you have miswritten a threat — invariants \
+state what holds across the codebase, not what could fail.\n\n\
+**Do not list `evidence_topics`.** Verification of where each invariant \
+actually holds in the code is a later pipeline step. State the property; \
+the codebase locations come later. This keeps the current prompt tight \
+on \"what defense is needed\" without mixing in \"where is the \
+defense.\"\n\n\
+For each invariant, choose a `kind` that names the **category of \
+defensive pattern** being expressed. The kinds are:\n\
+- `AccessGate` — A privilege check (modifier-based role gating, owner \
+check, or other authorization mechanism) gates the operation.\n\
+- `ReentrancyGuard` — A lock, reentrancy guard, or CEI ordering pattern \
+prevents reentry from observing partial state.\n\
+- `PauseGate` — A paused-state check halts the operation under \
+emergency-stop conditions.\n\
+- `BoundedTolerance` — A bound on slippage, deadline, or numeric range \
+constrains the caller's tolerated outcome.\n\
+- `FreshnessCheck` — A staleness check ensures the value read is \
+current relative to the operation's needs.\n\
+- `ConservationCheck` — A conservation invariant (sum, total, or \
+balance equality) holds across the operation.\n\
+- `InputValidation` — Argument well-formedness (zero address, range \
+bounds, sentinel checks) rejects malformed input before it \
+propagates.\n\
+- `Other` — Genuinely novel defense; description carries the structure. \
+Use `Other` only when no kind above fits, rather than force-fitting to a \
+near-match.\n\n\
+**Empty-invariants handling.** If a threat has no codebase-level \
+defense you can identify — because the threat is mitigated by user \
+discretion, by economic incentives, by an external trust assumption, or \
+because the threat is genuinely unmitigable in the current design — \
+emit an empty `invariants` array AND a `no_invariant_rationale` string \
+explaining why. Do not invent defenses to fill the slot; the rationale \
+is the audit signal that you considered the threat and found no \
+defendable property. When you produce one or more invariants for a \
+threat, set `no_invariant_rationale` to `null`.\n\n\
+**One defense can defend multiple threats.** If the same property \
+defends three threats in this function, emit it three times with \
+different `threat_topic` links. Text is cheap; attribution is \
+expensive.\n\n\
+**Use the audit-wide security context.** Any `Security context` block \
+above this prompt names known defenses, role definitions, security \
+considerations, and system-wide invariants specific to this audit. Use \
+it to anchor your invariants in defenses the auditor has already \
+documented and to avoid restating implicit assumptions as new \
+invariants.\n\n\
+Return a JSON object with a `subjects` key whose value is an array. \
+Each entry has:\n\
+- `subject_topic`: a topic ID from the `non_pure_subjects` list\n\
+- `threats`: an array of entries — one per threat on that subject — \
+each with:\n\
+  - `threat_topic`: the threat's A-prefixed topic ID, taken from the \
+subject's inline `threats` array. Citing a threat topic that is not on \
+this subject is invalid and will be dropped.\n\
+  - `invariants`: an array of `{description, kind}` entries (may be \
+empty).\n\
+  - `no_invariant_rationale`: a string explaining the empty-invariants \
+decision, or `null` when `invariants` is non-empty.\n\n\
+If a subject has no threats in the inline `threats` array, omit the \
+subject from the response entirely. If the function has no non-pure \
+subjects with threats, return `{\"subjects\": []}`.\n\n";
+
+#[derive(Deserialize)]
+struct LLMInvariant {
+  description: String,
+  kind: domain::InvariantKind,
+}
+
+#[derive(Deserialize)]
+struct LLMThreatInvariants {
+  threat_topic: String,
+  invariants: Vec<LLMInvariant>,
+  /// `None` when the LLM omits the field or sets it to `null`.
+  /// Validation enforces the mutually-exclusive shape:
+  /// `invariants` non-empty ↔ `no_invariant_rationale` is `None`.
+  #[serde(default)]
+  no_invariant_rationale: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LLMSubjectInvariants {
+  subject_topic: String,
+  threats: Vec<LLMThreatInvariants>,
+}
+
+#[derive(Deserialize)]
+struct LLMInvariantsResponse {
+  subjects: Vec<LLMSubjectInvariants>,
+}
+
+static INVARIANTS_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
+  name: "extract_invariants",
+  schema: json!({
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["subjects"],
+    "properties": {
+      "subjects": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subject_topic", "threats"],
+          "properties": {
+            "subject_topic": { "type": "string" },
+            "threats": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "threat_topic",
+                  "invariants",
+                  "no_invariant_rationale"
+                ],
+                "properties": {
+                  "threat_topic": { "type": "string" },
+                  "invariants": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["description", "kind"],
+                      "properties": {
+                        "description": { "type": "string" },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "AccessGate",
+                            "ReentrancyGuard",
+                            "PauseGate",
+                            "BoundedTolerance",
+                            "FreshnessCheck",
+                            "ConservationCheck",
+                            "InputValidation",
+                            "Other"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "no_invariant_rationale": {
+                    "type": ["string", "null"]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }),
+  empty_response: r#"{"subjects":[]}"#,
+});
+
+/// Result of invariants extraction for one batch (one function in
+/// per-function mode). Each entry pairs a non-pure subject topic with
+/// its per-threat invariant groupings.
+pub struct ParsedInvariants {
+  pub entries: Vec<ParsedSubjectInvariants>,
+}
+
+pub struct ParsedSubjectInvariants {
+  pub subject_topic: topic::Topic,
+  pub threats: Vec<ParsedThreatInvariants>,
+}
+
+pub struct ParsedThreatInvariants {
+  pub threat_topic: topic::Topic,
+  pub invariants: Vec<ParsedInvariant>,
+  /// Populated only when `invariants` is empty; the LLM's explanation
+  /// of why no defendable property was found. The pipeline step posts
+  /// this as an agent comment on the threat topic so the rationale
+  /// lands in the auditor-visible discussion thread (see
+  /// `invariants-step-8.md` Phase 5).
+  pub no_invariant_rationale: Option<String>,
+}
+
+pub struct ParsedInvariant {
+  pub description: String,
+  pub kind: domain::InvariantKind,
+}
+
+/// Validation context derived from the rendered batch JSON. Carries the
+/// expected subject set (from `non_pure_subjects`) and the per-subject
+/// inline-threat map used to validate each `threat_topic` link against
+/// the threats actually attached to the claimed subject.
+struct InvariantsValidationContext {
+  /// Subjects in the batch's top-level `non_pure_subjects` array.
+  expected_subjects: std::collections::HashSet<String>,
+  /// Subject topic id → set of inline threat topic ids stamped on
+  /// that subject by step 7's renderer hook. Used to reject
+  /// `threat_topic` entries that don't actually belong to the claimed
+  /// subject. Mirrors `ThreatsValidationContext.subject_conditions`.
+  subject_threats:
+    std::collections::HashMap<String, std::collections::HashSet<String>>,
+}
+
+/// Run the invariants LLM task against a single function rendered by
+/// `context::render_batch_for_extraction` in `subject` shape. `label`
+/// identifies the function for logs. `security_notes` is the audit-wide
+/// framing rendered by `pipeline::render_security_characteristics` from
+/// the `Security`-kind `CharacteristicTopic` entries produced by
+/// characteristic synthesis (step 5); when `Some` and non-empty, it is
+/// prepended to the prompt as a `Security context:` block so the LLM
+/// anchors its invariants in defenses the auditor has already
+/// documented and avoids restating implicit assumptions. The block is
+/// opaque bulleted text — characteristic topic IDs are deliberately
+/// not surfaced into the prompt, so the LLM produces invariants
+/// grounded in the per-function batch rather than emitting
+/// cross-function references back into the characteristic layer.
+/// Validation drops bad entries but keeps the good — a batch with one
+/// malformed invariant still produces invariants from the rest. Same
+/// drop-and-warn shape as steps 5/6/7.
+pub async fn extract_invariants_from_batch(
+  batch_json: &str,
+  label: &str,
+  security_notes: Option<&str>,
+) -> Result<ParsedInvariants, TaskError> {
+  let prompt = match security_notes {
+    Some(notes) if !notes.trim().is_empty() => format!(
+      "Security context:\n{}\n\n{}Batch:\n{}",
+      notes.trim(),
+      EXTRACT_INVARIANTS_PROMPT,
+      batch_json
+    ),
+    _ => format!("{}Batch:\n{}", EXTRACT_INVARIANTS_PROMPT, batch_json),
+  };
+
+  let log_label = format!("invariants_{}", label);
+  let response = router::chat_completion(
+    TaskSize::Large,
+    router::SYSTEM_MESSAGE_CODE,
+    &prompt,
+    Some(&log_label),
+    Some(&INVARIANTS_SCHEMA),
+  )
+  .await?;
+
+  let wrapper: LLMInvariantsResponse =
+    router::parse_response(&response, "invariants", &prompt)?;
+
+  let ctx = build_invariants_validation_context(batch_json);
+  validate_invariants_coverage(&ctx, &wrapper.subjects, label);
+
+  let entries = parse_invariants_response(wrapper, &ctx, label);
+  Ok(ParsedInvariants { entries })
+}
+
+/// Parse a single-subject batch JSON envelope into the validation
+/// context used by `parse_invariants_response`. Returns an empty
+/// context on malformed JSON — the LLM call's outputs are then accepted
+/// permissively (same defensive default as the threats parser).
+fn build_invariants_validation_context(
+  batch_json: &str,
+) -> InvariantsValidationContext {
+  let mut ctx = InvariantsValidationContext {
+    expected_subjects: std::collections::HashSet::new(),
+    subject_threats: std::collections::HashMap::new(),
+  };
+  let Ok(value) = serde_json::from_str::<serde_json::Value>(batch_json) else {
+    return ctx;
+  };
+  if let Some(arr) = value.get("non_pure_subjects").and_then(|v| v.as_array()) {
+    ctx.expected_subjects = arr
+      .iter()
+      .filter_map(|item| item.as_str().map(String::from))
+      .collect();
+  }
+  if let Some(def) = value.get("subject").and_then(|s| s.get("definition")) {
+    collect_inline_threats_per_subject(def, &mut ctx.subject_threats);
+  }
+  ctx
+}
+
+/// Walk the rendered AST `definition` subtree and, for each node that
+/// carries both an `id` (the subject's topic) and a `threats` array
+/// (stamped by the step-7 renderer hook), map the subject topic to the
+/// set of threat topic IDs on that subject. Used by
+/// `parse_invariants_response` to enforce that each `threat_topic` link
+/// refers to a threat actually attached to the claimed subject. Same
+/// shape as `collect_inline_conditions_per_subject`, different field.
+fn collect_inline_threats_per_subject(
+  v: &serde_json::Value,
+  out: &mut std::collections::HashMap<
+    String,
+    std::collections::HashSet<String>,
+  >,
+) {
+  match v {
+    serde_json::Value::Object(map) => {
+      if let (Some(id), Some(threats)) = (
+        map.get("id").and_then(|v| v.as_str()),
+        map.get("threats").and_then(|v| v.as_array()),
+      ) {
+        let set: std::collections::HashSet<String> = threats
+          .iter()
+          .filter_map(|t| {
+            t.get("topic").and_then(|tt| tt.as_str()).map(String::from)
+          })
+          .collect();
+        if !set.is_empty() {
+          out.entry(id.to_string()).or_default().extend(set);
+        }
+      }
+      for value in map.values() {
+        collect_inline_threats_per_subject(value, out);
+      }
+    }
+    serde_json::Value::Array(arr) => {
+      for elem in arr {
+        collect_inline_threats_per_subject(elem, out);
+      }
+    }
+    _ => {}
+  }
+}
+
+/// Parse + dedupe + validate the raw LLM response against the batch's
+/// rendered envelope. Same "drop-on-defect, warn-on-defect, keep what
+/// remains" shape as `parse_threats_response`.
+fn parse_invariants_response(
+  wrapper: LLMInvariantsResponse,
+  ctx: &InvariantsValidationContext,
+  label: &str,
+) -> Vec<ParsedSubjectInvariants> {
+  let mut entries: Vec<ParsedSubjectInvariants> =
+    Vec::with_capacity(wrapper.subjects.len());
+  let mut seen_subjects: std::collections::HashSet<topic::Topic> =
+    std::collections::HashSet::new();
+  let mut duplicates: Vec<String> = Vec::new();
+  let mut rejected_unexpected: Vec<String> = Vec::new();
+  let mut bad_threat_topics: Vec<String> = Vec::new();
+  let mut unknown_threat_links: Vec<String> = Vec::new();
+  let mut empty_invariants_without_rationale: Vec<String> = Vec::new();
+  let mut rationale_dropped_alongside_invariants: Vec<String> = Vec::new();
+  let mut empty_descriptions: Vec<String> = Vec::new();
+  let mut recommendation_descriptions: Vec<String> = Vec::new();
+
+  for s in wrapper.subjects {
+    let subject_topic = match topic::parse_topic(&s.subject_topic) {
+      Ok(t @ topic::Topic::Node(_)) => t,
+      Ok(other) => {
+        tracing::warn!(
+          batch = %label,
+          "invariants: subject_topic {:?} is not an N-prefixed topic; \
+           skipping",
+          other
+        );
+        continue;
+      }
+      Err(e) => {
+        tracing::warn!(
+          batch = %label,
+          "invariants: failed to parse subject_topic {:?}: {}; skipping",
+          s.subject_topic,
+          e
+        );
+        continue;
+      }
+    };
+    if !ctx.expected_subjects.is_empty()
+      && !ctx.expected_subjects.contains(&s.subject_topic)
+    {
+      rejected_unexpected.push(s.subject_topic);
+      continue;
+    }
+    if !seen_subjects.insert(subject_topic) {
+      duplicates.push(s.subject_topic);
+      continue;
+    }
+
+    // Subject-scoped threat set from the renderer's inline stamp.
+    // `None` here means the subject node had no `threats` array in the
+    // rendered batch JSON (either step 7 produced nothing for this
+    // subject, or the renderer omitted it). Under the spec's
+    // "threat_topic must appear in the subject's inline threats array"
+    // rule, no link can be valid when the array is absent. We gate the
+    // strict cross-check on a populated `expected_subjects` set so a
+    // fully-malformed batch JSON (where every map ends up empty) still
+    // produces results — the dedupe and topic-prefix checks above
+    // remain the safety net in that case. Mirrors the threats parser's
+    // same-shape fallback.
+    let allowed_threats = ctx.subject_threats.get(&s.subject_topic);
+    let cross_check_active = !ctx.expected_subjects.is_empty();
+
+    let mut threats: Vec<ParsedThreatInvariants> =
+      Vec::with_capacity(s.threats.len());
+    for ti in s.threats {
+      let threat_topic = match topic::parse_topic(&ti.threat_topic) {
+        Ok(t @ topic::Topic::AdversarialProperty(_)) => t,
+        _ => {
+          bad_threat_topics.push(ti.threat_topic);
+          continue;
+        }
+      };
+      if cross_check_active {
+        let valid_link = allowed_threats
+          .map(|allowed| allowed.contains(&ti.threat_topic))
+          .unwrap_or(false);
+        if !valid_link {
+          unknown_threat_links.push(ti.threat_topic);
+          continue;
+        }
+      }
+
+      let mut invariants: Vec<ParsedInvariant> =
+        Vec::with_capacity(ti.invariants.len());
+      for inv in ti.invariants {
+        let description = inv.description.trim().to_string();
+        if description.is_empty() {
+          empty_descriptions
+            .push(format!("{}::{}", s.subject_topic, ti.threat_topic));
+          continue;
+        }
+        if description_reads_as_recommendation(&description) {
+          // Warn but keep — recommendation-style descriptions still
+          // carry useful audit content. If the warn rate spikes,
+          // tighten the prompt rather than dropping output.
+          recommendation_descriptions.push(description.clone());
+        }
+        invariants.push(ParsedInvariant {
+          description,
+          kind: inv.kind,
+        });
+      }
+
+      // Enforce the mutually-exclusive shape between `invariants` and
+      // `no_invariant_rationale`. Same logic as the threats parser:
+      // empty + None drops the entry; non-empty + Some drops the
+      // rationale and keeps the invariants.
+      let no_invariant_rationale = match (
+        invariants.is_empty(),
+        ti.no_invariant_rationale.as_ref().map(|s| s.trim()),
+      ) {
+        (true, Some(r)) if !r.is_empty() => Some(r.to_string()),
+        (true, _) => {
+          empty_invariants_without_rationale.push(ti.threat_topic.clone());
+          continue;
+        }
+        (false, Some(r)) if !r.is_empty() => {
+          rationale_dropped_alongside_invariants.push(ti.threat_topic.clone());
+          // Drop the rationale; keep the invariants.
+          None
+        }
+        (false, _) => None,
+      };
+
+      threats.push(ParsedThreatInvariants {
+        threat_topic,
+        invariants,
+        no_invariant_rationale,
+      });
+    }
+
+    if threats.is_empty() {
+      // A subject with zero kept threat entries is a no-signal entry —
+      // drop it from the output (the seen-marker still blocks
+      // duplicates, matching the threats parser's "first wins"
+      // semantics).
+      continue;
+    }
+
+    entries.push(ParsedSubjectInvariants {
+      subject_topic,
+      threats,
+    });
+  }
+
+  if !duplicates.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "invariants: LLM returned {} duplicate subject_topic(s) (kept \
+       first, dropped subsequent): {:?}",
+      duplicates.len(),
+      duplicates
+    );
+  }
+  if !rejected_unexpected.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "invariants: rejected {} subject_topic(s) outside the batch's \
+       non_pure_subjects list: {:?}",
+      rejected_unexpected.len(),
+      rejected_unexpected
+    );
+  }
+  if !bad_threat_topics.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "invariants: dropped {} entry(ies) with malformed or non-A-prefixed \
+       threat_topic: {:?}",
+      bad_threat_topics.len(),
+      bad_threat_topics
+    );
+  }
+  if !unknown_threat_links.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "invariants: dropped {} entry(ies) whose threat_topic is not on \
+       the claimed subject: {:?}",
+      unknown_threat_links.len(),
+      unknown_threat_links
+    );
+  }
+  if !empty_invariants_without_rationale.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "invariants: dropped {} threat(s) with empty invariants and no \
+       no_invariant_rationale: {:?}",
+      empty_invariants_without_rationale.len(),
+      empty_invariants_without_rationale
+    );
+  }
+  if !rationale_dropped_alongside_invariants.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "invariants: dropped no_invariant_rationale on {} threat(s) that \
+       also produced invariants (kept the invariants, discarded the \
+       contradictory rationale): {:?}",
+      rationale_dropped_alongside_invariants.len(),
+      rationale_dropped_alongside_invariants
+    );
+  }
+  if !empty_descriptions.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "invariants: dropped {} invariant(s) with empty descriptions: {:?}",
+      empty_descriptions.len(),
+      empty_descriptions
+    );
+  }
+  if !recommendation_descriptions.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "invariants: {} invariant description(s) read as code \
+       recommendations (the property statement should describe what \
+       must hold, not what to add; kept the invariant — tighten the \
+       prompt if this rate spikes)",
+      recommendation_descriptions.len()
+    );
+  }
+
+  entries
+}
+
+/// Log warnings for any input subject with non-empty inline threats
+/// missing from the LLM output, and for any output subject not in the
+/// input list. Subjects without inline threats are not expected in the
+/// response — they have nothing to defend. Same shape as the threats
+/// coverage validator.
+fn validate_invariants_coverage(
+  ctx: &InvariantsValidationContext,
+  got: &[LLMSubjectInvariants],
+  label: &str,
+) {
+  if ctx.expected_subjects.is_empty() {
+    return;
+  }
+  let received: std::collections::HashSet<&str> =
+    got.iter().map(|s| s.subject_topic.as_str()).collect();
+  // Subjects expected in the response: those in `non_pure_subjects` that
+  // actually have inline threats. Subjects without threats have nothing
+  // for the LLM to defend, so missing-from-response is not a warning.
+  let missing: Vec<&String> = ctx
+    .subject_threats
+    .keys()
+    .filter(|k| {
+      ctx.expected_subjects.contains(*k) && !received.contains(k.as_str())
+    })
+    .collect();
+  let extra: Vec<&str> = received
+    .iter()
+    .copied()
+    .filter(|s| !ctx.expected_subjects.contains(*s))
+    .collect();
+  if !missing.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "invariants: {} subject(s) with inline threats in batch were not \
+       addressed by the LLM: {:?}",
+      missing.len(),
+      missing
+    );
+  }
+  if !extra.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "invariants: {} subject(s) in LLM output were not in the batch's \
+       non_pure_subjects list: {:?}",
+      extra.len(),
+      extra
+    );
+  }
+}
+
+/// Lightweight heuristic: does the description's opening read as a code
+/// recommendation rather than a property statement? Used as a
+/// prompt-quality signal — flagged invariants are still kept (per spec,
+/// the warn-but-keep exception), since a recommendation-style
+/// description still carries useful audit content. The right
+/// intervention if the warn rate spikes is tightening the prompt rather
+/// than dropping output.
+fn description_reads_as_recommendation(desc: &str) -> bool {
+  let trimmed = desc.trim_start().to_lowercase();
+  const RECOMMENDATION_PREFIXES: &[&str] = &[
+    "add ",
+    "use ",
+    "implement ",
+    "include ",
+    "insert ",
+    "introduce ",
+    "wrap with ",
+    "wrap in ",
+    "apply ",
+    "enforce by ",
+    "ensure by ",
+  ];
+  for prefix in RECOMMENDATION_PREFIXES {
+    if trimmed.starts_with(prefix) {
+      return true;
     }
   }
   false
@@ -5807,6 +6500,786 @@ mod threats_parser_tests {
        ThreatActor variants. Update both together — the schema is what \
        the LLM is constrained against; the Rust enum is what serde \
        deserializes the response into."
+    );
+  }
+}
+
+#[cfg(test)]
+mod invariants_parser_tests {
+  use super::*;
+
+  /// Construct a single-subject batch envelope with one non-pure subject
+  /// (`subject_id`) carrying an inline `threats` array (per the step-7
+  /// renderer hook). `threat_ids` are A-prefixed topic IDs the renderer
+  /// would have stamped on the subject's `threats` array; they become
+  /// the valid `threat_topic` link set. `member_id` is the containing
+  /// function's topic. The resulting JSON satisfies
+  /// `build_invariants_validation_context`.
+  fn build_batch_envelope(
+    member_id: &str,
+    subject_id: &str,
+    threat_ids: &[&str],
+  ) -> String {
+    let threats: Vec<serde_json::Value> = threat_ids
+      .iter()
+      .map(|t| {
+        json!({
+          "topic": t,
+          "description": "an adversarial scenario",
+          "falsifies_condition": "A1",
+          "controlled_by": "Caller",
+          "evidence_topics": [],
+        })
+      })
+      .collect();
+
+    let subject_node = json!({
+      "type": "assignment",
+      "id": subject_id,
+      "threats": threats,
+    });
+    let envelope = json!({
+      "non_pure_subjects": [subject_id],
+      "subject": {
+        "topic": member_id,
+        "name": "f",
+        "kind": "function",
+        "modifiers": [],
+        "definition": {
+          "type": "function_definition",
+          "id": member_id,
+          "body": { "type": "block", "statements": [subject_node] },
+        },
+        "semantics": {},
+        "called_function_behaviors": {},
+      }
+    });
+    serde_json::to_string(&envelope).unwrap()
+  }
+
+  /// End-to-end parse-and-validate: parses the LLM response then runs it
+  /// through `parse_invariants_response`. Mirrors the production path
+  /// without the LLM call.
+  fn run_parse(
+    json_response: &str,
+    batch_json: &str,
+  ) -> Vec<ParsedSubjectInvariants> {
+    let wrapper: LLMInvariantsResponse =
+      serde_json::from_str(json_response).expect("malformed test JSON");
+    let ctx = build_invariants_validation_context(batch_json);
+    parse_invariants_response(wrapper, &ctx, "test")
+  }
+
+  // --------- end-to-end response parsing ---------
+
+  #[test]
+  fn parser_round_trips_well_formed_response() {
+    let batch = build_batch_envelope("N100", "N10", &["A5", "A6"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"every privileged-state-modifying function checks ownership before mutating state","kind":"AccessGate"},
+          {"description":"the price returned by the oracle is read no more than STALENESS_WINDOW seconds after its latest update","kind":"FreshnessCheck"}
+        ],"no_invariant_rationale":null},
+        {"threat_topic":"A6","invariants":[],"no_invariant_rationale":"the threat is mitigated by economic incentives; no codebase-level defense applies"}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].subject_topic, topic::new_node_topic(&10));
+    assert_eq!(entries[0].threats.len(), 2);
+
+    let t0 = &entries[0].threats[0];
+    assert_eq!(t0.threat_topic, topic::new_adversarial_property_topic(5));
+    assert_eq!(t0.invariants.len(), 2);
+    assert!(t0.no_invariant_rationale.is_none());
+    assert_eq!(t0.invariants[0].kind, domain::InvariantKind::AccessGate);
+    assert_eq!(t0.invariants[1].kind, domain::InvariantKind::FreshnessCheck);
+
+    let t1 = &entries[0].threats[1];
+    assert_eq!(t1.threat_topic, topic::new_adversarial_property_topic(6));
+    assert!(t1.invariants.is_empty());
+    assert_eq!(
+      t1.no_invariant_rationale.as_deref(),
+      Some(
+        "the threat is mitigated by economic incentives; no codebase-level \
+         defense applies"
+      )
+    );
+  }
+
+  #[test]
+  fn parser_multiple_invariants_on_same_threat_kept() {
+    // 1:N — one threat can be defended by many invariants. All kept.
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"property A","kind":"AccessGate"},
+          {"description":"property B","kind":"ReentrancyGuard"},
+          {"description":"property C","kind":"PauseGate"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].threats.len(), 1);
+    assert_eq!(entries[0].threats[0].invariants.len(), 3);
+  }
+
+  #[test]
+  fn parser_same_description_on_multiple_threats_kept_separately() {
+    // Cross-cutting defenses are expressed as duplicate descriptions
+    // with different threat_topic links. Both must survive.
+    let batch = build_batch_envelope("N100", "N10", &["A5", "A6"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"every state-mutating function checks ownership","kind":"AccessGate"}
+        ],"no_invariant_rationale":null},
+        {"threat_topic":"A6","invariants":[
+          {"description":"every state-mutating function checks ownership","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].threats.len(), 2);
+    assert_eq!(entries[0].threats[0].invariants.len(), 1);
+    assert_eq!(entries[0].threats[1].invariants.len(), 1);
+    assert_eq!(
+      entries[0].threats[0].invariants[0].description,
+      entries[0].threats[1].invariants[0].description
+    );
+  }
+
+  #[test]
+  fn parser_rejects_subject_not_in_non_pure_subjects() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"ok","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]},
+      {"subject_topic":"N999","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"hallucinated subject","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].subject_topic, topic::new_node_topic(&10));
+  }
+
+  #[test]
+  fn parser_dedupes_repeated_subject_first_wins() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"first","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]},
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"second","kind":"ReentrancyGuard"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].threats.len(), 1);
+    assert_eq!(entries[0].threats[0].invariants.len(), 1);
+    assert_eq!(entries[0].threats[0].invariants[0].description, "first");
+  }
+
+  #[test]
+  fn parser_skips_malformed_subject_topic() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"NOT_A_TOPIC","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"ok","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert!(entries.is_empty());
+  }
+
+  #[test]
+  fn parser_skips_non_node_subject_topic() {
+    // An A-prefixed topic in subject_topic must be rejected (subjects
+    // are AST nodes only).
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"A5","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"ok","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert!(entries.is_empty());
+  }
+
+  #[test]
+  fn parser_drops_threat_topic_not_on_subject() {
+    // The subject's inline threats are {A5}. A response citing A99
+    // must be dropped (the LLM hallucinated a non-existent threat link).
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A99","invariants":[
+          {"description":"orphan link","kind":"AccessGate"}
+        ],"no_invariant_rationale":null},
+        {"threat_topic":"A5","invariants":[
+          {"description":"valid link","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].threats.len(), 1);
+    assert_eq!(
+      entries[0].threats[0].threat_topic,
+      topic::new_adversarial_property_topic(5)
+    );
+  }
+
+  #[test]
+  fn parser_drops_non_a_prefixed_threat_topic() {
+    // threat_topic must be A-prefixed. N-prefixed or malformed values
+    // drop the threat entry.
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"N5","invariants":[
+          {"description":"wrong prefix","kind":"AccessGate"}
+        ],"no_invariant_rationale":null},
+        {"threat_topic":"GARBAGE","invariants":[
+          {"description":"unparseable","kind":"AccessGate"}
+        ],"no_invariant_rationale":null},
+        {"threat_topic":"A5","invariants":[
+          {"description":"valid","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].threats.len(), 1);
+    assert_eq!(
+      entries[0].threats[0].threat_topic,
+      topic::new_adversarial_property_topic(5)
+    );
+  }
+
+  #[test]
+  fn parser_drops_empty_invariants_without_rationale() {
+    let batch = build_batch_envelope("N100", "N10", &["A5", "A6"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[],"no_invariant_rationale":null},
+        {"threat_topic":"A6","invariants":[
+          {"description":"kept","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].threats.len(), 1);
+    assert_eq!(
+      entries[0].threats[0].threat_topic,
+      topic::new_adversarial_property_topic(6)
+    );
+  }
+
+  #[test]
+  fn parser_keeps_empty_invariants_with_rationale() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[],
+         "no_invariant_rationale":"the threat is unmitigable in the current design"}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    let t = &entries[0].threats[0];
+    assert!(t.invariants.is_empty());
+    assert_eq!(
+      t.no_invariant_rationale.as_deref(),
+      Some("the threat is unmitigable in the current design")
+    );
+  }
+
+  #[test]
+  fn parser_drops_rationale_when_invariants_present() {
+    // Mutually-exclusive shape: non-empty invariants + Some(rationale)
+    // means the LLM contradicted itself. Keep the invariants, drop
+    // the rationale.
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"a property","kind":"AccessGate"}
+        ],"no_invariant_rationale":"this should be discarded"}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    let t = &entries[0].threats[0];
+    assert_eq!(t.invariants.len(), 1);
+    assert!(
+      t.no_invariant_rationale.is_none(),
+      "rationale must be dropped when invariants are present"
+    );
+  }
+
+  #[test]
+  fn parser_accepts_each_invariant_kind_value() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"a","kind":"AccessGate"},
+          {"description":"b","kind":"ReentrancyGuard"},
+          {"description":"c","kind":"PauseGate"},
+          {"description":"d","kind":"BoundedTolerance"},
+          {"description":"e","kind":"FreshnessCheck"},
+          {"description":"f","kind":"ConservationCheck"},
+          {"description":"g","kind":"InputValidation"},
+          {"description":"h","kind":"Other"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    let kinds: Vec<domain::InvariantKind> = entries[0].threats[0]
+      .invariants
+      .iter()
+      .map(|i| i.kind)
+      .collect();
+    assert_eq!(
+      kinds,
+      vec![
+        domain::InvariantKind::AccessGate,
+        domain::InvariantKind::ReentrancyGuard,
+        domain::InvariantKind::PauseGate,
+        domain::InvariantKind::BoundedTolerance,
+        domain::InvariantKind::FreshnessCheck,
+        domain::InvariantKind::ConservationCheck,
+        domain::InvariantKind::InputValidation,
+        domain::InvariantKind::Other,
+      ]
+    );
+  }
+
+  #[test]
+  fn parser_rejects_off_list_kind() {
+    // Schema enforces this at the LLM layer; serde is the safety net.
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"x","kind":"NotARealKind"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let result: Result<LLMInvariantsResponse, _> = serde_json::from_str(json);
+    assert!(result.is_err(), "off-list kind must fail deserialization");
+  }
+
+  #[test]
+  fn parser_drops_invariant_with_empty_description() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"   ","kind":"AccessGate"},
+          {"description":"good","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries[0].threats[0].invariants.len(), 1);
+    assert_eq!(entries[0].threats[0].invariants[0].description, "good");
+  }
+
+  #[test]
+  fn parser_keeps_recommendation_style_description_and_warns() {
+    // Per spec: descriptions reading as code recommendations are
+    // kept (warning logged). The warn-rate is the prompt-quality
+    // signal, not a drop condition.
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"add a check on the caller's ownership before mutating state","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    let inv = &entries[0].threats[0].invariants[0];
+    assert_eq!(
+      inv.description,
+      "add a check on the caller's ownership before mutating state"
+    );
+  }
+
+  #[test]
+  fn description_reads_as_recommendation_detects_common_prefixes() {
+    assert!(description_reads_as_recommendation("add a guard on X"));
+    assert!(description_reads_as_recommendation("Add a guard on X"));
+    assert!(description_reads_as_recommendation("use SafeMath here"));
+    assert!(description_reads_as_recommendation("implement X check"));
+    assert!(description_reads_as_recommendation(
+      "include a nonReentrant modifier"
+    ));
+    assert!(description_reads_as_recommendation(
+      "insert a staleness check"
+    ));
+    assert!(description_reads_as_recommendation(
+      "introduce a deadline parameter"
+    ));
+    assert!(description_reads_as_recommendation(
+      "wrap with a nonReentrant modifier"
+    ));
+    assert!(description_reads_as_recommendation(
+      "wrap in a try-catch block"
+    ));
+    assert!(description_reads_as_recommendation("apply a bounds check"));
+    assert!(description_reads_as_recommendation(
+      "enforce by adding a modifier"
+    ));
+    assert!(description_reads_as_recommendation(
+      "ensure by checking the price freshness"
+    ));
+  }
+
+  #[test]
+  fn description_reads_as_recommendation_skips_property_statements() {
+    assert!(!description_reads_as_recommendation(
+      "every privileged-state-modifying function checks ownership"
+    ));
+    assert!(!description_reads_as_recommendation(
+      "the price returned by the oracle is read no more than X seconds after its latest update"
+    ));
+    assert!(!description_reads_as_recommendation(
+      "the operation is guarded by a check on the caller's ownership"
+    ));
+    // Word-boundary check: a description starting with "addition" must
+    // not match "add" — the trailing space in the prefix protects this.
+    assert!(!description_reads_as_recommendation(
+      "addition of two balances is bounded by the contract's supply"
+    ));
+  }
+
+  #[test]
+  fn parser_handles_empty_subjects_array() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[]}"#;
+    let entries = run_parse(json, &batch);
+    assert!(entries.is_empty());
+  }
+
+  #[test]
+  fn parser_rejects_all_links_when_subject_has_no_inline_threats() {
+    // Batch is well-formed (expected_subjects populated) but the
+    // subject node was rendered without a `threats` array (step 7
+    // produced no threats for this subject, or the renderer omitted
+    // it). Under the strict "must appear in the inline threats array"
+    // rule, no threat_topic can be valid — every entry must be
+    // dropped. Same intent as threats parser's strict membership
+    // check.
+    let envelope = serde_json::json!({
+      "non_pure_subjects": ["N10"],
+      "subject": {
+        "topic": "N100",
+        "name": "f",
+        "kind": "function",
+        "modifiers": [],
+        // Subject node has `id` but no `threats` field.
+        "definition": {
+          "type": "function_definition",
+          "id": "N100",
+          "body": {
+            "type": "block",
+            "statements": [
+              { "type": "assignment", "id": "N10" }
+            ]
+          }
+        }
+      }
+    });
+    let batch = serde_json::to_string(&envelope).unwrap();
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"hallucinated link","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert!(
+      entries.is_empty(),
+      "subject without inline threats must reject every threat_topic link"
+    );
+  }
+
+  #[test]
+  fn parser_falls_back_permissive_when_batch_json_malformed() {
+    // Malformed batch JSON yields an empty validation context — no
+    // expected_subjects, no subject_threats. The parser falls back
+    // to permissive: only the structural checks (N-prefixed subject,
+    // A-prefixed threat_topic) gate output. Same "accept all when
+    // input list is empty" fallback the threats parser uses for
+    // robustness against renderer changes.
+    let batch = "{ not valid json";
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"a property","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].subject_topic, topic::new_node_topic(&10));
+    assert_eq!(
+      entries[0].threats[0].threat_topic,
+      topic::new_adversarial_property_topic(5)
+    );
+  }
+
+  #[test]
+  fn parser_drops_subject_when_every_threat_was_dropped() {
+    // The threat's threat_topic is invalid (non-A-prefixed), so the
+    // threat entry is dropped. With zero kept threats, the entire
+    // subject must be dropped from output — same "no signal" policy
+    // as the threats parser.
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"N5","invariants":[
+          {"description":"wrong prefix","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert!(entries.is_empty());
+  }
+
+  #[test]
+  fn parser_no_invariant_rationale_trimmed_and_empty_treated_as_absent() {
+    // Whitespace-only rationale alongside empty invariants is treated
+    // as "no rationale" → threat dropped. The mutually-exclusive
+    // shape requires *meaningful* content in the rationale slot.
+    let batch = build_batch_envelope("N100", "N10", &["A5", "A6"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[],"no_invariant_rationale":"   \n  "},
+        {"threat_topic":"A6","invariants":[],"no_invariant_rationale":"   real reason   "}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].threats.len(), 1);
+    let t = &entries[0].threats[0];
+    assert_eq!(t.threat_topic, topic::new_adversarial_property_topic(6));
+    assert_eq!(t.no_invariant_rationale.as_deref(), Some("real reason"));
+  }
+
+  #[test]
+  fn parser_no_invariant_rationale_field_absence_handled_gracefully() {
+    // `#[serde(default)]` lets the parser handle field absence
+    // gracefully. Schema strict mode requires the field, but the
+    // serde-level guard is the safety net if the LLM (or a test
+    // fixture) omits it. Field absent + invariants present = no-op
+    // rationale-wise.
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"a property","kind":"AccessGate"}
+        ]}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].threats[0].no_invariant_rationale.is_none());
+  }
+
+  #[test]
+  fn build_context_collects_expected_subjects_and_threats() {
+    let batch = build_batch_envelope("N100", "N10", &["A5", "A6"]);
+    let ctx = build_invariants_validation_context(&batch);
+    assert!(ctx.expected_subjects.contains("N10"));
+    let threats = ctx
+      .subject_threats
+      .get("N10")
+      .expect("subject N10 inline threats present");
+    assert!(threats.contains("A5"));
+    assert!(threats.contains("A6"));
+  }
+
+  #[test]
+  fn build_context_subject_with_empty_threats_array_absent_from_map() {
+    // The renderer hook omits the `threats` field when the inline
+    // array is empty. The collector mirrors that: a subject node
+    // with no `threats` key — or with an empty array — produces no
+    // entry in `subject_threats`. This makes the "subject not in
+    // subject_threats" state in `parse_invariants_response` the
+    // canonical signal for "no inline threats on this subject."
+    let envelope = serde_json::json!({
+      "non_pure_subjects": ["N10"],
+      "subject": {
+        "topic": "N100",
+        "definition": {
+          "type": "function_definition",
+          "id": "N100",
+          "body": {
+            "type": "block",
+            "statements": [
+              // No threats key.
+              { "type": "assignment", "id": "N10" },
+              // Empty threats array — also absent from map.
+              { "type": "assignment", "id": "N11", "threats": [] },
+            ]
+          }
+        }
+      }
+    });
+    let batch = serde_json::to_string(&envelope).unwrap();
+    let ctx = build_invariants_validation_context(&batch);
+    assert!(ctx.subject_threats.is_empty());
+    assert!(ctx.expected_subjects.contains("N10"));
+  }
+
+  #[test]
+  fn build_context_returns_empty_on_malformed_json() {
+    let ctx = build_invariants_validation_context("{ malformed");
+    assert!(ctx.expected_subjects.is_empty());
+    assert!(ctx.subject_threats.is_empty());
+  }
+
+  #[test]
+  fn validate_coverage_no_op_when_expected_empty() {
+    let ctx = InvariantsValidationContext {
+      expected_subjects: std::collections::HashSet::new(),
+      subject_threats: std::collections::HashMap::new(),
+    };
+    let got = vec![LLMSubjectInvariants {
+      subject_topic: "N10".to_string(),
+      threats: vec![],
+    }];
+    validate_invariants_coverage(&ctx, &got, "test");
+  }
+
+  #[test]
+  fn validate_coverage_only_warns_about_subjects_with_inline_threats() {
+    // Subjects in non_pure_subjects but without inline threats are
+    // not expected to appear in the response. Only subjects in
+    // `subject_threats` should trigger a missing-from-response
+    // warning. This test exercises the no-panic + no-throw path; the
+    // missing/extra log lines are themselves validated by the
+    // threats coverage equivalent.
+    let mut expected = std::collections::HashSet::new();
+    expected.insert("N10".to_string());
+    expected.insert("N20".to_string());
+    let mut subject_threats = std::collections::HashMap::new();
+    let mut n10_threats = std::collections::HashSet::new();
+    n10_threats.insert("A5".to_string());
+    subject_threats.insert("N10".to_string(), n10_threats);
+    // N20 has no inline threats — missing from response is fine.
+    let ctx = InvariantsValidationContext {
+      expected_subjects: expected,
+      subject_threats,
+    };
+    // Empty LLM response: warns about N10 (has threats, missing)
+    // but does not warn about N20.
+    validate_invariants_coverage(&ctx, &[], "test");
+    // Extra subject in response: also handled.
+    let got = vec![LLMSubjectInvariants {
+      subject_topic: "N99".to_string(),
+      threats: vec![],
+    }];
+    validate_invariants_coverage(&ctx, &got, "test");
+  }
+
+  // --------- schema drift guard ---------
+
+  /// Drift guard: the JSON schema's `kind.enum` array (which the LLM
+  /// is constrained against) must exactly match the Rust
+  /// `InvariantKind` variants by serialized name, in declaration
+  /// order. Same shape as the matching `THREATS_SCHEMA` test — see
+  /// that test's docstring for why this guard is load-bearing.
+  #[test]
+  fn schema_kind_enum_matches_rust_variants_exactly() {
+    use domain::InvariantKind;
+
+    let rust_variants: Vec<String> = [
+      InvariantKind::AccessGate,
+      InvariantKind::ReentrancyGuard,
+      InvariantKind::PauseGate,
+      InvariantKind::BoundedTolerance,
+      InvariantKind::FreshnessCheck,
+      InvariantKind::ConservationCheck,
+      InvariantKind::InputValidation,
+      InvariantKind::Other,
+    ]
+    .into_iter()
+    .map(|k| {
+      serde_json::to_value(k)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
+    })
+    .collect();
+
+    fn _exhaustiveness_guard(k: InvariantKind) {
+      match k {
+        InvariantKind::AccessGate
+        | InvariantKind::ReentrancyGuard
+        | InvariantKind::PauseGate
+        | InvariantKind::BoundedTolerance
+        | InvariantKind::FreshnessCheck
+        | InvariantKind::ConservationCheck
+        | InvariantKind::InputValidation
+        | InvariantKind::Other => (),
+      }
+    }
+
+    let kind_enum = INVARIANTS_SCHEMA
+      .schema
+      .pointer(
+        "/properties/subjects/items/properties/threats/items/properties/invariants/items/properties/kind/enum",
+      )
+      .expect(
+        "INVARIANTS_SCHEMA shape changed; update the JSON pointer in this \
+         test to match",
+      )
+      .as_array()
+      .expect("kind.enum must be a JSON array");
+
+    let schema_strings: Vec<String> = kind_enum
+      .iter()
+      .map(|v| {
+        v.as_str()
+          .expect("kind.enum entries must be strings")
+          .to_string()
+      })
+      .collect();
+
+    assert_eq!(
+      schema_strings, rust_variants,
+      "INVARIANTS_SCHEMA's kind.enum drifted from the Rust \
+       InvariantKind variants. Update both together — the schema is \
+       what the LLM is constrained against; the Rust enum is what \
+       serde deserializes the response into."
     );
   }
 }
