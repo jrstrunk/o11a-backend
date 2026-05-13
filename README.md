@@ -126,7 +126,7 @@ The security model is the structured representation of what the documentation cl
 
 ### Initial Generation
 
-The security model is initially seeded from project documentation and source code through an automated pipeline of eight steps:
+The security model is initially seeded from project documentation and source code through an automated pipeline of nine steps:
 
 1. Semantic Linking
 2. Requirement Extraction
@@ -136,8 +136,9 @@ The security model is initially seeded from project documentation and source cod
 6. Functional Purpose & Placement Generation
 7. Condition Generation
 8. Threat Generation
+9. Invariant Generation
 
-Step 1 produces the project-specific vocabulary that every later step relies on. Steps 2–5 build the documentation-and-code-derived spec layer (requirements, behaviors, features, characteristics). Steps 6–8 build the adversarial layer on every non-pure source subject (purpose+placement, then conditions, then threats). Each step's output is durable and individually addressable, so any one of them can be re-run on its own when its inputs change without re-running the rest.
+Step 1 produces the project-specific vocabulary that every later step relies on. Steps 2–5 build the documentation-and-code-derived spec layer (requirements, behaviors, features, characteristics). Steps 6–9 build the adversarial layer on every non-pure source subject (purpose+placement, then conditions, then threats, then invariants). Each step's output is durable and individually addressable, so any one of them can be re-run on its own when its inputs change without re-running the rest.
 
 **1. Semantic Linking.** Documentation sections are linked to source code declarations to establish functional semantics — the project-specific meaning of each declaration. This step runs before requirement and behavior extraction so that both can be generated with business-level meaning. Functional semantics are injected into the rendered documentation that requirement extraction sees, so inline code references like `pID` appear annotated with their project-specific meaning (e.g., "participation identifier"), giving the LLM proper context to produce behavioral requirements without using declaration names.
 
@@ -169,9 +170,11 @@ Where requirements and invariants both describe things the code must do, they se
 
 **8. Threat Generation.** For each non-pure subject, threats are generated as adversarial inversions of its conditions: each threat states a scenario in which a specific condition fails to hold, and links back to the condition it falsifies. The set of `Security`-kind characteristics from step 5 is included as the system-wide adversarial context for this step, replacing the raw `security.md` blob that earlier versions of the pipeline used. A threat that finds no plausible falsifying scenario for a condition records a `no_threat_rationale` so the assertion's review carries an explicit audit signal that it was considered and discharged. See "Managing Threats and Invariants" for the design rationale.
 
+**9. Invariant Generation.** For each threat produced in step 8, the pipeline generates zero or more invariants — codebase-level defensive properties stated against the threat. Each invariant is an "X must Y" / "every Z does W" property statement, carries a `kind` from the closed eight-variant `InvariantKind` enum (`AccessGate`, `ReentrancyGuard`, `PauseGate`, `BoundedTolerance`, `FreshnessCheck`, `ConservationCheck`, `InputValidation`, `Other`), inherits `subject_topic` and `severity` from the parent threat at write time, and names exactly one parent threat (one threat can carry many invariants). Verification of whether each invariant actually holds in the code — and where else in scope it must hold — is a deferred later pipeline step (re-check propagation). When the LLM finds no defendable property for a threat, it records a `no_invariant_rationale` so the threat's review carries an explicit audit signal that it was considered. See "Managing Threats and Invariants" for the design rationale.
+
 ### Out-of-Scope and Dependency Code
 
-The source-driven steps of the initial generation pipeline — behavior extraction, feature synthesis, functional purpose & placement generation, condition generation, and threat generation — run only against **in-scope contracts**: the contracts listed in the audit's `scope.txt` file. Out-of-scope contracts and library dependencies (OpenZeppelin, Solmate, etc.) are excluded from these steps even though they are present in the analyzed codebase. The documentation-driven steps (requirement extraction, characteristic synthesis) operate on the audit's documentation and `security.md` regardless of which contracts those documents reference. Semantic linking sits in between: it produces semantics for both in-scope declarations (so behavior extraction can use them) and out-of-scope declarations that in-scope code calls into (so the auditor knows what the dependency does).
+The source-driven steps of the initial generation pipeline — behavior extraction, feature synthesis, functional purpose & placement generation, condition generation, threat generation, and invariant generation — run only against **in-scope contracts**: the contracts listed in the audit's `scope.txt` file. Out-of-scope contracts and library dependencies (OpenZeppelin, Solmate, etc.) are excluded from these steps even though they are present in the analyzed codebase. The documentation-driven steps (requirement extraction, characteristic synthesis) operate on the audit's documentation and `security.md` regardless of which contracts those documents reference. Semantic linking sits in between: it produces semantics for both in-scope declarations (so behavior extraction can use them) and out-of-scope declarations that in-scope code calls into (so the auditor knows what the dependency does).
 
 This distinction is fundamental. In-scope code is the code under review — it cannot be assumed to be correct, which is why it needs requirements extracted from documentation, behaviors reconciled against those requirements, threats identified on its non-pure subjects, and invariants checked at its convergences. The full security model exists to surface mismatches between what the documentation claims and what the code does.
 
@@ -193,7 +196,7 @@ When a user adds a new element to the security model, the relevant pipeline step
 - **New functional semantic** — Persisted on a declaration with provenance to its source documentation topic. If the semantic changes the meaning of a declaration, downstream properties (behaviors that reference the declaration, functional purpose on containing statements) may need re-evaluation.
 - **New condition** — Recorded as an assertion on a non-pure subject (what must hold for its purpose+placement to be fulfilled). Adding or correcting a condition triggers re-evaluation of the subject's threats, since each threat is anchored to a specific condition it falsifies; a new or revised assertion may surface threat scenarios not previously identified.
 - **New threat** — Generated on non-pure subjects as the adversarial inversion of a specific condition (see Managing Threats and Invariants below). Carries a link to the condition it falsifies and a `controlled_by` actor. Created without a mandatory link to a feature, allowing the discoverer to record it immediately. Invariants are generated from the threat and attached to the subject. The system triggers re-checks on the subject. The feature linkage is established during impact analysis.
-- **New invariant** — Attached to a source subject, linked to its parent threat. The system triggers re-checks against the subject and any related subjects within the invariant's scope.
+- **New invariant** — Recorded as a defensive property against a parent threat, attached to the threat's subject. Adding or correcting an invariant flags re-verification of where the property holds in the code (deferred to a later pipeline step). The system does not yet trigger re-checks against related subjects within scope — that propagation is part of the deferred step.
 
 The user's request completes immediately; background work finishes asynchronously.
 
@@ -262,9 +265,11 @@ Source Subject: deployCampaign() → IERC20(token).transferFrom(...)   [non-pure
   │     ├── Falsifies condition: "no token-callback re-entry observes partial state..."
   │     ├── Controlled by: External
   │     └── Impact: [is vulnerable to] "Protocol Campaigns" (severity: critical)
-  ├── Invariant: "State updates precede external calls in deployCampaign"
+  ├── Invariant: "State updates must precede external calls in deployCampaign"
+  │     ├── Kind: ReentrancyGuard
   │     └── Parent Threat: "The token callback re-enters..."
-  └── Invariant: "Token address must not be predictable or pair creation must be atomic"
+  └── Invariant: "Every campaign token address must be unpredictable to outside callers before deployment commits"
+        ├── Kind: Other
         └── Parent Threat: "The deterministic token address can be pre-computed..."
 ```
 
@@ -493,13 +498,17 @@ Threats are created without a mandatory link to a feature. This keeps discovery 
 
 When the threat-generation pass considers a condition and finds no plausible falsifying scenario — for example, an assertion enforced by Solidity itself, by an upstream type constraint, or by a structural property of the codebase — it records a `no_threat_rationale` rather than silently emitting nothing. The rationale is posted as an agent-authored comment on the condition's discussion thread (prefixed `[step-7 / no-threat]`), so the assertion's review carries an explicit audit signal that it was considered and discharged.
 
-Invariants are generated from threats and attached directly to the source subjects they protect. When the auditor evaluates a convergence, the invariants are immediately present alongside functional purpose, functional semantics, and type constraints — no indirection through abstract structures. Each invariant links back to its parent threat for traceability.
+Invariants are pipeline-generated defensive properties stated against each threat — "X must Y" / "every Z does W" statements of what the codebase must enforce. Each invariant carries a closed `kind` from the eight-variant `InvariantKind` enum (`AccessGate`, `ReentrancyGuard`, `PauseGate`, `BoundedTolerance`, `FreshnessCheck`, `ConservationCheck`, `InputValidation`, `Other`), names exactly one parent threat, and attaches to a single subject inherited from that threat. One threat can carry many invariants; cross-cutting defenses are emitted as duplicate-description invariants with different `threat_topic` links (and, for cross-site application, on each affected subject), the same pattern conditions and threats use.
+
+Invariants carry no `evidence_topics` and no per-codebase-location anchors at generation time. The parent threat is the evidence for the invariant's existence; cross-codebase verification of whether the property actually holds — and where else in scope it must hold — is a deferred later pipeline step (re-check propagation). When the auditor evaluates a convergence, the invariants attached to its subject are immediately present alongside functional purpose, functional semantics, and type constraints — no indirection through abstract structures — and the parent-threat link carries the traceability chain back to the feature. When step 9 finds no defendable property for a threat, it records a `no_invariant_rationale` so the threat's review carries an explicit audit signal that it was considered.
 
 Pure expressions can house semantic bugs — `propFactor + bal` where the operator should be `*` — but these are caught by functional semantics at specification convergences, not by threat generation. The adversarial reasoning that threats capture always bottlenecks through non-pure operations, because those are the points where the system interacts with the outside world. Pure expressions may be *incorrect*, but their incorrectness becomes *exploitable* only through the non-pure operations that act on their results. Threats on non-pure subjects have visibility into the pure expressions that feed into them through backward context, so the threats account for insufficiencies in upstream checks and computations.
 
 ### Threat Traceability
 
 When an invariant is contradicted at a convergence, the traceability chain identifies the security impact. For threats with completed impact analysis: convergence → invariant → threat → feature → documentation. For threats without a feature link: the contradiction is flagged but severity is pending impact analysis.
+
+The convergence-to-invariant link is surfaced by re-check, the deferred pipeline step that propagates each invariant to every subject in scope and verifies whether the property holds there; invariants themselves carry no per-codebase-location anchors at generation time. Until re-check lands, an invariant's surface for traceability is its parent threat and the threat's subject.
 
 This traceability enables prioritization: when the auditor is evaluating a convergence, the severity of the threats behind its invariants determines how much scrutiny the convergence warrants. Invariants from unlinked threats are flagged as needing impact assessment, ensuring they are not deprioritized by default but are also not assigned an arbitrary severity.
 
@@ -509,7 +518,7 @@ Type constraint checks can be checked by a constraint algorithm. Specification c
 
 General audit flow is:
  1. Read and understand the docs and the purpose of the project
- 2. Run the initial generation pipeline (eight steps): semantic linking, requirement extraction, behavior extraction, feature synthesis via reconciliation, characteristic synthesis, functional purpose & placement generation on every non-pure subject in an in-scope function, condition generation on every non-pure subject, and threat generation against each condition
+ 2. Run the initial generation pipeline (nine steps): semantic linking, requirement extraction, behavior extraction, feature synthesis via reconciliation, characteristic synthesis, functional purpose & placement generation on every non-pure subject in an in-scope function, condition generation on every non-pure subject, threat generation against each condition, and invariant generation against each threat
  3. Review and refine the generated security model — verify functional semantics, add missing requirements, correct behavior descriptions, adjust feature groupings, confirm or correct the synthesized security characteristics, confirm or correct generated purpose and placement rationale
  4. Step through all convergences — invariants from threats are attached and checked at convergences; conditions and threats are re-examined as needed
  5. Perform impact analysis — link threats to the features they affect, establishing severity and the relationship type ("is vulnerable to" or "defends against"); unlinked threats are flagged for review

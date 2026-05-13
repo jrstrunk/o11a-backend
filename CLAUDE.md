@@ -56,12 +56,12 @@ The server writes/reads SQLite at `data/o11a.db` by default (`DATABASE_URL` over
 
 The two-binary split (`o11a-analyze` produces an artifact, `o11a-server` consumes it) is load-bearing: the server no longer reads the project source tree. All AST/topic state comes from `audit.analysis.bin` (bincode) plus `audit.json` (pipeline report). Schema changes require bumping `ARTIFACT_SCHEMA_VERSION` in `o11a-core::analysis_artifact` and regenerating the artifact, or the server refuses to load.
 
-Pipeline ordering (see `crates/o11a-core/src/collaborator/agent/pipeline.rs` and `semantic_linking.rs`). Parse and analyze are precursors; the eight-step LLM pipeline starts with semantic linking:
+Pipeline ordering (see `crates/o11a-core/src/collaborator/agent/pipeline.rs` and `semantic_linking.rs`). Parse and analyze are precursors; the nine-step LLM pipeline starts with semantic linking:
 
 1. Parse — Solidity via Foundry compilers (`forge build --ast` must have run in the audit project to produce the JSON ASTs the parser reads); documentation via the `markdown` crate.
 2. Analyze — two-pass scope walk producing `DataContext` (declarations, references, scopes, function/modifier extended properties).
 
-Then the LLM pipeline in 8 steps:
+Then the LLM pipeline in 9 steps:
 
 1. Semantic linking — five-step internal pipeline alternating mechanical/BM25 association with LLM synthesis. Steps 1–2 do contract semantics; steps 3–4 do member semantics; step 5 does body-local semantics. Each synthesis step's output feeds the next as context. The full design lives in `docs/specs/semantic-linking.md`.
 2. Requirement extraction — documentation processed with functional semantics injected, producing per-section `RequirementTopic` plus a parallel `CharacteristicTopic` array.
@@ -70,7 +70,8 @@ Then the LLM pipeline in 8 steps:
 5. Characteristic synthesis — extracted characteristics consolidated with the raw `security.md` notes into a refined `CharacteristicTopic` set; replaces the prior extraction-time set. Feature synthesis runs first and never sees characteristics; the layer boundary is renderer-enforced.
 6. Functional purpose & placement generation — per-function batched, producing sibling `FunctionalPurposeTopic` / `PlacementRationaleTopic` entries on every non-pure subject in an in-scope function with a feature link.
 7. Condition generation — per-subject positive assertions (`ConditionTopic`) about what must hold for purpose+placement to be fulfilled.
-8. Threat generation — `ThreatTopic` entries produced as adversarial inversions of each condition, with the `Security`-kind characteristic set rendered as the audit-wide adversarial context (in place of the raw `security_notes` blob earlier versions used). Invariants attach to subjects, not abstract structures.
+8. Threat generation — `ThreatTopic` entries produced as adversarial inversions of each condition, with the `Security`-kind characteristic set rendered as the audit-wide adversarial context (in place of the raw `security_notes` blob earlier versions used).
+9. Invariant generation — `InvariantTopic` entries produced as defensive properties against each threat, phrased as "X must Y" / "every Z does W" statements with a closed `InvariantKind` (e.g. `ReentrancyGuard`, `AccessGate`). Each invariant inherits `subject_topic` and `severity` from its parent threat; verification of where each property actually holds in the code is a deferred later pipeline step (re-check propagation).
 
 See SPEC.md for the full state machine.
 
