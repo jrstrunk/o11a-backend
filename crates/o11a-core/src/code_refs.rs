@@ -151,6 +151,7 @@ pub fn get_named_topic_kind(
     | domain::TopicMetadata::ConditionTopic { .. }
     | domain::TopicMetadata::ThreatTopic { .. }
     | domain::TopicMetadata::InvariantTopic { .. }
+    | domain::TopicMetadata::ValidationTopic { .. }
     | domain::TopicMetadata::DocumentationTopic { .. } => None,
   }
 }

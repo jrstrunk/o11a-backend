@@ -374,6 +374,7 @@ pub async fn get_contracts(
       | o11a_core::domain::TopicMetadata::ConditionTopic { .. }
       | o11a_core::domain::TopicMetadata::ThreatTopic { .. }
       | o11a_core::domain::TopicMetadata::InvariantTopic { .. }
+      | o11a_core::domain::TopicMetadata::ValidationTopic { .. }
       | o11a_core::domain::TopicMetadata::DocumentationTopic { .. } => false,
     };
 
@@ -663,6 +664,21 @@ pub struct InvariantTopicResponse {
   pub severity: Option<String>,
 }
 
+/// Response for ValidationTopic metadata
+#[derive(Debug, Serialize)]
+pub struct ValidationTopicResponse {
+  pub topic_id: String,
+  pub invariant_topic: String,
+  pub subject_topic: String,
+  pub verdict: String,
+  pub rationale: String,
+  pub evidence_topics: Vec<String>,
+  #[serde(rename = "author_id")]
+  pub author: Author,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<String>,
+}
+
 /// Enum for different topic metadata response types
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
@@ -697,6 +713,8 @@ pub enum TopicMetadataResponse {
   Threat(ThreatTopicResponse),
   #[serde(rename = "invariant")]
   Invariant(InvariantTopicResponse),
+  #[serde(rename = "validation")]
+  Validation(ValidationTopicResponse),
   #[serde(rename = "documentation")]
   Documentation(DocumentationTopicResponse),
 }
@@ -967,6 +985,26 @@ fn topic_metadata_to_response(
       author: *author_id,
       created_at: created_at.clone(),
       severity: severity.map(|s| s.as_str().to_string()),
+    }),
+
+    o11a_core::domain::TopicMetadata::ValidationTopic {
+      invariant_topic,
+      subject_topic,
+      verdict,
+      rationale,
+      evidence_topics,
+      author: author_id,
+      created_at,
+      ..
+    } => TopicMetadataResponse::Validation(ValidationTopicResponse {
+      topic_id: topic.id(),
+      invariant_topic: invariant_topic.id(),
+      subject_topic: subject_topic.id(),
+      verdict: verdict.as_str().to_string(),
+      rationale: rationale.clone(),
+      evidence_topics: evidence_topics.iter().map(|t| t.id()).collect(),
+      author: *author_id,
+      created_at: created_at.clone(),
     }),
   }
 }

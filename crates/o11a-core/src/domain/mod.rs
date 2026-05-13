@@ -309,6 +309,54 @@ impl ThreatSeverity {
   }
 }
 
+/// Verdict produced by step 10 (invariant validation) for whether an
+/// invariant actually holds in the code at the validated subject.
+///
+/// Variants encode the four canonical outcomes:
+/// - `Enforced` — the validator identified concrete enforcement at the
+///   subject (cited via `evidence_topics`).
+/// - `Absent` — the validator identified the *expected* enforcement
+///   shape and found it missing at the subject.
+/// - `Partial` — enforcement is present for some but not all aspects
+///   of the property (e.g., a multi-anchor invariant where one
+///   anchor's enforcement is missing).
+/// - `Inconclusive` — the validator could not determine enforcement
+///   from the visible surface. Reserved for kinds with no v1 harness
+///   (`EconomicInvariant`, `Other`) and for cases where the LLM
+///   genuinely cannot judge from the available context. Carries an
+///   audit signal that the property still needs human review.
+#[derive(
+  Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationVerdict {
+  Enforced,
+  Absent,
+  Partial,
+  Inconclusive,
+}
+
+impl ValidationVerdict {
+  pub fn as_str(&self) -> &'static str {
+    match self {
+      ValidationVerdict::Enforced => "enforced",
+      ValidationVerdict::Absent => "absent",
+      ValidationVerdict::Partial => "partial",
+      ValidationVerdict::Inconclusive => "inconclusive",
+    }
+  }
+
+  pub fn parse_str(s: &str) -> Option<ValidationVerdict> {
+    match s {
+      "enforced" => Some(ValidationVerdict::Enforced),
+      "absent" => Some(ValidationVerdict::Absent),
+      "partial" => Some(ValidationVerdict::Partial),
+      "inconclusive" => Some(ValidationVerdict::Inconclusive),
+      _ => None,
+    }
+  }
+}
+
 /// An intermediate value carrying a semantic from one of the synthesis
 /// steps (`task::link_contracts`, `task::link_member_signatures`,
 /// `task::link_member_bodies`) through the per-step condensation into a
@@ -605,6 +653,22 @@ pub struct AuditData {
   /// entry-boundary check input. Derived from `InvariantTopic.subject_topic`,
   /// rebuilt with `rebuild_feature_context`.
   pub subject_invariants: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Reverse index: A-prefixed invariant topic → A-prefixed validation
+  /// topics that verdict it. Each invariant has zero or more validations
+  /// (zero before step 10 runs; one in v1; many in v2 cross-site
+  /// propagation). Used for the invariant-detail UI ("show this
+  /// invariant's enforcement verdict") and for re-derivation triggers
+  /// (auditor edits invariant X → re-run validation). Derived from
+  /// `ValidationTopic.invariant_topic`, rebuilt with
+  /// `rebuild_feature_context`.
+  pub invariant_validations: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Reverse index: non-pure subject topic → A-prefixed validation
+  /// topics performed at it. Each subject has zero or more validations.
+  /// Drives the per-subject inline-validations renderer hook for
+  /// step 11/12 consumption and is the v2-propagation entry point.
+  /// Derived from `ValidationTopic.subject_topic`, rebuilt with
+  /// `rebuild_feature_context`.
+  pub subject_validations: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Impact analysis links between threats and features.
   pub threat_feature_links: Vec<ThreatFeatureLink>,
   /// Feature-to-requirement links (many-to-many). Keyed by S-prefixed topic.
@@ -2430,6 +2494,50 @@ pub enum TopicMetadata {
     /// later changes, this copy goes stale. Acceptable for v1.
     severity: Option<ThreatSeverity>,
   },
+  /// A validation verdict on an invariant — the codebase-level check
+  /// that the property the invariant states actually holds at its
+  /// subject. Generated in pipeline step 10 as the verification
+  /// complement to `InvariantTopic`: each validation names exactly one
+  /// parent `invariant_topic`; one invariant produces exactly one
+  /// validation in v1 (cross-site propagation is deferred to step 12).
+  /// The reasoning chain is purpose → conditions → threats → invariants
+  /// → validations. The verdict is what the validator concluded; the
+  /// `rationale` is its one-sentence justification; the
+  /// `evidence_topics` cite the code surface backing the verdict
+  /// (modifiers, state writes, checks, or — for `Absent` — the
+  /// function entry or first non-pure subject where the missing
+  /// enforcement should have appeared).
+  ValidationTopic {
+    topic: topic::Topic,
+    /// The invariant this validation verdicts on. One validation
+    /// belongs to exactly one invariant in v1; in v2 (cross-site
+    /// propagation) one invariant carries many validations, one per
+    /// subject in scope where the property must hold.
+    invariant_topic: topic::Topic,
+    /// The non-pure subject this validation was performed at. Equals
+    /// the parent invariant's `subject_topic` in v1; widens in v2.
+    subject_topic: topic::Topic,
+    /// The verdict: did the property hold at this subject?
+    verdict: ValidationVerdict,
+    /// One-sentence justification of the verdict. For `Enforced` /
+    /// `Absent`, explains what the validator saw (or didn't). For
+    /// `Inconclusive`, explains why no judgment could be made
+    /// ("no v1 harness for `EconomicInvariant`", "anchor declarations
+    /// not visible in the function's surface", etc.). Always populated.
+    rationale: String,
+    /// Topic IDs the validator cited as evidence for the verdict. May
+    /// include: the function's modifier topics, state-write subjects
+    /// in the body, check sites, the subject node itself (for
+    /// `Absent` verdicts pointing at "where the enforcement should
+    /// have been"). Constrained to the subject's containing function,
+    /// like `ThreatTopic.evidence_topics`. Cross-function evidence is
+    /// a v2 propagation concern.
+    evidence_topics: Vec<topic::Topic>,
+    author: crate::collaborator::models::Author,
+    /// `None` for pipeline-produced entities — see FeatureTopic for
+    /// rationale.
+    created_at: Option<String>,
+  },
   /// A documentation root topic (project or technical documentation)
   DocumentationTopic {
     topic: topic::Topic,
@@ -2456,7 +2564,8 @@ impl TopicMetadata {
       | TopicMetadata::PlacementRationaleTopic { .. }
       | TopicMetadata::ConditionTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
-      | TopicMetadata::InvariantTopic { .. } => &Scope::Global,
+      | TopicMetadata::InvariantTopic { .. }
+      | TopicMetadata::ValidationTopic { .. } => &Scope::Global,
     }
   }
 
@@ -2477,6 +2586,7 @@ impl TopicMetadata {
       | TopicMetadata::ConditionTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. }
+      | TopicMetadata::ValidationTopic { .. }
       | TopicMetadata::DocumentationTopic { .. } => None,
     }
   }
@@ -2498,6 +2608,7 @@ impl TopicMetadata {
       | TopicMetadata::ConditionTopic { topic, .. }
       | TopicMetadata::ThreatTopic { topic, .. }
       | TopicMetadata::InvariantTopic { topic, .. }
+      | TopicMetadata::ValidationTopic { topic, .. }
       | TopicMetadata::DocumentationTopic { topic, .. } => topic,
     }
   }
@@ -2560,7 +2671,8 @@ impl TopicMetadata {
       | TopicMetadata::FunctionalPurposeTopic { subject_topic, .. }
       | TopicMetadata::PlacementRationaleTopic { subject_topic, .. }
       | TopicMetadata::ConditionTopic { subject_topic, .. }
-      | TopicMetadata::InvariantTopic { subject_topic, .. } => {
+      | TopicMetadata::InvariantTopic { subject_topic, .. }
+      | TopicMetadata::ValidationTopic { subject_topic, .. } => {
         Some(subject_topic)
       }
       _ => None,
@@ -2579,7 +2691,8 @@ impl TopicMetadata {
       | TopicMetadata::PlacementRationaleTopic { author, .. }
       | TopicMetadata::ConditionTopic { author, .. }
       | TopicMetadata::ThreatTopic { author, .. }
-      | TopicMetadata::InvariantTopic { author, .. } => Some(*author),
+      | TopicMetadata::InvariantTopic { author, .. }
+      | TopicMetadata::ValidationTopic { author, .. } => Some(*author),
       _ => None,
     }
   }
@@ -2602,9 +2715,11 @@ impl TopicMetadata {
       | TopicMetadata::PlacementRationaleTopic { description, .. }
       | TopicMetadata::ConditionTopic { description, .. }
       | TopicMetadata::ThreatTopic { description, .. }
-      | TopicMetadata::InvariantTopic { description, .. } => {
-        Some(description.as_str())
-      }
+      | TopicMetadata::InvariantTopic { description, .. }
+      | TopicMetadata::ValidationTopic {
+        rationale: description,
+        ..
+      } => Some(description.as_str()),
       _ => None,
     }
   }
@@ -2630,7 +2745,8 @@ impl TopicMetadata {
       | TopicMetadata::PlacementRationaleTopic { created_at, .. }
       | TopicMetadata::ConditionTopic { created_at, .. }
       | TopicMetadata::ThreatTopic { created_at, .. }
-      | TopicMetadata::InvariantTopic { created_at, .. } => {
+      | TopicMetadata::InvariantTopic { created_at, .. }
+      | TopicMetadata::ValidationTopic { created_at, .. } => {
         created_at.as_deref()
       }
       _ => None,
@@ -3203,6 +3319,32 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }
   }
 
+  // Rebuild invariant_validations and subject_validations from
+  // ValidationTopic entries. A validation carries both the invariant
+  // it verdicts on and the non-pure subject it was performed at, so a
+  // single pass populates both indexes.
+  audit_data.invariant_validations.clear();
+  audit_data.subject_validations.clear();
+  for (val_topic, metadata) in &audit_data.topic_metadata {
+    if let TopicMetadata::ValidationTopic {
+      invariant_topic,
+      subject_topic,
+      ..
+    } = metadata
+    {
+      audit_data
+        .invariant_validations
+        .entry(*invariant_topic)
+        .or_default()
+        .push(*val_topic);
+      audit_data
+        .subject_validations
+        .entry(*subject_topic)
+        .or_default()
+        .push(*val_topic);
+    }
+  }
+
   // Build reverse index: doc_topic -> [requirement_topics]
   let mut doc_to_requirements: HashMap<topic::Topic, Vec<topic::Topic>> =
     HashMap::new();
@@ -3500,6 +3642,44 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }
   }
 
+  // Build context for ValidationTopics: parent invariant (upstream
+  // link) and validated non-pure subject (anchor) as SourceContext
+  // entries. Mirrors the InvariantTopic context-builder above —
+  // subject ref first, then the self/upstream ref. The SourceContext's
+  // `sort_key` tracks its own `scope` (the validation), matching the
+  // single-context-builder convention used elsewhere (the wrong
+  // sort_key collapses ordering under `merge_context_groups`).
+  for (val_topic, metadata) in &audit_data.topic_metadata {
+    if let TopicMetadata::ValidationTopic {
+      invariant_topic,
+      subject_topic,
+      ..
+    } = metadata
+    {
+      let val_sort_key = Some(val_topic.numeric_id() as usize);
+      let subj_sort_key = Some(subject_topic.numeric_id() as usize);
+      let inv_sort_key = Some(invariant_topic.numeric_id() as usize);
+      let scope_references = vec![
+        Reference::ProjectReference {
+          reference_topic: *subject_topic,
+          sort_key: subj_sort_key,
+        },
+        Reference::ProjectReference {
+          reference_topic: *invariant_topic,
+          sort_key: inv_sort_key,
+        },
+      ];
+      let context = vec![SourceContext {
+        scope: *val_topic,
+        sort_key: val_sort_key,
+        is_in_scope: true,
+        scope_references,
+        nested_references: vec![],
+      }];
+      audit_data.topic_context.insert(*val_topic, context);
+    }
+  }
+
   // Populate expanded_context for BehaviorTopics: show the source member
   let behavior_contexts: Vec<(topic::Topic, Vec<SourceContext>)> = audit_data
     .topic_metadata
@@ -3686,6 +3866,8 @@ pub fn new_audit_data(
     condition_threats: BTreeMap::new(),
     threat_invariants: BTreeMap::new(),
     subject_invariants: BTreeMap::new(),
+    invariant_validations: BTreeMap::new(),
+    subject_validations: BTreeMap::new(),
     threat_feature_links: Vec::new(),
     feature_requirement_links: BTreeMap::new(),
     feature_behavior_links: BTreeMap::new(),
@@ -4778,6 +4960,185 @@ mod tests {
   }
 
   #[test]
+  fn validation_topic_round_trips_through_serde() {
+    use crate::collaborator::models::Author;
+
+    let validation_topic = topic::new_adversarial_property_topic(30);
+    let invariant_topic = topic::new_adversarial_property_topic(20);
+    let subject_topic = topic::new_node_topic(&42);
+    let evidence_a = topic::new_node_topic(&101);
+    let evidence_b = topic::new_node_topic(&102);
+
+    let metadata = TopicMetadata::ValidationTopic {
+      topic: validation_topic,
+      invariant_topic,
+      subject_topic,
+      verdict: ValidationVerdict::Enforced,
+      rationale: "ownership modifier is applied on the entry path".to_string(),
+      evidence_topics: vec![evidence_a, evidence_b],
+      author: Author::AgentLarge,
+      created_at: None,
+    };
+
+    let json = serde_json::to_string(&metadata).unwrap();
+    let back: TopicMetadata = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.topic(), &validation_topic);
+    assert_eq!(
+      back.description(),
+      Some("ownership modifier is applied on the entry path")
+    );
+    // target_topic for ValidationTopic resolves to subject_topic — folds
+    // into the same arm as ThreatTopic / ConditionTopic / InvariantTopic /
+    // FunctionalPurposeTopic / PlacementRationaleTopic.
+    assert_eq!(back.target_topic(), Some(&subject_topic));
+    assert_eq!(back.author(), Some(Author::AgentLarge));
+    assert!(back.created_at().is_none());
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    audit.topic_metadata.insert(validation_topic, metadata);
+
+    let retrieved = audit.topic_metadata.get(&validation_topic).unwrap();
+    assert!(matches!(retrieved, TopicMetadata::ValidationTopic { .. }));
+    if let TopicMetadata::ValidationTopic {
+      invariant_topic: it,
+      subject_topic: st,
+      verdict,
+      rationale,
+      evidence_topics,
+      ..
+    } = retrieved
+    {
+      assert_eq!(*it, invariant_topic);
+      assert_eq!(*st, subject_topic);
+      assert_eq!(*verdict, ValidationVerdict::Enforced);
+      assert_eq!(rationale, "ownership modifier is applied on the entry path");
+      assert_eq!(*evidence_topics, vec![evidence_a, evidence_b]);
+    }
+  }
+
+  #[test]
+  fn validation_topic_round_trips_with_some_created_at_and_all_verdicts() {
+    // Counterpart to the all-None round-trip: confirms the `Option<String>`
+    // created_at carries `Some` through serde and that each verdict variant
+    // survives the round-trip cleanly.
+    use crate::collaborator::models::Author;
+
+    let verdicts = [
+      ValidationVerdict::Enforced,
+      ValidationVerdict::Absent,
+      ValidationVerdict::Partial,
+      ValidationVerdict::Inconclusive,
+    ];
+    for (i, verdict) in verdicts.into_iter().enumerate() {
+      let validation_topic =
+        topic::new_adversarial_property_topic(40 + i as i32);
+      let invariant_topic =
+        topic::new_adversarial_property_topic(20 + i as i32);
+      let subject_topic = topic::new_node_topic(&((i + 7) as i32));
+
+      let metadata = TopicMetadata::ValidationTopic {
+        topic: validation_topic,
+        invariant_topic,
+        subject_topic,
+        verdict,
+        rationale: "the validator could not see the anchor declaration"
+          .to_string(),
+        evidence_topics: vec![],
+        author: Author::AgentLarge,
+        created_at: Some("2026-05-13T12:00:00Z".to_string()),
+      };
+
+      let json = serde_json::to_string(&metadata).unwrap();
+      let back: TopicMetadata = serde_json::from_str(&json).unwrap();
+      assert_eq!(back.created_at(), Some("2026-05-13T12:00:00Z"));
+      if let TopicMetadata::ValidationTopic {
+        verdict: round_verdict,
+        ..
+      } = back
+      {
+        assert_eq!(round_verdict, verdict);
+      } else {
+        panic!("expected ValidationTopic variant after round-trip");
+      }
+    }
+  }
+
+  #[test]
+  fn validation_verdict_round_trips_for_each_variant_under_snake_case() {
+    // Each variant must round-trip cleanly under its snake_case JSON name.
+    // This is the safety net the Phase 5 LLM call relies on: the schema
+    // constrains the wire form to exactly these strings.
+    let cases = [
+      (ValidationVerdict::Enforced, "\"enforced\""),
+      (ValidationVerdict::Absent, "\"absent\""),
+      (ValidationVerdict::Partial, "\"partial\""),
+      (ValidationVerdict::Inconclusive, "\"inconclusive\""),
+    ];
+    for (verdict, expected_json) in cases {
+      let json = serde_json::to_string(&verdict).unwrap();
+      assert_eq!(
+        json, expected_json,
+        "serialized form for {:?} must match",
+        verdict
+      );
+      let back: ValidationVerdict = serde_json::from_str(&json).unwrap();
+      assert_eq!(back, verdict, "round-trip failed for {:?}", verdict);
+    }
+  }
+
+  #[test]
+  fn validation_verdict_rejects_off_list_values() {
+    // The closed enum must reject anything not in the four-variant
+    // shortlist so the post-processor's warn-and-skip path activates
+    // rather than silently accepting a free-form string.
+    assert!(serde_json::from_str::<ValidationVerdict>("\"unknown\"").is_err());
+    assert!(serde_json::from_str::<ValidationVerdict>("\"Enforced\"").is_err());
+    assert!(serde_json::from_str::<ValidationVerdict>("\"\"").is_err());
+  }
+
+  #[test]
+  fn validation_verdict_as_str_matches_serde_wire_form() {
+    // Display form and on-wire form must agree, mirroring the
+    // InvariantKind / ConditionKind / ThreatActor convention.
+    let cases = [
+      ValidationVerdict::Enforced,
+      ValidationVerdict::Absent,
+      ValidationVerdict::Partial,
+      ValidationVerdict::Inconclusive,
+    ];
+    for verdict in cases {
+      let wire = serde_json::to_value(verdict).unwrap();
+      assert_eq!(
+        wire.as_str().expect("wire form is a string"),
+        verdict.as_str(),
+        "as_str() must equal serde wire form for {:?}",
+        verdict
+      );
+    }
+  }
+
+  #[test]
+  fn validation_verdict_parse_str_matches_as_str() {
+    // Round-trip the lossless string conversion. Mirrors the
+    // ThreatSeverity::parse_str pattern.
+    let cases = [
+      ValidationVerdict::Enforced,
+      ValidationVerdict::Absent,
+      ValidationVerdict::Partial,
+      ValidationVerdict::Inconclusive,
+    ];
+    for verdict in cases {
+      assert_eq!(
+        ValidationVerdict::parse_str(verdict.as_str()),
+        Some(verdict)
+      );
+    }
+    assert_eq!(ValidationVerdict::parse_str("Enforced"), None);
+    assert_eq!(ValidationVerdict::parse_str(""), None);
+    assert_eq!(ValidationVerdict::parse_str("unknown"), None);
+  }
+
+  #[test]
   fn invariant_kind_round_trips_for_each_variant() {
     // Every variant must round-trip cleanly under its PascalCase JSON name.
     // This is the safety net the Phase 4 LLM call relies on: the schema
@@ -5132,6 +5493,243 @@ mod tests {
       entry.scope_references[1].sort_key(),
       Some(threat_x.numeric_id() as usize),
       "threat Reference.sort_key must track threat_topic"
+    );
+  }
+
+  #[test]
+  fn rebuild_feature_context_populates_invariant_and_subject_validations() {
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&10);
+    let subject_b = topic::new_node_topic(&20);
+    let inv_x = topic::new_adversarial_property_topic(11);
+    let inv_y = topic::new_adversarial_property_topic(12);
+
+    // Two validations on inv_x — same invariant, different subjects.
+    // Exercises the 1:N shape on the invariant side (anticipating v2
+    // cross-site propagation). A third validation on inv_y / subject_b
+    // covers the second invariant and confirms subject_b also receives
+    // an entry from a different invariant.
+    let val_xa = topic::new_adversarial_property_topic(100);
+    let val_xb = topic::new_adversarial_property_topic(101);
+    let val_yb = topic::new_adversarial_property_topic(102);
+
+    audit.topic_metadata.insert(
+      val_xa,
+      TopicMetadata::ValidationTopic {
+        topic: val_xa,
+        invariant_topic: inv_x,
+        subject_topic: subject_a,
+        verdict: ValidationVerdict::Enforced,
+        rationale: "ownership modifier applied on the entry path".to_string(),
+        evidence_topics: vec![],
+        author: Author::AgentLarge,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      val_xb,
+      TopicMetadata::ValidationTopic {
+        topic: val_xb,
+        invariant_topic: inv_x,
+        subject_topic: subject_b,
+        verdict: ValidationVerdict::Absent,
+        rationale: "no modifier on sibling subject".to_string(),
+        evidence_topics: vec![],
+        author: Author::AgentLarge,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      val_yb,
+      TopicMetadata::ValidationTopic {
+        topic: val_yb,
+        invariant_topic: inv_y,
+        subject_topic: subject_b,
+        verdict: ValidationVerdict::Inconclusive,
+        rationale: "no v1 harness for EconomicInvariant".to_string(),
+        evidence_topics: vec![],
+        author: Author::AgentLarge,
+        created_at: None,
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+
+    // inv_x has two validations (different subjects); inv_y has one.
+    let x_vals = audit
+      .invariant_validations
+      .get(&inv_x)
+      .expect("inv_x should have validations");
+    assert_eq!(x_vals.len(), 2);
+    assert!(x_vals.contains(&val_xa));
+    assert!(x_vals.contains(&val_xb));
+    let y_vals = audit
+      .invariant_validations
+      .get(&inv_y)
+      .expect("inv_y should have validations");
+    assert_eq!(y_vals.len(), 1);
+    assert_eq!(y_vals[0], val_yb);
+
+    // subject_a has one validation; subject_b has two (from both invariants).
+    let a_vals = audit
+      .subject_validations
+      .get(&subject_a)
+      .expect("subject_a should have validations");
+    assert_eq!(a_vals.len(), 1);
+    assert_eq!(a_vals[0], val_xa);
+    let b_vals = audit
+      .subject_validations
+      .get(&subject_b)
+      .expect("subject_b should have validations");
+    assert_eq!(b_vals.len(), 2);
+    assert!(b_vals.contains(&val_xb));
+    assert!(b_vals.contains(&val_yb));
+
+    // A subject/invariant with no validations is absent from the index.
+    let subject_c = topic::new_node_topic(&30);
+    let inv_z = topic::new_adversarial_property_topic(13);
+    assert!(!audit.subject_validations.contains_key(&subject_c));
+    assert!(!audit.invariant_validations.contains_key(&inv_z));
+  }
+
+  #[test]
+  fn rebuild_feature_context_clears_validation_indexes_before_rebuilding() {
+    // Calling rebuild_feature_context twice must not accumulate stale
+    // entries — both validation indexes are always rebuilt from scratch.
+    // Mirrors the invariant-index clear test.
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&10);
+    let inv_x = topic::new_adversarial_property_topic(11);
+    let val_xa = topic::new_adversarial_property_topic(100);
+    audit.topic_metadata.insert(
+      val_xa,
+      TopicMetadata::ValidationTopic {
+        topic: val_xa,
+        invariant_topic: inv_x,
+        subject_topic: subject_a,
+        verdict: ValidationVerdict::Enforced,
+        rationale: "verdict rationale".to_string(),
+        evidence_topics: vec![],
+        author: Author::AgentLarge,
+        created_at: None,
+      },
+    );
+
+    // First rebuild populates both indexes.
+    rebuild_feature_context(&mut audit);
+    assert_eq!(
+      audit.invariant_validations.get(&inv_x).map(|v| v.len()),
+      Some(1)
+    );
+    assert_eq!(
+      audit.subject_validations.get(&subject_a).map(|v| v.len()),
+      Some(1)
+    );
+
+    // Remove the validation topic and rebuild — both indexes must clear.
+    audit.topic_metadata.remove(&val_xa);
+    rebuild_feature_context(&mut audit);
+    assert!(
+      !audit.invariant_validations.contains_key(&inv_x),
+      "invariant_validations must be cleared before rebuild"
+    );
+    assert!(
+      !audit.subject_validations.contains_key(&subject_a),
+      "subject_validations must be cleared before rebuild"
+    );
+  }
+
+  #[test]
+  fn rebuild_feature_context_with_no_validations_yields_empty_indexes() {
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    rebuild_feature_context(&mut audit);
+    assert!(
+      audit.invariant_validations.is_empty(),
+      "no ValidationTopic entries means empty invariant_validations"
+    );
+    assert!(
+      audit.subject_validations.is_empty(),
+      "no ValidationTopic entries means empty subject_validations"
+    );
+  }
+
+  #[test]
+  fn rebuild_feature_context_validation_topic_context_carries_subject_and_invariant()
+   {
+    // The ValidationTopic context-builder must emit SourceContext entries
+    // for both the parent invariant (upstream link) and the validated
+    // non-pure subject (anchor). Mirrors the InvariantTopic context
+    // builder's contract — subject ref first, then the self/upstream ref.
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&42);
+    let inv_x = topic::new_adversarial_property_topic(20);
+    let val_xa = topic::new_adversarial_property_topic(50);
+
+    audit.topic_metadata.insert(
+      val_xa,
+      TopicMetadata::ValidationTopic {
+        topic: val_xa,
+        invariant_topic: inv_x,
+        subject_topic: subject_a,
+        verdict: ValidationVerdict::Enforced,
+        rationale: "the entry path is guarded by onlyOwner".to_string(),
+        evidence_topics: vec![],
+        author: Author::AgentLarge,
+        created_at: None,
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+
+    let context = audit
+      .topic_context
+      .get(&val_xa)
+      .expect("ValidationTopic must have a topic_context entry");
+    assert_eq!(context.len(), 1);
+    let entry = &context[0];
+    assert_eq!(entry.scope, val_xa);
+    assert!(entry.is_in_scope);
+    // `SourceContext.sort_key` tracks the entry's own `scope` (the
+    // validation). Mirrors the InvariantTopic test for the same reason —
+    // the wrong sort_key collapses ordering under `merge_context_groups`.
+    assert_eq!(
+      entry.sort_key(),
+      Some(val_xa.numeric_id() as usize),
+      "SourceContext.sort_key must track its own scope (the validation)"
+    );
+    assert_eq!(
+      entry.scope_references.len(),
+      2,
+      "scope_references must carry the subject anchor and the parent invariant"
+    );
+    // Order is part of the contract: subject ref first (the anchor),
+    // then the invariant ref (the upstream link), matching the
+    // InvariantTopic context-builder's shape.
+    assert_eq!(
+      *entry.scope_references[0].reference_topic(),
+      subject_a,
+      "subject anchor must be the first scope_reference"
+    );
+    assert_eq!(
+      *entry.scope_references[1].reference_topic(),
+      inv_x,
+      "parent invariant must be the second scope_reference"
+    );
+    assert_eq!(
+      entry.scope_references[0].sort_key(),
+      Some(subject_a.numeric_id() as usize),
+      "subject Reference.sort_key must track subject_topic"
+    );
+    assert_eq!(
+      entry.scope_references[1].sort_key(),
+      Some(inv_x.numeric_id() as usize),
+      "invariant Reference.sort_key must track invariant_topic"
     );
   }
 }

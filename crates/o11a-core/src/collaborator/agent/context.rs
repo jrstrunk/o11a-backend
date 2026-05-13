@@ -91,6 +91,7 @@ fn resolve_topic_name(topic: &topic::Topic, audit_data: &AuditData) -> String {
     | Some(TopicMetadata::InvariantTopic { description, .. }) => {
       description.clone()
     }
+    Some(TopicMetadata::ValidationTopic { rationale, .. }) => rationale.clone(),
     Some(TopicMetadata::DocumentationTopic { .. }) => topic.id().to_string(),
     None => topic.id().to_string(),
   }
@@ -209,6 +210,7 @@ fn plaintext_name_from_metadata(metadata: &TopicMetadata) -> String {
     | TopicMetadata::ConditionTopic { description, .. }
     | TopicMetadata::ThreatTopic { description, .. }
     | TopicMetadata::InvariantTopic { description, .. } => description.clone(),
+    TopicMetadata::ValidationTopic { rationale, .. } => rationale.clone(),
     TopicMetadata::DocumentationTopic { .. } => {
       metadata.topic().id().to_string()
     }
@@ -1664,6 +1666,41 @@ fn render_solidity_ast_snippet(
         obj["invariants"] = json!(invariants);
       }
     }
+    // Inline validations for this non-pure subject from the reverse
+    // index. Stamped here so step 11/12 inherits the validations payload
+    // for free — same shape as the conditions/threats/invariants hooks
+    // above, gated on presence (no placeholder values, orphan topics
+    // filtered out). Step 10 itself does not consume this hook; it is
+    // purely downstream prep.
+    if let Some(val_topics) = audit_data.subject_validations.get(&topic) {
+      let validations: Vec<serde_json::Value> = val_topics
+        .iter()
+        .filter_map(|vt| {
+          if let Some(TopicMetadata::ValidationTopic {
+            topic: vt_id,
+            verdict,
+            rationale,
+            evidence_topics,
+            invariant_topic,
+            ..
+          }) = audit_data.topic_metadata.get(vt)
+          {
+            Some(json!({
+              "topic": vt_id.id(),
+              "invariant_topic": invariant_topic.id(),
+              "verdict": verdict.as_str(),
+              "rationale": rationale,
+              "evidence_topics": evidence_topics.iter().map(|t| t.id()).collect::<Vec<_>>(),
+            }))
+          } else {
+            None
+          }
+        })
+        .collect();
+      if !validations.is_empty() {
+        obj["validations"] = json!(validations);
+      }
+    }
   }
   obj
 }
@@ -2503,7 +2540,8 @@ pub fn build_agent_topic_context(
     | TopicMetadata::PlacementRationaleTopic { .. }
     | TopicMetadata::ConditionTopic { .. }
     | TopicMetadata::ThreatTopic { .. }
-    | TopicMetadata::InvariantTopic { .. } => {
+    | TopicMetadata::InvariantTopic { .. }
+    | TopicMetadata::ValidationTopic { .. } => {
       let kind = match metadata {
         TopicMetadata::FeatureTopic { .. } => "Feature",
         TopicMetadata::RequirementTopic { .. } => "Requirement",
@@ -2515,6 +2553,7 @@ pub fn build_agent_topic_context(
         TopicMetadata::ConditionTopic { .. } => "Condition",
         TopicMetadata::ThreatTopic { .. } => "Threat",
         TopicMetadata::InvariantTopic { .. } => "Invariant",
+        TopicMetadata::ValidationTopic { .. } => "Validation",
         _ => unreachable!(),
       };
       Some(AgentTopicContext {
@@ -8778,6 +8817,373 @@ mod batch_render_integration_tests {
     assert_eq!(
       invariants[0]["threat_topic"].as_str(),
       Some(threat.id().as_str())
+    );
+  }
+
+  /// Recurse into `v` and find the first node whose `id` matches
+  /// `target_id`, returning its `validations` array (if any). Mirror of
+  /// `find_invariants_inline`.
+  fn find_validations_inline(
+    v: &serde_json::Value,
+    target_id: &str,
+  ) -> Option<Vec<serde_json::Value>> {
+    match v {
+      serde_json::Value::Object(map) => {
+        if map.get("id").and_then(|v| v.as_str()) == Some(target_id)
+          && let Some(arr) = map.get("validations")
+        {
+          return arr.as_array().cloned();
+        }
+        map
+          .values()
+          .find_map(|v| find_validations_inline(v, target_id))
+      }
+      serde_json::Value::Array(arr) => arr
+        .iter()
+        .find_map(|v| find_validations_inline(v, target_id)),
+      _ => None,
+    }
+  }
+
+  #[test]
+  fn render_emits_validations_when_subject_validations_has_entries() {
+    // Non-pure subject with ValidationTopic entries in subject_validations
+    // must carry an inline `validations` array on the rendered node,
+    // shaped as {topic, invariant_topic, verdict, rationale,
+    // evidence_topics}. Mirrors the conditions/threats/invariants hooks.
+    // Step 11/12 will consume this payload directly; step 10 itself does
+    // not read its own hook.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+
+    // Two validations on the same subject covering different invariants
+    // with different verdicts. The second carries evidence topics.
+    let inv_a = topic::new_adversarial_property_topic(10);
+    let inv_b = topic::new_adversarial_property_topic(11);
+    let val_a = topic::new_adversarial_property_topic(100);
+    let val_b = topic::new_adversarial_property_topic(101);
+    let evidence_a = topic::new_node_topic(&77);
+    let evidence_b = topic::new_node_topic(&88);
+    audit.topic_metadata.insert(
+      val_a,
+      TopicMetadata::ValidationTopic {
+        topic: val_a,
+        invariant_topic: inv_a,
+        subject_topic: assignment_topic,
+        verdict: domain::ValidationVerdict::Enforced,
+        rationale: "onlyOwner modifier guards the entry path".to_string(),
+        evidence_topics: vec![],
+        author: crate::collaborator::models::Author::AgentLarge,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      val_b,
+      TopicMetadata::ValidationTopic {
+        topic: val_b,
+        invariant_topic: inv_b,
+        subject_topic: assignment_topic,
+        verdict: domain::ValidationVerdict::Absent,
+        rationale: "no reentrancy guard around the external call".to_string(),
+        evidence_topics: vec![evidence_a, evidence_b],
+        author: crate::collaborator::models::Author::AgentLarge,
+        created_at: None,
+      },
+    );
+    // Populate the reverse index manually — normally rebuild_feature_context
+    // does this, but here we exercise the renderer in isolation.
+    audit
+      .subject_validations
+      .insert(assignment_topic, vec![val_a, val_b]);
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    let validations = find_validations_inline(&value, &assignment_topic.id())
+      .expect("non-pure subject must carry inline validations");
+    assert_eq!(validations.len(), 2);
+
+    // First validation: no evidence_topics, Enforced verdict on the wire
+    // as the lowercase token (matches `ValidationVerdict::as_str`).
+    let v1 = &validations[0];
+    assert_eq!(v1["topic"].as_str(), Some(val_a.id().as_str()));
+    assert_eq!(v1["invariant_topic"].as_str(), Some(inv_a.id().as_str()));
+    assert_eq!(v1["verdict"].as_str(), Some("enforced"));
+    assert_eq!(
+      v1["rationale"].as_str(),
+      Some("onlyOwner modifier guards the entry path")
+    );
+    assert_eq!(
+      v1["evidence_topics"].as_array().map(|a| a.len()),
+      Some(0),
+      "evidence_topics must render as an empty array when none were cited"
+    );
+
+    // Second validation: Absent verdict, two evidence_topic entries
+    // serialized as topic ID strings.
+    let v2 = &validations[1];
+    assert_eq!(v2["topic"].as_str(), Some(val_b.id().as_str()));
+    assert_eq!(v2["invariant_topic"].as_str(), Some(inv_b.id().as_str()));
+    assert_eq!(v2["verdict"].as_str(), Some("absent"));
+    let evidence = v2["evidence_topics"]
+      .as_array()
+      .expect("evidence_topics must serialize as a JSON array");
+    let evidence_ids: Vec<&str> =
+      evidence.iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(evidence_ids, vec![evidence_a.id(), evidence_b.id()]);
+  }
+
+  #[test]
+  fn render_omits_validations_when_subject_validations_is_empty() {
+    // Non-pure subject with no validations: the `validations` field must
+    // not appear on the rendered node. Same omit-on-empty contract as
+    // the conditions/threats/invariants hooks.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+    // subject_validations is empty (default) — no ValidationTopic entries.
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    assert!(
+      find_validations_inline(&value, &assignment_topic.id()).is_none(),
+      "non-pure subject without validations must not carry inline \
+       `validations`"
+    );
+  }
+
+  #[test]
+  fn render_validations_gracefully_handles_orphan_index_entry() {
+    // If subject_validations has an entry pointing at a topic that is
+    // missing from topic_metadata (e.g., after a partial rollback), the
+    // renderer should skip it without panicking. If all entries are
+    // orphans, the `validations` field must be omitted entirely.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+    // Orphan: topic exists in subject_validations but not in topic_metadata.
+    let orphan_val = topic::new_adversarial_property_topic(999);
+    audit
+      .subject_validations
+      .insert(assignment_topic, vec![orphan_val]);
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    assert!(
+      find_validations_inline(&value, &assignment_topic.id()).is_none(),
+      "orphan validation topic in subject_validations must not produce a \
+       validations array"
+    );
+  }
+
+  #[test]
+  fn render_validations_mixed_valid_and_orphan_only_emits_valid() {
+    // subject_validations has both a valid ValidationTopic and an orphan.
+    // Only the valid one should appear in the output. Mirrors the
+    // matching invariants test.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+
+    // Valid validation
+    let valid_val = topic::new_adversarial_property_topic(100);
+    let inv = topic::new_adversarial_property_topic(50);
+    audit.topic_metadata.insert(
+      valid_val,
+      TopicMetadata::ValidationTopic {
+        topic: valid_val,
+        invariant_topic: inv,
+        subject_topic: assignment_topic,
+        verdict: domain::ValidationVerdict::Inconclusive,
+        rationale: "no v1 harness".to_string(),
+        evidence_topics: vec![],
+        author: crate::collaborator::models::Author::AgentLarge,
+        created_at: None,
+      },
+    );
+    // Orphan — in subject_validations but not in topic_metadata
+    let orphan_val = topic::new_adversarial_property_topic(999);
+    audit
+      .subject_validations
+      .insert(assignment_topic, vec![valid_val, orphan_val]);
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    let validations = find_validations_inline(&value, &assignment_topic.id())
+      .expect("valid validation should appear");
+    assert_eq!(validations.len(), 1, "orphan must be filtered out");
+    assert_eq!(
+      validations[0]["topic"].as_str(),
+      Some(valid_val.id().as_str())
+    );
+    assert_eq!(validations[0]["verdict"].as_str(), Some("inconclusive"));
+    assert_eq!(
+      validations[0]["invariant_topic"].as_str(),
+      Some(inv.id().as_str())
     );
   }
 

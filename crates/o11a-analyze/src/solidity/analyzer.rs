@@ -4287,6 +4287,7 @@ fn populate_context(
       | TopicMetadata::ConditionTopic { .. }
       | TopicMetadata::ThreatTopic { .. }
       | TopicMetadata::InvariantTopic { .. }
+      | TopicMetadata::ValidationTopic { .. }
       | TopicMetadata::DocumentationTopic { .. } => {}
     }
   }

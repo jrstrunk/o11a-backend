@@ -407,6 +407,12 @@ pub fn highlighted_name(metadata: &TopicMetadata) -> String {
         html_escape(description)
       )
     }
+    TopicMetadata::ValidationTopic { rationale, .. } => {
+      format!(
+        "<span class=\"validation\">{}</span>",
+        html_escape(rationale)
+      )
+    }
   };
 
   format!("<code>{}</code>", inner)

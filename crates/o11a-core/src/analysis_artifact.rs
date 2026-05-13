@@ -26,7 +26,11 @@
 //!   - `topic_metadata` *minus* the pipeline-output variants
 //!     (FeatureTopic, RequirementTopic, BehaviorTopic,
 //!     CharacteristicTopic, FunctionalSemanticTopic — those are in
-//!     `audit.json` and are reapplied by `report::apply_report`)
+//!     `audit.json` and are reapplied by `report::apply_report`).
+//!     The adversarial-property family (ConditionTopic, ThreatTopic,
+//!     InvariantTopic, ValidationTopic) and the functional-property
+//!     family (FunctionalPurposeTopic, PlacementRationaleTopic) ride
+//!     in the snapshot since they share the A/P counter spaces.
 //!   - `name_index`, `comment_index`
 //!   - `topic_context`, `expanded_topic_context`
 //!   - `threat_feature_links`
@@ -39,8 +43,9 @@
 //!   - `section_requirements`, `section_characteristics`, `member_behaviors`,
 //!     `declaration_semantics`, `subject_purposes`, `subject_placements`,
 //!     `subject_conditions`, `subject_threats`, `condition_threats`,
-//!     `threat_invariants`, `subject_invariants` — derivable reverse
-//!     indexes, rebuilt via `domain::rebuild_feature_context`
+//!     `threat_invariants`, `subject_invariants`, `invariant_validations`,
+//!     `subject_validations` — derivable reverse indexes, rebuilt via
+//!     `domain::rebuild_feature_context`
 //!
 //! ## Version compatibility
 //!
@@ -176,6 +181,8 @@ pub fn apply_snapshot(audit_data: &mut AuditData, snap: AuditDataSnapshot) {
   audit_data.condition_threats.clear();
   audit_data.threat_invariants.clear();
   audit_data.subject_invariants.clear();
+  audit_data.invariant_validations.clear();
+  audit_data.subject_validations.clear();
 }
 
 /// Errors that can occur when reading, writing, or decoding an artifact.
