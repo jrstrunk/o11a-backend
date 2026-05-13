@@ -2015,9 +2015,9 @@ fn render_security_characteristics(
 /// assertions. If step 6 produced nothing, this step skips cleanly.
 ///
 /// Reruns proactively clear downstream invariant data: `InvariantTopic`
-/// entries are dropped from `topic_metadata` and `audit_data.invariants`
-/// is emptied — a deleted threat orphans its invariants, and the audit
-/// data must be internally consistent at step boundaries. Orphaned
+/// entries are dropped from `topic_metadata` — a deleted threat orphans
+/// its invariants, and the audit data must be internally consistent at
+/// step boundaries. Orphaned
 /// `threat_feature_links` (impact-analysis entries whose `threat_topic`
 /// no longer exists) are pruned; surviving non-orphaned links are kept,
 /// though in practice A-prefix reallocation on rerun makes most links
@@ -2036,10 +2036,10 @@ pub async fn build_threats(
   use crate::domain::CommentType;
 
   // Clear any prior ThreatTopic entries so re-runs don't accumulate stale
-  // generations. Also proactively clear InvariantTopic entries and the
-  // `audit_data.invariants` denormalization: a deleted threat orphans its
-  // invariants, and the audit data must be internally consistent at step
-  // boundaries (step 8 will repopulate). Prune `threat_feature_links` of
+  // generations. Also proactively clear InvariantTopic entries: a deleted
+  // threat orphans its invariants, and the audit data must be internally
+  // consistent at step boundaries (step 8 will repopulate). Prune
+  // `threat_feature_links` of
   // any entry whose `threat_topic` no longer exists in `topic_metadata`
   // after the clear — non-orphaned links survive so impact-analysis state
   // re-attaches across re-runs that preserve threat topic IDs. Also render
@@ -2064,7 +2064,6 @@ pub async fn build_threats(
           | domain::TopicMetadata::InvariantTopic { .. }
       )
     });
-    audit_data.invariants.clear();
     // Split the borrow: `mem::take` swaps the vec out so the
     // `topic_metadata` lookup inside `retain` doesn't conflict with the
     // mutable borrow on `threat_feature_links` that retain requires.
@@ -2389,7 +2388,7 @@ mod build_threats_tests {
   use super::*;
   use crate::collaborator::models::Author;
   use crate::domain::{
-    Invariant, SystemCharacteristicKind, ThreatActor, ThreatFeatureLink,
+    InvariantKind, SystemCharacteristicKind, ThreatActor, ThreatFeatureLink,
     ThreatFeatureRelation, ThreatSeverity, TopicMetadata, new_data_context,
   };
   use std::collections::HashSet;
@@ -2397,9 +2396,8 @@ mod build_threats_tests {
   /// Exercises the proactive clear-on-rerun branch of `build_threats`.
   /// Because `subject_conditions` is empty the function early-returns
   /// before any LLM call — but only after running the clear block. So
-  /// every pre-seeded `ThreatTopic`/`InvariantTopic` topic, every
-  /// `audit_data.invariants` entry, and every now-orphaned
-  /// `threat_feature_links` entry must be gone afterward.
+  /// every pre-seeded `ThreatTopic`/`InvariantTopic` topic and every
+  /// now-orphaned `threat_feature_links` entry must be gone afterward.
   #[tokio::test]
   async fn build_threats_clears_stale_threat_and_invariant_state_on_rerun() {
     let mut ctx = new_data_context();
@@ -2438,15 +2436,11 @@ mod build_threats_tests {
           topic: pre_invariant_topic,
           description: "stale invariant from prior run".to_string(),
           threat_topic: pre_threat_topic,
+          subject_topic,
+          kind: InvariantKind::AccessGate,
           author: Author::AgentLarge,
-          created_at: String::new(),
+          created_at: None,
           severity: None,
-        },
-      );
-      audit_data.invariants.insert(
-        pre_invariant_topic,
-        Invariant {
-          source_topics: vec![],
         },
       );
       // Two impact-analysis links — one referring to the existing threat
@@ -2492,12 +2486,6 @@ mod build_threats_tests {
     assert!(
       !audit_data.topic_metadata.contains_key(&pre_invariant_topic),
       "stale InvariantTopic must be dropped on rerun"
-    );
-
-    // The `Invariant` denormalization is wiped.
-    assert!(
-      audit_data.invariants.is_empty(),
-      "audit_data.invariants must be cleared on rerun"
     );
 
     // Both impact-analysis links are gone — the first because its threat
@@ -2568,15 +2556,11 @@ mod build_threats_tests {
             topic: pre_invariant,
             description: "stale".to_string(),
             threat_topic: pre_threat,
+            subject_topic: topic::new_node_topic(&1),
+            kind: InvariantKind::AccessGate,
             author: Author::AgentLarge,
-            created_at: String::new(),
+            created_at: None,
             severity: None,
-          },
-        );
-        audit_data.invariants.insert(
-          pre_invariant,
-          Invariant {
-            source_topics: vec![],
           },
         );
       }
@@ -2603,11 +2587,6 @@ mod build_threats_tests {
       assert_eq!(
         invariant_count, 0,
         "run {}: stale InvariantTopic must be cleared",
-        run
-      );
-      assert!(
-        audit_data.invariants.is_empty(),
-        "run {}: audit_data.invariants must be cleared",
         run
       );
     }

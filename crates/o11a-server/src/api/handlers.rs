@@ -653,9 +653,12 @@ pub struct InvariantTopicResponse {
   pub topic_id: String,
   pub description: String,
   pub threat_topic: String,
+  pub subject_topic: String,
+  pub kind: String,
   #[serde(rename = "author_id")]
   pub author: Author,
-  pub created_at: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub created_at: Option<String>,
   pub severity: Option<String>,
 }
 
@@ -946,6 +949,8 @@ fn topic_metadata_to_response(
     o11a_core::domain::TopicMetadata::InvariantTopic {
       description,
       threat_topic,
+      subject_topic,
+      kind,
       author: author_id,
       created_at,
       severity,
@@ -954,6 +959,8 @@ fn topic_metadata_to_response(
       topic_id: topic.id(),
       description: description.clone(),
       threat_topic: threat_topic.id(),
+      subject_topic: subject_topic.id(),
+      kind: format!("{:?}", kind),
       author: *author_id,
       created_at: created_at.clone(),
       severity: severity.map(|s| s.as_str().to_string()),

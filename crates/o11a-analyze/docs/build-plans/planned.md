@@ -1,4 +1,4 @@
-On the framing — "per non-pure subject" vs. "per function"
+ On the framing — "per non-pure subject" vs. "per function"
 
 The author isn't mixed up. They're naming the **output unit** (one bundle of conditions per subject), but the **LLM call** still lives at the batch boundary. Step 5 already has exactly this shape: the prompt at `pipeline.rs:1430` (`extract_functional_properties_from_batch`) takes a 5-function batch and returns subject-keyed entries. Step 6 should follow the same DAG/affinity batches, render the same per-function context (feature, behaviors, semantics, callee behaviors), and additionally inject each subject's `functional_purpose` + `placement_rationale` from step 5. The output is `{ subjects: [{ subject_topic, conditions: [...] }] }`.
 

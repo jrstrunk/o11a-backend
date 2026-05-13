@@ -465,12 +465,13 @@ fn get_breadcrumb_parts<'a>(
     ];
   }
 
-  // Invariants: parent threat then "Invariant" label
+  // Invariants: parent subject then "Invariant" label (target_topic now
+  // resolves to `subject_topic`, mirroring how ThreatTopic anchors above).
   if matches!(metadata, TopicMetadata::InvariantTopic { .. })
-    && let Some(threat_topic) = metadata.target_topic()
+    && let Some(subject_topic) = metadata.target_topic()
   {
     return vec![
-      BreadcrumbPart::Topic(threat_topic),
+      BreadcrumbPart::Topic(subject_topic),
       BreadcrumbPart::Text("Invariant"),
     ];
   }

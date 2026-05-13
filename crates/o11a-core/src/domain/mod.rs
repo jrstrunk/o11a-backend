@@ -508,14 +508,6 @@ pub struct ThreatFeatureLink {
   pub severity: ThreatSeverity,
 }
 
-/// An invariant that must hold to prevent a threat.
-/// Linked to source code topics where the invariant is enforced.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Invariant {
-  /// N-prefixed topic IDs of source code topics that enforce this invariant
-  pub source_topics: Vec<topic::Topic>,
-}
-
 /// Contains all data for a single audit
 pub struct AuditData {
   // The name of the audit being audited, like "Chainlink"
@@ -601,8 +593,6 @@ pub struct AuditData {
   pub condition_threats: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Impact analysis links between threats and features.
   pub threat_feature_links: Vec<ThreatFeatureLink>,
-  /// Invariants keyed by A-prefixed topic ID. Each belongs to one threat.
-  pub invariants: BTreeMap<topic::Topic, Invariant>,
   /// Feature-to-requirement links (many-to-many). Keyed by S-prefixed topic.
   pub feature_requirement_links: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Feature-to-behavior links (many-to-many). Keyed by S-prefixed topic.
@@ -1342,6 +1332,46 @@ pub enum ConditionKind {
   /// Shared resources remain available under expected use.
   ResourceAvailability,
   /// Genuinely novel assertion; description carries the structure.
+  Other,
+}
+
+/// The defensive pattern this invariant expresses — the category of
+/// codebase-level property the parent threat scenario violates. Loose
+/// taxonomy; the LLM picks; the auditor groups by category in the
+/// review UI. `Other` is the escape hatch for novel defenses that
+/// don't fit a named variant.
+///
+/// **Variant order is wire-format-relevant.** `AuditDataSnapshot` is
+/// serialized via bincode, which encodes enum variants by their declaration
+/// index (not by name). Renaming a variant in place is safe; reordering,
+/// removing, or inserting variants is a wire-format break that requires
+/// bumping `analysis_artifact::ARTIFACT_SCHEMA_VERSION`. The HTTP API
+/// emits the variant name (`format!("{:?}", kind)` in handlers.rs), so
+/// any rename is also a surface-level API change for downstream clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InvariantKind {
+  /// A privilege check — modifier-based role gating, owner check, or
+  /// other authorization mechanism — gates the operation.
+  AccessGate,
+  /// A lock, reentrancy guard, or CEI ordering pattern prevents reentry
+  /// from observing partial state.
+  ReentrancyGuard,
+  /// A paused-state check halts the operation under emergency-stop
+  /// conditions.
+  PauseGate,
+  /// A bound on slippage, deadline, or numeric range constrains the
+  /// caller's tolerated outcome.
+  BoundedTolerance,
+  /// A staleness check ensures the value read is current relative to
+  /// the operation's needs.
+  FreshnessCheck,
+  /// A conservation invariant — sum, total, or balance equality — holds
+  /// across the operation.
+  ConservationCheck,
+  /// Argument well-formedness — zero address, range bounds, sentinel
+  /// checks — rejects malformed input before it propagates.
+  InputValidation,
+  /// Genuinely novel defense; description carries the structure.
   Other,
 }
 
@@ -2205,18 +2235,47 @@ pub enum TopicMetadata {
     evidence_topics: Vec<topic::Topic>,
     author: crate::collaborator::models::Author,
     /// `None` for pipeline-produced entities — see FeatureTopic for
-    /// rationale. (Following the FunctionalPurposeTopic pattern; not the
-    /// ThreatTopic/InvariantTopic non-Option shape.)
+    /// rationale. (Following the FunctionalPurposeTopic / ThreatTopic /
+    /// InvariantTopic pattern.)
     created_at: Option<String>,
   },
-  /// An invariant that must hold to prevent a threat
+  /// An invariant — a codebase-level defensive property the auditor
+  /// expects to hold to prevent a specific threat scenario. Generated
+  /// in pipeline step 8 as the defensive complement of a `ThreatTopic`:
+  /// each invariant names exactly one parent threat; one threat can be
+  /// defended by many invariants. The reasoning chain is purpose →
+  /// conditions → threats → invariants. Phrased as "X must Y" / "every
+  /// Z does W" — what the codebase enforces, not how it enforces it.
+  /// Verification of where each invariant actually holds in the code
+  /// is a deferred later pipeline step (re-check propagation), not in
+  /// this variant. See SPEC's "Conditions vs. Invariants" for the
+  /// role distinction with `ConditionTopic`.
   InvariantTopic {
     topic: topic::Topic,
+    /// The defensive property, in prose, phrased as "X must Y" or
+    /// "every Z does W" — what the codebase must enforce, not how to
+    /// enforce it.
     description: String,
+    /// The threat this invariant defends against. One invariant defends
+    /// exactly one threat; one threat can be defended by many invariants.
     threat_topic: topic::Topic,
+    /// The non-pure subject this invariant protects. Inherited at write
+    /// time from the parent threat's `subject_topic`. Singular;
+    /// cross-site application is handled by duplicate-description
+    /// invariants on each affected subject. Scope-organized re-check
+    /// propagation is a deferred later step.
+    subject_topic: topic::Topic,
+    /// Category of defensive pattern this invariant expresses.
+    kind: InvariantKind,
     author: crate::collaborator::models::Author,
-    created_at: String,
-    /// Inherited from parent threat; None when threat severity is pending
+    /// `None` for pipeline-produced entities — see FeatureTopic for
+    /// rationale. (Following the FunctionalPurposeTopic / ConditionTopic
+    /// / ThreatTopic pattern.)
+    created_at: Option<String>,
+    /// Severity inherited from the parent threat at write time; `None`
+    /// while threat severity is pending impact analysis. Write-time
+    /// snapshot, not a live mirror — if the parent threat's severity
+    /// later changes, this copy goes stale. Acceptable for v1.
     severity: Option<ThreatSeverity>,
   },
   /// A documentation root topic (project or technical documentation)
@@ -2345,17 +2404,13 @@ impl TopicMetadata {
   pub fn target_topic(&self) -> Option<&topic::Topic> {
     match self {
       TopicMetadata::CommentTopic { target_topic, .. } => Some(target_topic),
-      TopicMetadata::ThreatTopic { subject_topic, .. } => Some(subject_topic),
-      TopicMetadata::FunctionalPurposeTopic { subject_topic, .. } => {
+      TopicMetadata::ThreatTopic { subject_topic, .. }
+      | TopicMetadata::FunctionalPurposeTopic { subject_topic, .. }
+      | TopicMetadata::PlacementRationaleTopic { subject_topic, .. }
+      | TopicMetadata::ConditionTopic { subject_topic, .. }
+      | TopicMetadata::InvariantTopic { subject_topic, .. } => {
         Some(subject_topic)
       }
-      TopicMetadata::PlacementRationaleTopic { subject_topic, .. } => {
-        Some(subject_topic)
-      }
-      TopicMetadata::ConditionTopic { subject_topic, .. } => {
-        Some(subject_topic)
-      }
-      TopicMetadata::InvariantTopic { threat_topic, .. } => Some(threat_topic),
       _ => None,
     }
   }
@@ -2411,8 +2466,7 @@ impl TopicMetadata {
 
   pub fn created_at(&self) -> Option<&str> {
     match self {
-      TopicMetadata::CommentTopic { created_at, .. }
-      | TopicMetadata::InvariantTopic { created_at, .. } => {
+      TopicMetadata::CommentTopic { created_at, .. } => {
         Some(created_at.as_str())
       }
       TopicMetadata::FeatureTopic { created_at, .. }
@@ -2423,7 +2477,10 @@ impl TopicMetadata {
       | TopicMetadata::FunctionalPurposeTopic { created_at, .. }
       | TopicMetadata::PlacementRationaleTopic { created_at, .. }
       | TopicMetadata::ConditionTopic { created_at, .. }
-      | TopicMetadata::ThreatTopic { created_at, .. } => created_at.as_deref(),
+      | TopicMetadata::ThreatTopic { created_at, .. }
+      | TopicMetadata::InvariantTopic { created_at, .. } => {
+        created_at.as_deref()
+      }
       _ => None,
     }
   }
@@ -3428,7 +3485,6 @@ pub fn new_audit_data(
     subject_threats: BTreeMap::new(),
     condition_threats: BTreeMap::new(),
     threat_feature_links: Vec::new(),
-    invariants: BTreeMap::new(),
     feature_requirement_links: BTreeMap::new(),
     feature_behavior_links: BTreeMap::new(),
     mentions_index: HashMap::new(),
@@ -4411,5 +4467,134 @@ mod tests {
       !audit.section_characteristics.contains_key(&section_a),
       "section_characteristics must be cleared before rebuild"
     );
+  }
+
+  #[test]
+  fn invariant_topic_round_trips_through_serde() {
+    use crate::collaborator::models::Author;
+
+    let invariant_topic = topic::new_adversarial_property_topic(20);
+    let threat_topic = topic::new_adversarial_property_topic(10);
+    let subject_topic = topic::new_node_topic(&42);
+
+    let metadata = TopicMetadata::InvariantTopic {
+      topic: invariant_topic,
+      description: "every privileged-state-modifying function checks ownership"
+        .to_string(),
+      threat_topic,
+      subject_topic,
+      kind: InvariantKind::AccessGate,
+      author: Author::AgentLarge,
+      created_at: None,
+      severity: None,
+    };
+
+    let json = serde_json::to_string(&metadata).unwrap();
+    let back: TopicMetadata = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.topic(), &invariant_topic);
+    assert_eq!(
+      back.description(),
+      Some("every privileged-state-modifying function checks ownership")
+    );
+    // target_topic now resolves to subject_topic, not threat_topic — the
+    // semantic change settled in Phase 2 of the invariants step folds
+    // InvariantTopic into the same arm as ThreatTopic / ConditionTopic /
+    // FunctionalPurposeTopic / PlacementRationaleTopic.
+    assert_eq!(back.target_topic(), Some(&subject_topic));
+    assert_eq!(back.author(), Some(Author::AgentLarge));
+    assert!(back.created_at().is_none());
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    audit.topic_metadata.insert(invariant_topic, metadata);
+
+    let retrieved = audit.topic_metadata.get(&invariant_topic).unwrap();
+    assert!(matches!(retrieved, TopicMetadata::InvariantTopic { .. }));
+    if let TopicMetadata::InvariantTopic {
+      threat_topic: tt,
+      subject_topic: st,
+      kind,
+      severity,
+      ..
+    } = retrieved
+    {
+      assert_eq!(*tt, threat_topic);
+      assert_eq!(*st, subject_topic);
+      assert_eq!(*kind, InvariantKind::AccessGate);
+      assert!(severity.is_none());
+    }
+  }
+
+  #[test]
+  fn invariant_topic_round_trips_with_some_created_at_and_severity() {
+    // Counterpart to the all-None round-trip: confirms the `Option<String>`
+    // created_at carries `Some` through serde (the type flip from `String`
+    // to `Option<String>` is a load-bearing schema change in this phase),
+    // and that an inherited severity round-trips too.
+    use crate::collaborator::models::Author;
+
+    let invariant_topic = topic::new_adversarial_property_topic(21);
+    let threat_topic = topic::new_adversarial_property_topic(11);
+    let subject_topic = topic::new_node_topic(&7);
+
+    let metadata = TopicMetadata::InvariantTopic {
+      topic: invariant_topic,
+      description: "the operation is guarded by a non-reentrant lock"
+        .to_string(),
+      threat_topic,
+      subject_topic,
+      kind: InvariantKind::ReentrancyGuard,
+      author: Author::AgentLarge,
+      created_at: Some("2026-05-13T12:00:00Z".to_string()),
+      severity: Some(ThreatSeverity::High),
+    };
+
+    let json = serde_json::to_string(&metadata).unwrap();
+    let back: TopicMetadata = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.created_at(), Some("2026-05-13T12:00:00Z"));
+    if let TopicMetadata::InvariantTopic { kind, severity, .. } = back {
+      assert_eq!(kind, InvariantKind::ReentrancyGuard);
+      assert_eq!(severity, Some(ThreatSeverity::High));
+    } else {
+      panic!("expected InvariantTopic variant after round-trip");
+    }
+  }
+
+  #[test]
+  fn invariant_kind_round_trips_for_each_variant() {
+    // Every variant must round-trip cleanly under its PascalCase JSON name.
+    // This is the safety net the Phase 4 LLM call relies on: the schema
+    // constrains the wire form to exactly these strings.
+    let cases = [
+      (InvariantKind::AccessGate, "\"AccessGate\""),
+      (InvariantKind::ReentrancyGuard, "\"ReentrancyGuard\""),
+      (InvariantKind::PauseGate, "\"PauseGate\""),
+      (InvariantKind::BoundedTolerance, "\"BoundedTolerance\""),
+      (InvariantKind::FreshnessCheck, "\"FreshnessCheck\""),
+      (InvariantKind::ConservationCheck, "\"ConservationCheck\""),
+      (InvariantKind::InputValidation, "\"InputValidation\""),
+      (InvariantKind::Other, "\"Other\""),
+    ];
+    for (kind, expected_json) in cases {
+      let json = serde_json::to_string(&kind).unwrap();
+      assert_eq!(
+        json, expected_json,
+        "serialized form for {:?} must match",
+        kind
+      );
+      let back: InvariantKind = serde_json::from_str(&json).unwrap();
+      assert_eq!(back, kind, "round-trip failed for {:?}", kind);
+    }
+  }
+
+  #[test]
+  fn invariant_kind_rejects_off_list_values() {
+    // The closed enum is the load-bearing safety net for the Phase 4 LLM
+    // call: off-list strings must fail deserialization so the
+    // post-processor's warn-and-skip path activates rather than silently
+    // accepting a free-form string. Same shape as the ConditionKind /
+    // ThreatActor schema-enforcement tests.
+    assert!(serde_json::from_str::<InvariantKind>("\"Guard\"").is_err());
+    assert!(serde_json::from_str::<InvariantKind>("\"accessGate\"").is_err());
+    assert!(serde_json::from_str::<InvariantKind>("\"\"").is_err());
   }
 }
