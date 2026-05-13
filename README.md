@@ -126,7 +126,7 @@ The security model is the structured representation of what the documentation cl
 
 ### Initial Generation
 
-The security model is initially seeded from project documentation and source code through an automated pipeline of nine steps:
+The security model is initially seeded from project documentation and source code through an automated pipeline of ten steps:
 
 1. Semantic Linking
 2. Requirement Extraction
@@ -137,8 +137,9 @@ The security model is initially seeded from project documentation and source cod
 7. Condition Generation
 8. Threat Generation
 9. Invariant Generation
+10. Invariant Validation
 
-Step 1 produces the project-specific vocabulary that every later step relies on. Steps 2–5 build the documentation-and-code-derived spec layer (requirements, behaviors, features, characteristics). Steps 6–9 build the adversarial layer on every non-pure source subject (purpose+placement, then conditions, then threats, then invariants). Each step's output is durable and individually addressable, so any one of them can be re-run on its own when its inputs change without re-running the rest.
+Step 1 produces the project-specific vocabulary that every later step relies on. Steps 2–5 build the documentation-and-code-derived spec layer (requirements, behaviors, features, characteristics). Steps 6–10 build the adversarial layer on every non-pure source subject (purpose+placement, then conditions, then threats, then invariants, then validation verdicts on those invariants). Each step's output is durable and individually addressable, so any one of them can be re-run on its own when its inputs change without re-running the rest.
 
 **1. Semantic Linking.** Documentation sections are linked to source code declarations to establish functional semantics — the project-specific meaning of each declaration. This step runs before requirement and behavior extraction so that both can be generated with business-level meaning. Functional semantics are injected into the rendered documentation that requirement extraction sees, so inline code references like `pID` appear annotated with their project-specific meaning (e.g., "participation identifier"), giving the LLM proper context to produce behavioral requirements without using declaration names.
 
@@ -170,7 +171,9 @@ Where requirements and invariants both describe things the code must do, they se
 
 **8. Threat Generation.** For each non-pure subject, threats are generated as adversarial inversions of its conditions: each threat states a scenario in which a specific condition fails to hold, and links back to the condition it falsifies. The set of `Security`-kind characteristics from step 5 is included as the system-wide adversarial context for this step, replacing the raw `security.md` blob that earlier versions of the pipeline used. A threat that finds no plausible falsifying scenario for a condition records a `no_threat_rationale` so the assertion's review carries an explicit audit signal that it was considered and discharged. See "Managing Threats and Invariants" for the design rationale.
 
-**9. Invariant Generation.** For each threat produced in step 8, the pipeline generates zero or more invariants — codebase-level defensive properties stated against the threat. Each invariant is an "X must Y" / "every Z does W" property statement, carries a `kind` from the closed eight-variant `InvariantKind` enum (`AccessGate`, `ReentrancyGuard`, `PauseGate`, `BoundedTolerance`, `FreshnessCheck`, `ConservationCheck`, `InputValidation`, `Other`), inherits `subject_topic` and `severity` from the parent threat at write time, and names exactly one parent threat (one threat can carry many invariants). Verification of whether each invariant actually holds in the code — and where else in scope it must hold — is a deferred later pipeline step (re-check propagation). When the LLM finds no defendable property for a threat, it records a `no_invariant_rationale` so the threat's review carries an explicit audit signal that it was considered. See "Managing Threats and Invariants" for the design rationale.
+**9. Invariant Generation.** For each threat produced in step 8, the pipeline generates zero or more invariants — codebase-level defensive properties stated against the threat. Each invariant is an "X must Y" / "every Z does W" property statement, carries a `kind` from the closed `InvariantKind` enum (covering authorization & lifecycle gates, reentrancy & ordering, bounds & ranges, freshness & oracles, state conservation, input well-formedness, external call safety, cryptography & one-shot, bounded computation, semantic/economic identities, and a catch-all `Other`), inherits `subject_topic` and `severity` from the parent threat at write time, carries optional `anchors` (the declaration topics — modifier, role variable, state field — that the property is stated against), and names exactly one parent threat (one threat can carry many invariants). When the LLM finds no defendable property for a threat, it records a `no_invariant_rationale` so the threat's review carries an explicit audit signal that it was considered. See "Managing Threats and Invariants" for the design rationale.
+
+**10. Invariant Validation.** For each invariant produced in step 9, the pipeline produces a single validation verdict — `Enforced`, `Absent`, `Partial`, or `Inconclusive` — on whether the property actually holds in the code at the validated subject. Each `ValidationTopic` names exactly one parent `invariant_topic`, carries a one-sentence `rationale` explaining the verdict, and cites `evidence_topics` (modifiers, role checks, state writes, return-value checks, or — for `Absent` — the subject itself as "where the enforcement should have been") inside the subject's containing function. `Inconclusive` is a first-class verdict (no v1 harness for `EconomicInvariant`, anchor declarations not visible in the function's surface, etc.) rather than a fallback. Cross-site propagation — validating one invariant at every subject in scope where the property must hold — is a deferred later pipeline step.
 
 ### Out-of-Scope and Dependency Code
 
@@ -518,7 +521,7 @@ Type constraint checks can be checked by a constraint algorithm. Specification c
 
 General audit flow is:
  1. Read and understand the docs and the purpose of the project
- 2. Run the initial generation pipeline (nine steps): semantic linking, requirement extraction, behavior extraction, feature synthesis via reconciliation, characteristic synthesis, functional purpose & placement generation on every non-pure subject in an in-scope function, condition generation on every non-pure subject, threat generation against each condition, and invariant generation against each threat
+ 2. Run the initial generation pipeline (ten steps): semantic linking, requirement extraction, behavior extraction, feature synthesis via reconciliation, characteristic synthesis, functional purpose & placement generation on every non-pure subject in an in-scope function, condition generation on every non-pure subject, threat generation against each condition, invariant generation against each threat, and invariant validation producing per-invariant verdicts (`Enforced` / `Absent` / `Partial` / `Inconclusive`)
  3. Review and refine the generated security model — verify functional semantics, add missing requirements, correct behavior descriptions, adjust feature groupings, confirm or correct the synthesized security characteristics, confirm or correct generated purpose and placement rationale
  4. Step through all convergences — invariants from threats are attached and checked at convergences; conditions and threats are re-examined as needed
  5. Perform impact analysis — link threats to the features they affect, establishing severity and the relationship type ("is vulnerable to" or "defends against"); unlinked threats are flagged for review

@@ -1551,9 +1551,10 @@ fn render_solidity_ast_snippet(
   // hold for purpose+placement to be fulfilled); threats are adversarial
   // inversions of those conditions, 1:1 anchored to a `falsifies_condition`.
   // Field availability is data-flow driven: each lookup is gated on
-  // presence in `audit_data`, so step 6's input naturally carries
-  // step 5's output, step 7's input naturally carries step 6's, and
-  // step 8's input naturally carries step 7's.
+  // presence in `audit_data`, so step 7's input naturally carries
+  // step 6's output, step 8's input naturally carries step 7's,
+  // step 9's input naturally carries step 8's, and step 10's input
+  // naturally carries step 9's.
   if is_non_pure {
     if let Some(p_topic) = audit_data.subject_purposes.get(&topic)
       && let Some(TopicMetadata::FunctionalPurposeTopic { description, .. }) =
@@ -1597,7 +1598,7 @@ fn render_solidity_ast_snippet(
       }
     }
     // Inline threats for this non-pure subject from the reverse index.
-    // Stamped here so step 8 (invariants) inherits the threats payload
+    // Stamped here so step 9 (invariants) inherits the threats payload
     // for free — same shape as the conditions hook above, gated on
     // presence (no placeholder values, orphan topics filtered out).
     if let Some(threat_topics) = audit_data.subject_threats.get(&topic) {
@@ -1630,11 +1631,11 @@ fn render_solidity_ast_snippet(
       }
     }
     // Inline invariants for this non-pure subject from the reverse index.
-    // Stamped here so step 9 (per-function entry-boundary check) inherits
-    // the invariants payload for free — same shape as the conditions and
-    // threats hooks above, gated on presence (no placeholder values,
-    // orphan topics filtered out). Step 8 itself does not consume this
-    // hook; it is purely downstream prep.
+    // Stamped here so step 10 (validations) consumes the invariants
+    // payload for free — same shape as the conditions and threats hooks
+    // above, gated on presence (no placeholder values, orphan topics
+    // filtered out). Step 9 itself does not consume this hook; it is
+    // purely downstream prep.
     if let Some(inv_topics) = audit_data.subject_invariants.get(&topic) {
       let invariants: Vec<serde_json::Value> = inv_topics
         .iter()
@@ -2695,8 +2696,8 @@ pub struct BatchForExtraction {
 /// Unified renderer used by every pipeline step that needs a batch of
 /// in-scope functions/modifiers as LLM input. The envelope shape is
 /// length-keyed: when `members.len() == 1` the JSON uses a `subject`
-/// object (used by per-function callers like step 5 and step 6); when
-/// `members.len() > 1` the JSON uses a `batch` array (used by step 3).
+/// object (used by per-function callers — steps 6, 7, 8, 9, and 10);
+/// when `members.len() > 1` the JSON uses a `batch` array (used by step 3).
 /// `non_pure_subjects` is always at the top level.
 ///
 /// Each member object carries (in addition to the prior shape):
@@ -2745,7 +2746,7 @@ pub struct BatchForExtraction {
 ///   this member's behaviors. Requirements deduped across features.
 ///   The array is empty before reconciliation has run (step 3) or for
 ///   members without behavior links to any feature; per-step callers
-///   that require non-empty features (step 5+) filter members out
+///   that require non-empty features (step 6+) filter members out
 ///   themselves before or after rendering.
 /// - `behaviors` — only attached when the member already has behaviors
 ///   in `audit_data` (i.e. step 3 has run); step 3's own input naturally
@@ -2788,7 +2789,7 @@ pub fn render_batch_for_extraction(
     // Only emit the `features` array if it is non-empty.
     // It is empty before reconciliation (step 4) has run, which is the
     // normal state during step 3 (behavior extraction).
-    // Callers that require a non-empty feature link (step 5 and later)
+    // Callers that require a non-empty feature link (step 6 and later)
     // filter members out before rendering or after; the renderer is step-agnostic.
     let features = lookup_member_features(member, audit_data);
     if !features.is_empty() {
@@ -2897,7 +2898,7 @@ fn render_member_for_batch(
   });
 
   // Attach prior behaviors when they exist. Step 3's input naturally
-  // omits this because behaviors are step 3's output; step 5 and later
+  // omits this because behaviors are step 3's output; step 6 and later
   // see them as inputs. Field availability is data-flow driven \u{2014} no
   // step-aware flag needed.
   let prior =
@@ -5858,7 +5859,7 @@ mod synthesis_render_tests {
 #[cfg(test)]
 mod functional_property_render_tests {
   //! Tests for the helpers used by `render_batch_for_extraction` and the
-  //! rest of pipeline step 5: `walk_for_non_pure`, `lookup_member_features`,
+  //! rest of pipeline step 6: `walk_for_non_pure`, `lookup_member_features`,
   //! `first_semantic`. These exercise behavior at the topic-metadata layer
   //! without requiring full AST construction where possible.
   use super::*;
@@ -7397,8 +7398,8 @@ mod batch_render_integration_tests {
   fn render_omits_purpose_and_placement_when_audit_data_lacks_them() {
     // Non-pure subject with no `subject_purposes` / `subject_placements`
     // entries: the renderer must NOT stamp `functional_purpose` or
-    // `placement_rationale` onto the node. (Step 5 hasn't run yet, or
-    // step 5 chose to skip this subject.)
+    // `placement_rationale` onto the node. (Step 6 hasn't run yet, or
+    // step 6 chose to skip this subject.)
     let mut audit = empty_audit();
     let container = domain::ProjectPath {
       file_path: "test.sol".to_string(),
@@ -8025,7 +8026,7 @@ mod batch_render_integration_tests {
     // Non-pure subject with ThreatTopic entries in subject_threats must
     // carry an inline `threats` array on the rendered node, shaped as
     // {topic, description, falsifies_condition, controlled_by,
-    // evidence_topics}. Mirrors the conditions hook above; step 8 will
+    // evidence_topics}. Mirrors the conditions hook above; step 9 will
     // consume this payload directly.
     let mut audit = empty_audit();
     let container = domain::ProjectPath {
@@ -8395,10 +8396,10 @@ mod batch_render_integration_tests {
     // Non-pure subject with InvariantTopic entries in subject_invariants
     // must carry an inline `invariants` array on the rendered node,
     // shaped as {topic, description, kind, threat_topic, severity}.
-    // Mirrors the conditions and threats hooks; step 9 will consume
-    // this payload directly. Step 8 itself does not read its own hook —
-    // the hook is added now so step 9 inherits it for free, the same
-    // way step 7 phase 3 prepared the threats hook before step 8.
+    // Mirrors the conditions and threats hooks; step 10 (validations)
+    // consumes this payload directly. Step 9 itself does not read its
+    // own hook — the hook is added now so step 10 inherits it for free,
+    // the same way step 8 phase 3 prepared the threats hook before step 9.
     let mut audit = empty_audit();
     let container = domain::ProjectPath {
       file_path: "test.sol".to_string(),

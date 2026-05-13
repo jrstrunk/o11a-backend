@@ -2375,13 +2375,14 @@ mod characteristic_synthesis_tests {
   /// Characteristic synthesis is the *only* pipeline step whose prompt
   /// is allowed to mention characteristics. Feature synthesis (step 4),
   /// functional property generation (step 6), condition generation
-  /// (step 7), and threat generation (step 8) consume their inputs from
-  /// disjoint sources (requirements + behaviors for step 4; member-scoped
-  /// AST + per-step prior outputs for steps 6/7/8). If any of those
-  /// prompts ever started saying "and these system characteristics: …",
-  /// the prompt author would also need to wire a renderer change to
-  /// populate the JSON field — but the prompt change alone is enough to
-  /// invalidate the boundary contract.
+  /// (step 7), threat generation (step 8), invariant generation
+  /// (step 9), and invariant validation (step 10) consume their inputs
+  /// from disjoint sources (requirements + behaviors for step 4;
+  /// member-scoped AST + per-step prior outputs for steps 6/7/8/9/10).
+  /// If any of those prompts ever started saying "and these system
+  /// characteristics: …", the prompt author would also need to wire a
+  /// renderer change to populate the JSON field — but the prompt change
+  /// alone is enough to invalidate the boundary contract.
   ///
   /// This is the strongest mechanical guard available at the unit level:
   /// it doesn't require constructing real AST nodes (which would be
@@ -2411,6 +2412,10 @@ mod characteristic_synthesis_tests {
       (
         "EXTRACT_INVARIANTS_PROMPT (step 9)",
         EXTRACT_INVARIANTS_PROMPT,
+      ),
+      (
+        "EXTRACT_VALIDATIONS_PROMPT (step 10)",
+        EXTRACT_VALIDATIONS_PROMPT,
       ),
     ];
 
@@ -2595,7 +2600,7 @@ pub async fn extract_behaviors_from_batch(
 }
 
 // ============================================================================
-// Functional Purpose & Placement Rationale (Pipeline Step 5)
+// Functional Purpose & Placement Rationale (Pipeline Step 6)
 // ============================================================================
 
 /// Prompt for generating functional purpose and placement rationale for
@@ -2868,7 +2873,7 @@ fn validate_functional_property_coverage(
 }
 
 // ============================================================================
-// Conditions (Pipeline Step 6)
+// Conditions (Pipeline Step 7)
 // ============================================================================
 
 /// Prompt for generating conditions — assertions that must hold for a
@@ -2877,7 +2882,7 @@ fn validate_functional_property_coverage(
 /// function/modifier. The input JSON is the output of
 /// `render_batch_for_extraction` called with a single-member slice; the
 /// envelope uses the `subject` shape (not `batch`). The renderer inlines
-/// `functional_purpose` and `placement_rationale` (from step 5) on each
+/// `functional_purpose` and `placement_rationale` (from step 6) on each
 /// non-pure subject node, so the LLM can reason from purpose+placement
 /// without re-deriving them. See pipeline-dag.md step 6 and SPEC's
 /// "Managing Conditions" / "Conditions vs. Invariants" sections.
@@ -3065,7 +3070,7 @@ pub struct ParsedCondition {
 /// input's `non_pure_subjects` list appears exactly once in the LLM's
 /// response; missing or extra topics surface as `tracing::warn` events
 /// but do not fail the task. Subjects with zero conditions are dropped
-/// with a warning (step 7 will not see them). Malformed evidence topics
+/// with a warning (step 8 will not see them). Malformed evidence topics
 /// are dropped from their condition; the condition itself is kept with
 /// the remaining valid evidence topics.
 pub async fn extract_conditions_from_batch(
@@ -3093,7 +3098,7 @@ pub async fn extract_conditions_from_batch(
   // Parse each subject_topic safely, dedupe, reject any topic that wasn't
   // in the batch's `non_pure_subjects` list, drop subjects with zero
   // conditions, and parse evidence topics per condition. Same shape as
-  // step 5's strict-filter / dedupe block — see that function's comment
+  // step 6's strict-filter / dedupe block — see that function's comment
   // for the rationale.
   let mut entries = Vec::with_capacity(wrapper.subjects.len());
   let mut seen_subjects: std::collections::HashSet<topic::Topic> =
@@ -3124,7 +3129,7 @@ pub async fn extract_conditions_from_batch(
         continue;
       }
     };
-    // Strict membership check matches step 5: only accept subjects from
+    // Strict membership check matches step 6: only accept subjects from
     // the batch's `non_pure_subjects` list. When the input list is empty
     // (parse failure or absent field), accept all valid topics so the
     // caller still gets results.
@@ -3158,7 +3163,7 @@ pub async fn extract_conditions_from_batch(
       // the schema cannot enforce conditions.len() >= 1. The prompt
       // tells the LLM to emit at least one condition per subject; a
       // zero-condition subject is signal that the LLM gave up on this
-      // subject. Drop the entry (step 7 won't see it) and keep the
+      // subject. Drop the entry (step 8 won't see it) and keep the
       // seen-marker — a duplicate empty followed by non-empty for the
       // same subject is still treated as "first wins, dropped".
       empty_conditions.push(s.subject_topic);
@@ -3210,7 +3215,7 @@ pub async fn extract_conditions_from_batch(
 }
 
 /// Log warnings for any input topic missing from the LLM output and for
-/// any output topic not in the input list. Same shape as step 5's
+/// any output topic not in the input list. Same shape as step 6's
 /// `validate_functional_property_coverage`.
 fn validate_conditions_coverage(
   expected: &std::collections::HashSet<String>,
@@ -3244,7 +3249,7 @@ fn validate_conditions_coverage(
 }
 
 // ============================================================================
-// Threats (Pipeline Step 7)
+// Threats (Pipeline Step 8)
 // ============================================================================
 
 /// Prompt for generating threats — concrete adversarial scenarios that
@@ -3252,7 +3257,7 @@ fn validate_conditions_coverage(
 /// subject in a single in-scope function/modifier. The input JSON is the
 /// output of `render_batch_for_extraction` called with a single-member
 /// slice; the envelope uses the `subject` shape. The unified renderer
-/// inlines a `conditions` array on each non-pure subject (step 6 phase 3
+/// inlines a `conditions` array on each non-pure subject (step 7 phase 3
 /// wired this) — that array is the load-bearing input. Threats are 1:1
 /// to the condition they falsify; one condition can be the target of
 /// many threats. See SPEC's "Conditions vs. Invariants" and
@@ -3318,7 +3323,7 @@ semantic block, the function's signature, and the function's modifiers \
 and parameters. Cross-function topics — other functions, state-variable \
 declarations, documentation topics, called-function topics — are \
 **invalid for threats** and will be rejected. Those are invariant-layer \
-anchors (step 8 will produce invariants that point outside the subject \
+anchors (step 9 will produce invariants that point outside the subject \
 to the codebase-level defenses). Rationale: threats describe the \
 vulnerable surface; invariants describe the protections.\n\n\
 **Frame absence as in-subject evidence.** If the threat is enabled by \
@@ -3532,7 +3537,7 @@ struct ThreatsValidationContext {
   /// layer concern.
   in_function_topics: std::collections::HashSet<String>,
   /// Subject topic id → set of inline condition topic ids stamped on
-  /// that subject by step 6's renderer hook. Used to reject
+  /// that subject by step 7's renderer hook. Used to reject
   /// `falsifies_condition` entries that don't actually belong to the
   /// claimed subject.
   subject_conditions:
@@ -3759,7 +3764,7 @@ fn parse_threats_response(
 
     // Subject-scoped condition set from the renderer's inline stamp.
     // `None` here means the subject node had no `conditions` array in the
-    // rendered batch JSON (either step 6 produced nothing for this
+    // rendered batch JSON (either step 7 produced nothing for this
     // subject, or the renderer omitted it). Under the spec's
     // "falsifies_condition must appear in the subject's inline
     // conditions array" rule, no link can be valid when the array is
@@ -3873,7 +3878,7 @@ fn parse_threats_response(
     if conditions.is_empty() {
       // A subject with zero kept conditions is a no-signal entry —
       // drop it from the output (the seen-marker still blocks
-      // duplicates, matching step 6's "first wins" semantics).
+      // duplicates, matching step 7's "first wins" semantics).
       continue;
     }
 
@@ -4074,16 +4079,16 @@ fn description_starts_with_party_noun(desc: &str) -> bool {
 }
 
 // ============================================================================
-// Invariants (Pipeline Step 8)
+// Invariants (Pipeline Step 9)
 // ============================================================================
 
 /// Prompt for generating invariants — codebase-level defensive properties
-/// stated against the threats produced in step 7 — for every threat on
+/// stated against the threats produced in step 8 — for every threat on
 /// every non-pure subject in a single in-scope function/modifier. The
 /// input JSON is the output of `render_batch_for_extraction` called with
 /// a single-member slice; the envelope uses the `subject` shape. The
-/// unified renderer inlines a `conditions` array (step 6) AND a `threats`
-/// array (step 7) on each non-pure subject — the threats array is the
+/// unified renderer inlines a `conditions` array (step 7) AND a `threats`
+/// array (step 8) on each non-pure subject — the threats array is the
 /// load-bearing input. Invariants are 1:N to the threat they defend; one
 /// threat can carry many invariants. Invariants carry no enforcement
 /// locations at generation time; they do carry an `anchors` array
@@ -4436,7 +4441,7 @@ struct InvariantsValidationContext {
   /// Subjects in the batch's top-level `non_pure_subjects` array.
   expected_subjects: std::collections::HashSet<String>,
   /// Subject topic id → set of inline threat topic ids stamped on
-  /// that subject by step 7's renderer hook. Used to reject
+  /// that subject by step 8's renderer hook. Used to reject
   /// `threat_topic` entries that don't actually belong to the claimed
   /// subject. Mirrors `ThreatsValidationContext.subject_conditions`.
   subject_threats:
@@ -4620,7 +4625,7 @@ fn parse_invariants_response(
 
     // Subject-scoped threat set from the renderer's inline stamp.
     // `None` here means the subject node had no `threats` array in the
-    // rendered batch JSON (either step 7 produced nothing for this
+    // rendered batch JSON (either step 8 produced nothing for this
     // subject, or the renderer omitted it). Under the spec's
     // "threat_topic must appear in the subject's inline threats array"
     // rule, no link can be valid when the array is absent. We gate the
@@ -4896,6 +4901,392 @@ fn description_reads_as_recommendation(desc: &str) -> bool {
     }
   }
   false
+}
+
+// ============================================================================
+// Validations (Pipeline Step 10)
+// ============================================================================
+
+/// Prompt for validating invariants — per-invariant verdicts on whether
+/// each defensive property generated in step 9 actually holds at the
+/// subject it was generated for. The input JSON is the output of
+/// `render_batch_for_extraction` called with a single-member slice;
+/// the envelope uses the `subject` shape. The unified renderer inlines
+/// a `conditions` array (step 7), a `threats` array (step 8), and an
+/// `invariants` array (step 9 + Phase 2 of step 10's `anchors`) on
+/// each non-pure subject. The pipeline step (Phase 6) augments the
+/// envelope with a top-level `invariants_to_validate` array naming the
+/// A-prefixed invariant topics this batch must produce verdicts for.
+/// Each verdict joins `purpose → conditions → threats → invariants
+/// → validations`. See SPEC's "Conditions vs. Invariants" and
+/// `validation-step-10.md`.
+const EXTRACT_VALIDATIONS_PROMPT: &str = "Below is one in-scope function \
+or modifier from a smart contract project. The function appears under \
+the `subject` field with the same shape as in step 9 (invariant \
+generation). Critically, each non-pure subject node now carries an \
+inline `invariants` array of \
+`{topic, description, kind, threat_topic, severity, anchors}` entries \
+— each invariant is one defensive property the codebase must enforce. \
+The `anchors` array on each invariant cites the declarations the \
+property names; use these to focus your reading.\n\n\
+The top-level **`invariants_to_validate`** array lists every invariant \
+topic in this function that needs a verdict. For **each entry** in \
+that list, produce exactly one **validation** — a verdict on whether \
+the invariant's property actually holds in the rendered function.\n\n\
+**Verdicts.** Choose one of:\n\
+- `enforced` — concrete enforcement is present at this subject. Cite \
+the evidence topics (modifier, check statement, ordering pattern, etc.) \
+in `evidence_topics`.\n\
+- `absent` — the expected enforcement shape is missing. Cite where it \
+*should have been* in `evidence_topics` (typically the function's \
+modifier list, the subject node itself, or the function's first \
+non-pure statement). For `absent` to make sense, the invariant's kind \
+must have a recognizable enforcement shape — if it doesn't (e.g., \
+`EconomicInvariant`, `Other`), prefer `inconclusive`.\n\
+- `partial` — enforcement is present for some aspects of the property \
+but missing for others. Example: a multi-anchor invariant where one \
+anchor is gated and another isn't. Cite evidence for both the present \
+and absent aspects.\n\
+- `inconclusive` — the validator cannot determine enforcement from the \
+visible surface. Use when the kind has no mechanical enforcement shape \
+(`EconomicInvariant`, `Other`), when the anchors point at declarations \
+not visible in this function, when the enforcement would require \
+cross-function reasoning, or when the property is genuinely \
+ambiguous. Explain why in `rationale`.\n\n\
+**Rationale is always required.** One sentence on why this verdict. For \
+`enforced`, name what enforcement you saw. For `absent`, name what you \
+expected and didn't see. For `partial`, name the gap. For \
+`inconclusive`, name what's missing for a definitive verdict.\n\n\
+**Evidence topics are constrained to the subject's containing function.** \
+Cite topics inside the function: the subject node, its descendants, \
+sibling statements in the same semantic block, the containing function, \
+its modifiers, its parameters. Cross-function evidence is invalid — \
+that's a propagation concern handled in a later pipeline step.\n\n\
+**Use the audit-wide security context.** Any `Security context` block \
+above this prompt names known defenses and role definitions. Use it \
+to anchor your judgment of what enforcement counts at this audit.\n\n\
+Return a JSON object with a `validations` key whose value is an \
+array. Each entry has:\n\
+- `invariant_topic`: an A-prefixed topic ID from the \
+`invariants_to_validate` list\n\
+- `verdict`: one of `enforced` / `absent` / `partial` / \
+`inconclusive`\n\
+- `rationale`: one sentence justifying the verdict\n\
+- `evidence_topics`: an array of topic IDs (may be empty for \
+`inconclusive`)\n\n\
+Every invariant in `invariants_to_validate` must appear in the \
+response exactly once. Missing invariants are flagged as warnings; \
+duplicates keep the first occurrence.\n\n";
+
+#[derive(Deserialize)]
+struct LLMValidation {
+  invariant_topic: String,
+  verdict: domain::ValidationVerdict,
+  rationale: String,
+  #[serde(default)]
+  evidence_topics: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct LLMValidationsResponse {
+  validations: Vec<LLMValidation>,
+}
+
+static VALIDATIONS_SCHEMA: LazyLock<JsonSchema> =
+  LazyLock::new(|| JsonSchema {
+    name: "extract_validations",
+    schema: json!({
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["validations"],
+      "properties": {
+        "validations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "invariant_topic",
+              "verdict",
+              "rationale",
+              "evidence_topics"
+            ],
+            "properties": {
+              "invariant_topic": { "type": "string" },
+              "verdict": {
+                "type": "string",
+                "enum": ["enforced", "absent", "partial", "inconclusive"]
+              },
+              "rationale": { "type": "string" },
+              "evidence_topics": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }),
+    empty_response: r#"{"validations":[]}"#,
+  });
+
+/// Result of validations extraction for one batch (one function in
+/// per-function mode). Each entry is a single verdict on one invariant.
+pub struct ParsedValidations {
+  pub entries: Vec<ParsedValidation>,
+}
+
+pub struct ParsedValidation {
+  pub invariant_topic: topic::Topic,
+  pub verdict: domain::ValidationVerdict,
+  pub rationale: String,
+  /// Topics inside the subject's containing function that the LLM cites
+  /// as evidence for the verdict. May be empty (`inconclusive` verdicts
+  /// often have no concrete evidence to point at). Malformed entries
+  /// are dropped at parse time with a warning.
+  pub evidence_topics: Vec<topic::Topic>,
+}
+
+/// Validation context derived from the rendered batch JSON. Carries the
+/// expected invariant set — the A-prefixed topics named in the
+/// envelope's top-level `invariants_to_validate` array (stamped by the
+/// pipeline step at render time). When empty (malformed JSON or the
+/// envelope field is absent), the parser falls back to permissive
+/// acceptance — only structural checks (A-prefixed, well-formed topic)
+/// gate output. Mirrors the threats/invariants parsers' same-shape
+/// fallback for robustness against renderer changes.
+struct ValidationsContext {
+  expected_invariants: std::collections::HashSet<String>,
+}
+
+/// Run the validations LLM task against a single function rendered by
+/// `context::render_batch_for_extraction` in `subject` shape, augmented
+/// by the pipeline step with a top-level `invariants_to_validate`
+/// array. `label` identifies the function for logs. `security_notes` is
+/// the audit-wide framing rendered by
+/// `pipeline::render_security_characteristics`; when `Some` and
+/// non-empty, it is prepended to the prompt as a `Security context:`
+/// block so the LLM's verdict judgments anchor in defenses the auditor
+/// has already documented. Validation drops bad entries but keeps the
+/// good — a batch with one malformed validation still produces verdicts
+/// from the rest. Same drop-and-warn shape as steps 5/6/7/8.
+pub async fn extract_validations_from_batch(
+  batch_json: &str,
+  label: &str,
+  security_notes: Option<&str>,
+) -> Result<ParsedValidations, TaskError> {
+  let prompt = match security_notes {
+    Some(notes) if !notes.trim().is_empty() => format!(
+      "Security context:\n{}\n\n{}Batch:\n{}",
+      notes.trim(),
+      EXTRACT_VALIDATIONS_PROMPT,
+      batch_json
+    ),
+    _ => format!("{}Batch:\n{}", EXTRACT_VALIDATIONS_PROMPT, batch_json),
+  };
+
+  let log_label = format!("validations_{}", label);
+  let response = router::chat_completion(
+    TaskSize::Large,
+    router::SYSTEM_MESSAGE_CODE,
+    &prompt,
+    Some(&log_label),
+    Some(&VALIDATIONS_SCHEMA),
+  )
+  .await?;
+
+  let wrapper: LLMValidationsResponse =
+    router::parse_response(&response, "validations", &prompt)?;
+
+  let ctx = build_validations_validation_context(batch_json);
+  validate_validations_coverage(&ctx, &wrapper.validations, label);
+
+  let entries = parse_validations_response(wrapper, &ctx, label);
+  Ok(ParsedValidations { entries })
+}
+
+/// Parse a single-subject batch JSON envelope into the validation
+/// context used by `parse_validations_response`. Walks the top-level
+/// `invariants_to_validate` array (populated by the step-10 pipeline
+/// step at render time — the unified renderer stays step-agnostic).
+/// Returns an empty context on malformed JSON; downstream parsing
+/// falls back to permissive acceptance in that case.
+fn build_validations_validation_context(
+  batch_json: &str,
+) -> ValidationsContext {
+  let mut ctx = ValidationsContext {
+    expected_invariants: std::collections::HashSet::new(),
+  };
+  let Ok(value) = serde_json::from_str::<serde_json::Value>(batch_json) else {
+    return ctx;
+  };
+  if let Some(arr) = value
+    .get("invariants_to_validate")
+    .and_then(|v| v.as_array())
+  {
+    ctx.expected_invariants = arr
+      .iter()
+      .filter_map(|item| item.as_str().map(String::from))
+      .collect();
+  }
+  ctx
+}
+
+/// Parse + dedupe + validate the raw LLM response against the batch's
+/// rendered envelope. Same "drop-on-defect, warn-on-defect, keep what
+/// remains" shape as `parse_invariants_response`.
+fn parse_validations_response(
+  wrapper: LLMValidationsResponse,
+  ctx: &ValidationsContext,
+  label: &str,
+) -> Vec<ParsedValidation> {
+  let mut entries: Vec<ParsedValidation> =
+    Vec::with_capacity(wrapper.validations.len());
+  let mut seen_invariants: std::collections::HashSet<topic::Topic> =
+    std::collections::HashSet::new();
+  let mut bad_invariant_topics: Vec<String> = Vec::new();
+  let mut rejected_unexpected: Vec<String> = Vec::new();
+  let mut duplicates: Vec<String> = Vec::new();
+  let mut empty_rationales: Vec<String> = Vec::new();
+  let mut malformed_evidence: Vec<String> = Vec::new();
+
+  for v in wrapper.validations {
+    let invariant_topic = match topic::parse_topic(&v.invariant_topic) {
+      Ok(t @ topic::Topic::AdversarialProperty(_)) => t,
+      _ => {
+        bad_invariant_topics.push(v.invariant_topic);
+        continue;
+      }
+    };
+    if !ctx.expected_invariants.is_empty()
+      && !ctx.expected_invariants.contains(&v.invariant_topic)
+    {
+      rejected_unexpected.push(v.invariant_topic);
+      continue;
+    }
+    if !seen_invariants.insert(invariant_topic) {
+      duplicates.push(v.invariant_topic);
+      continue;
+    }
+
+    let rationale = v.rationale.trim().to_string();
+    if rationale.is_empty() {
+      empty_rationales.push(v.invariant_topic.clone());
+      continue;
+    }
+
+    let mut evidence_topics: Vec<topic::Topic> =
+      Vec::with_capacity(v.evidence_topics.len());
+    for ev in v.evidence_topics {
+      match topic::parse_topic(&ev) {
+        Ok(parsed) => evidence_topics.push(parsed),
+        Err(_) => {
+          malformed_evidence.push(ev);
+        }
+      }
+    }
+
+    entries.push(ParsedValidation {
+      invariant_topic,
+      verdict: v.verdict,
+      rationale,
+      evidence_topics,
+    });
+  }
+
+  if !bad_invariant_topics.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "validations: dropped {} entry(ies) with malformed or non-A-prefixed \
+       invariant_topic: {:?}",
+      bad_invariant_topics.len(),
+      bad_invariant_topics
+    );
+  }
+  if !rejected_unexpected.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "validations: rejected {} invariant_topic(s) outside the batch's \
+       invariants_to_validate list: {:?}",
+      rejected_unexpected.len(),
+      rejected_unexpected
+    );
+  }
+  if !duplicates.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "validations: LLM returned {} duplicate invariant_topic(s) (kept \
+       first, dropped subsequent): {:?}",
+      duplicates.len(),
+      duplicates
+    );
+  }
+  if !empty_rationales.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "validations: dropped {} entry(ies) with empty rationale (a \
+       rationale-less verdict carries no audit signal): {:?}",
+      empty_rationales.len(),
+      empty_rationales
+    );
+  }
+  if !malformed_evidence.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "validations: dropped {} malformed evidence_topic(s) across all \
+       validations (kept the containing entry): {:?}",
+      malformed_evidence.len(),
+      malformed_evidence
+    );
+  }
+
+  entries
+}
+
+/// Log warnings for any expected invariant missing from the LLM output
+/// and for any output invariant not in the expected list. Same shape as
+/// `validate_invariants_coverage` — extras are also visible via the
+/// rejected-unexpected drop in `parse_validations_response`, but logging
+/// at coverage time keeps the "missing vs. extra" signal symmetric and
+/// matches the steps 5/6/7/8 convention.
+fn validate_validations_coverage(
+  ctx: &ValidationsContext,
+  got: &[LLMValidation],
+  label: &str,
+) {
+  if ctx.expected_invariants.is_empty() {
+    return;
+  }
+  let received: std::collections::HashSet<&str> =
+    got.iter().map(|v| v.invariant_topic.as_str()).collect();
+  let missing: Vec<&String> = ctx
+    .expected_invariants
+    .iter()
+    .filter(|k| !received.contains(k.as_str()))
+    .collect();
+  let extra: Vec<&str> = received
+    .iter()
+    .copied()
+    .filter(|s| !ctx.expected_invariants.contains(*s))
+    .collect();
+  if !missing.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "validations: {} invariant(s) in invariants_to_validate were not \
+       addressed by the LLM: {:?}",
+      missing.len(),
+      missing
+    );
+  }
+  if !extra.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "validations: {} invariant_topic(s) in LLM output were not in the \
+       batch's invariants_to_validate list: {:?}",
+      extra.len(),
+      extra
+    );
+  }
 }
 
 /// Prompt for normalizing a documentation file for plain text readability.
@@ -5524,7 +5915,7 @@ mod conditions_parser_tests {
 
   #[test]
   fn parser_first_wins_even_when_first_has_empty_conditions() {
-    // Strict "first occurrence wins" semantics — matches step 5.
+    // Strict "first occurrence wins" semantics — matches step 6.
     // If the LLM emits the same subject twice and the first copy has
     // zero conditions, the subject is dropped and the second copy is
     // discarded as a duplicate. Otherwise the dedup rule would silently
@@ -5603,7 +5994,7 @@ mod conditions_parser_tests {
   #[test]
   fn parser_accepts_all_when_expected_empty() {
     // No expected list → "accept all valid topics" (legacy behavior,
-    // matching step 5).
+    // matching step 6).
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
         {"description":"a","kind":"RestrictedReachability","evidence_topics":[]}
@@ -6306,7 +6697,7 @@ mod threats_parser_tests {
   #[test]
   fn parser_rejects_all_links_when_subject_has_no_inline_conditions() {
     // Batch is well-formed (expected_subjects populated) but the
-    // subject node was rendered without a `conditions` array (step 6
+    // subject node was rendered without a `conditions` array (step 7
     // produced no conditions for this subject, or the renderer omitted
     // it). Under the strict "must appear in the inline conditions
     // array" rule, no falsifies_condition can be valid — every entry
@@ -6408,7 +6799,7 @@ mod threats_parser_tests {
     // The condition's falsifies_condition is invalid (non-A-prefixed),
     // so the condition is dropped. With zero kept conditions, the
     // entire subject must be dropped from output — same "no signal"
-    // policy as step 6's zero-conditions-subject rule.
+    // policy as step 7's zero-conditions-subject rule.
     let batch = build_batch_envelope("N100", "N10", &["A5"], &["N11"], &[]);
     let json = r#"{"subjects":[
       {"subject_topic":"N10","conditions":[
@@ -7241,7 +7632,7 @@ mod invariants_parser_tests {
   #[test]
   fn parser_rejects_all_links_when_subject_has_no_inline_threats() {
     // Batch is well-formed (expected_subjects populated) but the
-    // subject node was rendered without a `threats` array (step 7
+    // subject node was rendered without a `threats` array (step 8
     // produced no threats for this subject, or the renderer omitted
     // it). Under the strict "must appear in the inline threats array"
     // rule, no threat_topic can be valid — every entry must be
@@ -7564,6 +7955,432 @@ mod invariants_parser_tests {
       "INVARIANTS_SCHEMA's kind.enum drifted from the Rust \
        InvariantKind variants. Update both together — the schema is \
        what the LLM is constrained against; the Rust enum is what \
+       serde deserializes the response into."
+    );
+  }
+}
+
+#[cfg(test)]
+mod validations_parser_tests {
+  use super::*;
+
+  /// Construct a single-subject batch envelope carrying a top-level
+  /// `invariants_to_validate` array. The pipeline step (Phase 6 of
+  /// step 10) stamps this field at render time; the parser reads it
+  /// in `build_validations_validation_context`. The rest of the
+  /// envelope mirrors the invariants parser's `build_batch_envelope`
+  /// shape so the test fixtures stay legible.
+  fn build_batch_envelope(
+    member_id: &str,
+    subject_id: &str,
+    invariant_ids: &[&str],
+  ) -> String {
+    let invariants: Vec<serde_json::Value> = invariant_ids
+      .iter()
+      .map(|t| {
+        json!({
+          "topic": t,
+          "description": "a defensive property",
+          "kind": "AccessGate",
+          "threat_topic": "A1",
+          "severity": "High",
+          "anchors": [],
+        })
+      })
+      .collect();
+
+    let subject_node = json!({
+      "type": "assignment",
+      "id": subject_id,
+      "invariants": invariants,
+    });
+    let envelope = json!({
+      "invariants_to_validate": invariant_ids,
+      "subject": {
+        "topic": member_id,
+        "name": "f",
+        "kind": "function",
+        "modifiers": [],
+        "definition": {
+          "type": "function_definition",
+          "id": member_id,
+          "body": { "type": "block", "statements": [subject_node] },
+        },
+        "semantics": {},
+        "called_function_behaviors": {},
+      }
+    });
+    serde_json::to_string(&envelope).unwrap()
+  }
+
+  /// End-to-end parse-and-validate: parses the LLM response then runs
+  /// it through `parse_validations_response`. Mirrors the production
+  /// path without the LLM call.
+  fn run_parse(json_response: &str, batch_json: &str) -> Vec<ParsedValidation> {
+    let wrapper: LLMValidationsResponse =
+      serde_json::from_str(json_response).expect("malformed test JSON");
+    let ctx = build_validations_validation_context(batch_json);
+    parse_validations_response(wrapper, &ctx, "test")
+  }
+
+  // --------- end-to-end response parsing ---------
+
+  #[test]
+  fn parser_round_trips_well_formed_response() {
+    let batch = build_batch_envelope("N100", "N10", &["A5", "A6"]);
+    let json = r#"{"validations":[
+      {"invariant_topic":"A5","verdict":"enforced","rationale":"onlyOwner modifier on the function gates the state write","evidence_topics":["N10","N100"]},
+      {"invariant_topic":"A6","verdict":"absent","rationale":"no staleness check on the price read","evidence_topics":["N10"]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 2);
+
+    assert_eq!(
+      entries[0].invariant_topic,
+      topic::new_adversarial_property_topic(5)
+    );
+    assert_eq!(entries[0].verdict, domain::ValidationVerdict::Enforced);
+    assert_eq!(
+      entries[0].rationale,
+      "onlyOwner modifier on the function gates the state write"
+    );
+    assert_eq!(
+      entries[0].evidence_topics,
+      vec![topic::new_node_topic(&10), topic::new_node_topic(&100)]
+    );
+
+    assert_eq!(
+      entries[1].invariant_topic,
+      topic::new_adversarial_property_topic(6)
+    );
+    assert_eq!(entries[1].verdict, domain::ValidationVerdict::Absent);
+    assert_eq!(entries[1].rationale, "no staleness check on the price read");
+    assert_eq!(entries[1].evidence_topics, vec![topic::new_node_topic(&10)]);
+  }
+
+  #[test]
+  fn parser_accepts_enforced_verdict() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"validations":[
+      {"invariant_topic":"A5","verdict":"enforced","rationale":"r","evidence_topics":[]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].verdict, domain::ValidationVerdict::Enforced);
+  }
+
+  #[test]
+  fn parser_accepts_absent_verdict() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"validations":[
+      {"invariant_topic":"A5","verdict":"absent","rationale":"r","evidence_topics":[]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].verdict, domain::ValidationVerdict::Absent);
+  }
+
+  #[test]
+  fn parser_accepts_partial_verdict() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"validations":[
+      {"invariant_topic":"A5","verdict":"partial","rationale":"r","evidence_topics":[]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].verdict, domain::ValidationVerdict::Partial);
+  }
+
+  #[test]
+  fn parser_accepts_inconclusive_verdict() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"validations":[
+      {"invariant_topic":"A5","verdict":"inconclusive","rationale":"r","evidence_topics":[]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].verdict, domain::ValidationVerdict::Inconclusive);
+  }
+
+  #[test]
+  fn parser_drops_invariant_not_in_expected_set() {
+    // A99 is not in `invariants_to_validate` → drop with a warning,
+    // keep the rest.
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"validations":[
+      {"invariant_topic":"A99","verdict":"enforced","rationale":"hallucinated","evidence_topics":[]},
+      {"invariant_topic":"A5","verdict":"enforced","rationale":"valid","evidence_topics":[]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+      entries[0].invariant_topic,
+      topic::new_adversarial_property_topic(5)
+    );
+  }
+
+  #[test]
+  fn validate_coverage_warns_when_expected_missing_from_response() {
+    // Coverage validator runs *before* the parser drops entries, so it
+    // sees the raw LLM output. Empty response with non-empty expected
+    // set triggers the missing-from-response warn path.
+    let mut expected = std::collections::HashSet::new();
+    expected.insert("A5".to_string());
+    expected.insert("A6".to_string());
+    let ctx = ValidationsContext {
+      expected_invariants: expected,
+    };
+    // Empty response — exercises the missing-from-response warn path.
+    validate_validations_coverage(&ctx, &[], "test");
+    // Extra-in-response — exercises the extras warn path.
+    let got = vec![LLMValidation {
+      invariant_topic: "A99".to_string(),
+      verdict: domain::ValidationVerdict::Enforced,
+      rationale: "r".to_string(),
+      evidence_topics: vec![],
+    }];
+    validate_validations_coverage(&ctx, &got, "test");
+  }
+
+  #[test]
+  fn parser_dedupes_repeated_invariant_first_wins() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"validations":[
+      {"invariant_topic":"A5","verdict":"enforced","rationale":"first","evidence_topics":[]},
+      {"invariant_topic":"A5","verdict":"absent","rationale":"second","evidence_topics":[]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].verdict, domain::ValidationVerdict::Enforced);
+    assert_eq!(entries[0].rationale, "first");
+  }
+
+  #[test]
+  fn parser_drops_entry_with_empty_rationale_and_trims_surrounding_whitespace()
+  {
+    // Whitespace-only rationale → drop the entry (no audit signal).
+    // Whitespace around real content → keep the entry with the trimmed
+    // string. Same shape as the threats parser's analogous test.
+    let batch = build_batch_envelope("N100", "N10", &["A5", "A6"]);
+    let json = r#"{"validations":[
+      {"invariant_topic":"A5","verdict":"enforced","rationale":"   \n  ","evidence_topics":[]},
+      {"invariant_topic":"A6","verdict":"absent","rationale":"   real rationale   ","evidence_topics":[]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+      entries[0].invariant_topic,
+      topic::new_adversarial_property_topic(6)
+    );
+    assert_eq!(entries[0].rationale, "real rationale");
+  }
+
+  #[test]
+  fn parser_drops_malformed_invariant_topic() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"validations":[
+      {"invariant_topic":"X99","verdict":"enforced","rationale":"r","evidence_topics":[]},
+      {"invariant_topic":"A5","verdict":"enforced","rationale":"r","evidence_topics":[]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+      entries[0].invariant_topic,
+      topic::new_adversarial_property_topic(5)
+    );
+  }
+
+  #[test]
+  fn parser_drops_non_a_prefixed_invariant_topic() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"validations":[
+      {"invariant_topic":"N5","verdict":"enforced","rationale":"r","evidence_topics":[]},
+      {"invariant_topic":"A5","verdict":"enforced","rationale":"r","evidence_topics":[]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+      entries[0].invariant_topic,
+      topic::new_adversarial_property_topic(5)
+    );
+  }
+
+  #[test]
+  fn parser_drops_malformed_evidence_topic_keeps_entry() {
+    // One bad evidence_topic is dropped (with a warning); the
+    // containing validation entry survives with the remaining valid
+    // evidence. Same drop-on-defect shape as threats' evidence parser.
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"validations":[
+      {"invariant_topic":"A5","verdict":"enforced","rationale":"r","evidence_topics":["N10","X99","N20","not-a-topic"]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+      entries[0].evidence_topics,
+      vec![topic::new_node_topic(&10), topic::new_node_topic(&20)]
+    );
+  }
+
+  #[test]
+  fn parser_rejects_off_list_verdict() {
+    // The closed `ValidationVerdict` enum + the JSON schema's
+    // verdict.enum constraint both reject off-list values. At the
+    // serde layer, an unknown variant fails top-level deserialization.
+    let json = r#"{"validations":[
+      {"invariant_topic":"A5","verdict":"unknown","rationale":"r","evidence_topics":[]}
+    ]}"#;
+    let result: Result<LLMValidationsResponse, _> = serde_json::from_str(json);
+    assert!(
+      result.is_err(),
+      "off-list verdict must fail top-level deserialization"
+    );
+  }
+
+  #[test]
+  fn parser_handles_empty_validations_array() {
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"validations":[]}"#;
+    let entries = run_parse(json, &batch);
+    assert!(entries.is_empty());
+  }
+
+  #[test]
+  fn parser_falls_back_permissive_when_batch_json_malformed() {
+    // Malformed batch JSON yields an empty validation context — no
+    // expected_invariants. The parser falls back to permissive: only
+    // the structural checks (A-prefixed, well-formed topic) gate
+    // output. Same fallback shape as the threats/invariants parsers.
+    let batch = "{ not valid json";
+    let json = r#"{"validations":[
+      {"invariant_topic":"A5","verdict":"enforced","rationale":"r","evidence_topics":["N10"]}
+    ]}"#;
+    let entries = run_parse(json, batch);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+      entries[0].invariant_topic,
+      topic::new_adversarial_property_topic(5)
+    );
+  }
+
+  #[test]
+  fn parser_evidence_topics_field_absence_defaults_to_empty() {
+    // `#[serde(default)]` on `evidence_topics` lets the parser handle
+    // field absence gracefully — same robustness shape as the
+    // invariants parser's `anchors` field. The schema marks the field
+    // required, but the serde-level default is the safety net.
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"validations":[
+      {"invariant_topic":"A5","verdict":"inconclusive","rationale":"r"}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].evidence_topics.is_empty());
+  }
+
+  #[test]
+  fn build_context_collects_expected_invariants() {
+    let batch = build_batch_envelope("N100", "N10", &["A5", "A6"]);
+    let ctx = build_validations_validation_context(&batch);
+    assert!(ctx.expected_invariants.contains("A5"));
+    assert!(ctx.expected_invariants.contains("A6"));
+  }
+
+  #[test]
+  fn build_context_handles_missing_invariants_to_validate_field() {
+    // If the renderer omits `invariants_to_validate` entirely, the
+    // context is empty; the parser then falls back to permissive
+    // acceptance.
+    let envelope = json!({
+      "subject": {
+        "topic": "N100",
+        "definition": { "type": "function_definition", "id": "N100" }
+      }
+    });
+    let batch = serde_json::to_string(&envelope).unwrap();
+    let ctx = build_validations_validation_context(&batch);
+    assert!(ctx.expected_invariants.is_empty());
+  }
+
+  #[test]
+  fn build_context_returns_empty_on_malformed_json() {
+    let ctx = build_validations_validation_context("{ malformed");
+    assert!(ctx.expected_invariants.is_empty());
+  }
+
+  #[test]
+  fn validate_coverage_no_op_when_expected_empty() {
+    let ctx = ValidationsContext {
+      expected_invariants: std::collections::HashSet::new(),
+    };
+    let got = vec![LLMValidation {
+      invariant_topic: "A5".to_string(),
+      verdict: domain::ValidationVerdict::Enforced,
+      rationale: "r".to_string(),
+      evidence_topics: vec![],
+    }];
+    validate_validations_coverage(&ctx, &got, "test");
+  }
+
+  // --------- schema drift guard ---------
+
+  /// Drift guard: the JSON schema's `verdict.enum` array (which the
+  /// LLM is constrained against) must exactly match the Rust
+  /// `ValidationVerdict` variants by serialized name, in declaration
+  /// order. Same shape as `INVARIANTS_SCHEMA`'s `kind.enum` guard.
+  #[test]
+  fn validations_schema_verdict_enum_matches_rust_variants() {
+    use domain::ValidationVerdict;
+
+    let rust_variants: Vec<String> = [
+      ValidationVerdict::Enforced,
+      ValidationVerdict::Absent,
+      ValidationVerdict::Partial,
+      ValidationVerdict::Inconclusive,
+    ]
+    .into_iter()
+    .map(|v| {
+      serde_json::to_value(v)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
+    })
+    .collect();
+
+    fn _exhaustiveness_guard(v: ValidationVerdict) {
+      match v {
+        ValidationVerdict::Enforced
+        | ValidationVerdict::Absent
+        | ValidationVerdict::Partial
+        | ValidationVerdict::Inconclusive => (),
+      }
+    }
+
+    let verdict_enum = VALIDATIONS_SCHEMA
+      .schema
+      .pointer("/properties/validations/items/properties/verdict/enum")
+      .expect(
+        "VALIDATIONS_SCHEMA shape changed; update the JSON pointer in \
+         this test to match",
+      )
+      .as_array()
+      .expect("verdict.enum must be a JSON array");
+
+    let schema_strings: Vec<String> = verdict_enum
+      .iter()
+      .map(|v| {
+        v.as_str()
+          .expect("verdict.enum entries must be strings")
+          .to_string()
+      })
+      .collect();
+
+    assert_eq!(
+      schema_strings, rust_variants,
+      "VALIDATIONS_SCHEMA's verdict.enum drifted from the Rust \
+       ValidationVerdict variants. Update both together — the schema \
+       is what the LLM is constrained against; the Rust enum is what \
        serde deserializes the response into."
     );
   }

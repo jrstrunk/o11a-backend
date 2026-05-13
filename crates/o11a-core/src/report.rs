@@ -420,8 +420,8 @@ impl std::error::Error for ApplyReportError {}
 /// `apply_snapshot` hydrated earlier in the startup sequence. The `A` reseed
 /// is load-bearing here even though `apply_report` does not itself install
 /// `A`-prefixed topics: the binary snapshot hydrated immediately beforehand
-/// carries `ConditionTopic` / `ThreatTopic` / `InvariantTopic` entries that
-/// must not be re-allocated over.
+/// carries `ConditionTopic` / `ThreatTopic` / `InvariantTopic` /
+/// `ValidationTopic` entries that must not be re-allocated over.
 ///
 /// Callers should invoke `crate::domain::rebuild_feature_context` on the audit
 /// data after applying the report, so that reverse indexes are refreshed.
@@ -597,10 +597,10 @@ pub fn apply_report(
   //   functional_purpose / placement_rationale topics, those came from
   //   the snapshot and are also present in the merged `topic_metadata`.
   // - `A` (adversarial property): `ConditionTopic` / `ThreatTopic` /
-  //   `InvariantTopic` are not in the report — they come from the
-  //   snapshot. Since `apply_report` runs after `apply_snapshot` in the
-  //   server startup sequence, scanning the merged `topic_metadata`
-  //   here covers them too.
+  //   `InvariantTopic` / `ValidationTopic` are not in the report — they
+  //   come from the snapshot. Since `apply_report` runs after
+  //   `apply_snapshot` in the server startup sequence, scanning the
+  //   merged `topic_metadata` here covers them too.
   //
   // Each scan is O(n) over `topic_metadata` and runs at startup only.
   crate::ids::reseed_spec_id(max_spec_id(audit_data));
@@ -649,7 +649,8 @@ fn max_functional_property_id(audit_data: &AuditData) -> i32 {
 /// to bound the adversarial-property-counter reseed. Adversarial-property
 /// topics enter `topic_metadata` via `apply_snapshot`, not via the report
 /// itself, so this scan finds the snapshot's ConditionTopic / ThreatTopic
-/// / InvariantTopic entries that must not be re-allocated over.
+/// / InvariantTopic / ValidationTopic entries that must not be re-
+/// allocated over.
 fn max_adversarial_property_id(audit_data: &AuditData) -> i32 {
   audit_data
     .topic_metadata
@@ -818,11 +819,11 @@ mod tests {
 
   #[test]
   fn apply_report_reseeds_adversarial_property_counter_past_snapshot_topic() {
-    // Adversarial-property topics (Condition/Threat/Invariant) enter
-    // `topic_metadata` via `apply_snapshot`, not via the report. Simulate
-    // that by pre-seeding an A-prefixed entry and asserting apply_report's
-    // reseed picks it up. Without this, the next user-create on any
-    // A-prefixed topic would collide.
+    // Adversarial-property topics (Condition/Threat/Invariant/Validation)
+    // enter `topic_metadata` via `apply_snapshot`, not via the report.
+    // Simulate that by pre-seeding an A-prefixed entry and asserting
+    // apply_report's reseed picks it up. Without this, the next user-create
+    // on any A-prefixed topic would collide.
     let _guards = lock_all_counters();
 
     crate::ids::reseed_adversarial_property_id(0);

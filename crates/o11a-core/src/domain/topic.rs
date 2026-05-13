@@ -14,7 +14,7 @@ use std::str::FromStr;
 /// - `D` → `Documentation`
 /// - `C` → `Comment`
 /// - `A` → `AdversarialProperty` (shared by `ConditionTopic`,
-///   `ThreatTopic`, and `InvariantTopic`)
+///   `ThreatTopic`, `InvariantTopic`, and `ValidationTopic`)
 /// - `S` → `Spec` (shared by `FeatureTopic`, `RequirementTopic`,
 ///   `BehaviorTopic`, and `CharacteristicTopic` — all four entity kinds
 ///   in the security-model spec family)

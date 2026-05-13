@@ -700,8 +700,8 @@ pub fn apply_user_entities_snapshot(
   // `topic_metadata` keys is safe because `reseed_*` performs an
   // unconditional store and the post-merge max is never lower than
   // `apply_report`'s. The `A`-counter reseed covers user-authored
-  // Condition/Threat/Invariant rows once those user-create surfaces
-  // ship; today only pipeline-allocated A-IDs exist in the metadata,
+  // Condition/Threat/Invariant/Validation rows once those user-create
+  // surfaces ship; today only pipeline-allocated A-IDs exist in the metadata,
   // but wiring the reseed now keeps the invariant ("every counter is
   // advanced past every existing topic of its variant after hydration
   // finishes") true regardless of which user-create surfaces are live.

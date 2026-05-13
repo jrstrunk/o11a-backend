@@ -56,12 +56,12 @@ The server writes/reads SQLite at `data/o11a.db` by default (`DATABASE_URL` over
 
 The two-binary split (`o11a-analyze` produces an artifact, `o11a-server` consumes it) is load-bearing: the server no longer reads the project source tree. All AST/topic state comes from `audit.analysis.bin` (bincode) plus `audit.json` (pipeline report). Schema changes require bumping `ARTIFACT_SCHEMA_VERSION` in `o11a-core::analysis_artifact` and regenerating the artifact, or the server refuses to load.
 
-Pipeline ordering (see `crates/o11a-core/src/collaborator/agent/pipeline.rs` and `semantic_linking.rs`). Parse and analyze are precursors; the nine-step LLM pipeline starts with semantic linking:
+Pipeline ordering (see `crates/o11a-core/src/collaborator/agent/pipeline.rs` and `semantic_linking.rs`). Parse and analyze are precursors; the ten-step LLM pipeline starts with semantic linking:
 
 1. Parse — Solidity via Foundry compilers (`forge build --ast` must have run in the audit project to produce the JSON ASTs the parser reads); documentation via the `markdown` crate.
 2. Analyze — two-pass scope walk producing `DataContext` (declarations, references, scopes, function/modifier extended properties).
 
-Then the LLM pipeline in 9 steps:
+Then the LLM pipeline in 10 steps:
 
 1. Semantic linking — five-step internal pipeline alternating mechanical/BM25 association with LLM synthesis. Steps 1–2 do contract semantics; steps 3–4 do member semantics; step 5 does body-local semantics. Each synthesis step's output feeds the next as context. The full design lives in `docs/specs/semantic-linking.md`.
 2. Requirement extraction — documentation processed with functional semantics injected, producing per-section `RequirementTopic` plus a parallel `CharacteristicTopic` array.
@@ -71,7 +71,8 @@ Then the LLM pipeline in 9 steps:
 6. Functional purpose & placement generation — per-function batched, producing sibling `FunctionalPurposeTopic` / `PlacementRationaleTopic` entries on every non-pure subject in an in-scope function with a feature link.
 7. Condition generation — per-subject positive assertions (`ConditionTopic`) about what must hold for purpose+placement to be fulfilled.
 8. Threat generation — `ThreatTopic` entries produced as adversarial inversions of each condition, with the `Security`-kind characteristic set rendered as the audit-wide adversarial context (in place of the raw `security_notes` blob earlier versions used).
-9. Invariant generation — `InvariantTopic` entries produced as defensive properties against each threat, phrased as "X must Y" / "every Z does W" statements with a closed `InvariantKind` (e.g. `ReentrancyGuard`, `AccessGate`). Each invariant inherits `subject_topic` and `severity` from its parent threat; verification of where each property actually holds in the code is a deferred later pipeline step (re-check propagation).
+9. Invariant generation — `InvariantTopic` entries produced as defensive properties against each threat, phrased as "X must Y" / "every Z does W" statements with a closed `InvariantKind` (e.g. `ReentrancyGuard`, `AccessGate`). Each invariant inherits `subject_topic` and `severity` from its parent threat.
+10. Invariant validation — `ValidationTopic` entries produced as per-invariant verdicts (`Enforced` / `Absent` / `Partial` / `Inconclusive`) on whether the property actually holds in the code at the validated subject. Each validation names exactly one parent `invariant_topic`, carries a one-sentence `rationale`, and cites `evidence_topics` (modifiers, checks, state writes) inside the subject's containing function. Cross-site propagation (one invariant validated at many subjects) is a deferred later pipeline step.
 
 See SPEC.md for the full state machine.
 
@@ -85,7 +86,7 @@ See SPEC.md for the full state machine.
   - `C` Comment
   - `S` Spec (shared by `FeatureTopic`, `RequirementTopic`, `BehaviorTopic`, and `CharacteristicTopic` — the four entity kinds in the security-model spec family)
   - `P` FunctionalProperty (shared by `FunctionalSemanticTopic`, `FunctionalPurposeTopic`, `PlacementRationaleTopic`)
-  - `A` AdversarialProperty (shared by `ConditionTopic`, `ThreatTopic`, and `InvariantTopic`)
+  - `A` AdversarialProperty (shared by `ConditionTopic`, `ThreatTopic`, `InvariantTopic`, and `ValidationTopic`)
   - `Y` TypeConstraint
 - The grouping is deliberate: prefixes correspond to one atomic counter, not one entity kind. Disambiguation between kinds sharing a prefix lives in `TopicMetadata`, so a comment on `S42` resolves to whichever of feature/requirement/behavior/characteristic occupies that ID — and two artifacts of different kinds can never collide on the same ID. Adding a new entity kind to an existing family (e.g., a new `Spec`-family entity) requires only a `TopicMetadata` variant; the counter, the wire format, and DB/serialization paths need no change.
 - `ids.rs` owns the atomic counters that allocate the numeric suffix for each prefix, plus `reseed_*` functions used during artifact/DB hydration so freshly allocated user IDs never collide with pipeline-generated ones. The split between `allocate_*` and `reseed_*` is load-bearing — `o11a-server::main` calls `reseed` after applying the report and again after loading user entities so the `i32` space stays unified.
