@@ -4,6 +4,8 @@ This is the implementation plan for pipeline step 7: generating **threats** — 
 
 Read `conditions-step-6.md` first; this doc assumes its phases landed and reuses its structural patterns wholesale (per-function generation, A-prefixed topic family, unified renderer, post-processor validation shape).
 
+> **Post-landing note (system-characteristics work).** After the system-characteristics plan in `system-characteristics.md` landed, the pipeline grew from 7 steps to 8 (this is now **step 8 of 8**, with characteristic synthesis as step 5), and step 8's audit-wide adversarial input changed shape. Where this doc describes `security_notes` as "a prompt segment, not a renderer field" and a free-form string loaded from `security.md`, the threats step now consumes the rendered set of `Security`-kind `CharacteristicTopic` entries — built by `render_security_characteristics(audit_data)` and concatenated as `- description\n…`. The signature of `extract_threats_from_batch` did not change (the parameter is still a `Option<&str>`); only its source did. The threats prompt's surrounding prose now says "the audit's security characteristics" rather than "the audit's `security.md`". The `audit_data.security_notes` field still exists, but its remaining role is to be the input to step 5 synthesis and a diagnostic surface, not a threats-prompt segment. See `system-characteristics.md` Phase 5 ("Threats consumption swap") for the swap details.
+
 ## Summary of decisions
 
 These were settled during design and should not be re-litigated during implementation:

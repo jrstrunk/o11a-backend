@@ -11,14 +11,12 @@ Every reference-able thing in the audit is a topic with a stable, prefixed ident
  - Source code nodes (N)
  - Documentation (D)
  - Comments (C)
- - Features (F)
- - Requirements (R)
- - Threats (T)
- - Invariants (I)
- - Functional Properties (P)
+ - Spec (S) — shared by Features, Requirements, Behaviors, and System Characteristics
+ - Adversarial Properties (A) — shared by Conditions, Threats, and Invariants
+ - Functional Properties (P) — shared by Functional Semantics, Functional Purposes, and Placement Rationales
  - Type Constraints (Y)
 
-Topic IDs are sequential within their kind (e.g. `T1`, `T2`). They are the addressing scheme that holds everything in the audit together — comments, AI tasks, and security-model elements all attach to topics, so a single auditor's note and a generated invariant can both live on the same expression and reinforce each other.
+Topic IDs are sequential within their prefix (e.g. `S1`, `S2`, `A1`, `A2`). Prefixes group entity kinds that share a single counter; the entity kind itself is carried in topic metadata, so two artifacts of different kinds can never collide on the same ID. Topics are the addressing scheme that holds everything in the audit together — comments, AI tasks, and security-model elements all attach to topics, so a single auditor's note and a generated invariant can both live on the same expression and reinforce each other.
 
 ## Documentation
 

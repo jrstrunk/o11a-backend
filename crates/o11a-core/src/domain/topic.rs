@@ -13,12 +13,13 @@ use std::str::FromStr;
 /// - `N` → `Node`
 /// - `D` → `Documentation`
 /// - `C` → `Comment`
-/// - `A` → `AdversarialProperty` (shared by `ThreatTopic` and
-///   `InvariantTopic`; `ConditionTopic` will join later)
+/// - `A` → `AdversarialProperty` (shared by `ConditionTopic`,
+///   `ThreatTopic`, and `InvariantTopic`)
 /// - `S` → `Spec` (shared by `FeatureTopic`, `RequirementTopic`,
 ///   `BehaviorTopic`, and `CharacteristicTopic` — all four entity kinds
 ///   in the security-model spec family)
-/// - `P` → `FunctionalProperty`
+/// - `P` → `FunctionalProperty` (shared by `FunctionalSemanticTopic`,
+///   `FunctionalPurposeTopic`, and `PlacementRationaleTopic`)
 /// - `Y` → `TypeConstraint` (chosen as the next unused ASCII letter; no
 ///   existing wire producer emits this prefix yet)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

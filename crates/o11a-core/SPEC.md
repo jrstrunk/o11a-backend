@@ -46,9 +46,36 @@ For contract source files, the container is the source file, the component is a 
 
 ## Security Model
 
+### Topic Prefix Map
+
+Every artifact in an audit is addressed by a `(prefix_char, i32)` pair. Prefixes group entity kinds that share a single `i32` counter; the entity kind itself lives in `TopicMetadata`, so two artifacts of different kinds can never collide on the same ID.
+
+| Prefix | Variant                   | TopicMetadata variants sharing this prefix                                            |
+| ------ | ------------------------- | ------------------------------------------------------------------------------------- |
+| `N`    | `Node`                    | Source AST nodes                                                                      |
+| `D`    | `Documentation`           | Documentation sections, paragraphs, inline references                                 |
+| `C`    | `Comment`                 | User and agent comments                                                               |
+| `S`    | `Spec`                    | `FeatureTopic`, `RequirementTopic`, `BehaviorTopic`, `CharacteristicTopic`            |
+| `A`    | `AdversarialProperty`     | `ConditionTopic`, `ThreatTopic`, `InvariantTopic`                                     |
+| `P`    | `FunctionalProperty`      | `FunctionalSemanticTopic`, `FunctionalPurposeTopic`, `PlacementRationaleTopic`        |
+| `Y`    | `TypeConstraint`          | Type constraints                                                                      |
+
+The `S`-family lets all four security-model spec entities share one counter and one wire-format prefix, paralleling how `A` covers the three adversarial-layer entities and `P` covers the three functional-property entities. The split between counter and kind is what lets a comment on, say, `S42` point at whichever of feature/requirement/behavior/characteristic occupies that ID without losing addressability.
+
 ### Initial Generation
 
-The security model is initially seeded from project documentation and source code through an automated pipeline.
+The security model is initially seeded from project documentation and source code through an automated pipeline of eight steps:
+
+1. Semantic Linking
+2. Requirement Extraction
+3. Behavior Extraction
+4. Feature Synthesis via Reconciliation
+5. Characteristic Synthesis
+6. Functional Purpose & Placement Generation
+7. Condition Generation
+8. Threat Generation
+
+Step 1 produces the project-specific vocabulary that every later step relies on. Steps 2–5 build the documentation-and-code-derived spec layer (`S`-family entities). Steps 6–8 build the adversarial layer on every non-pure source subject (`P`-family purpose+placement, then `A`-family conditions and threats; the eventual invariants step is on the same `A` family). Each step's output is durable and individually addressable, and the pipeline is structured so any one of them can be re-run on its own when its inputs change.
 
 **1. Semantic Linking.** Documentation sections are linked to source code declarations to establish functional semantics — the project-specific meaning of each declaration. This step runs before requirement and behavior extraction so that both can be generated with business-level meaning. Functional semantics are injected into the rendered documentation that requirement extraction sees, so inline code references like `pID` appear annotated with their project-specific meaning (e.g., "participation identifier"), giving the LLM proper context to produce behavioral requirements without using declaration names.
 
@@ -78,9 +105,23 @@ The reconciliation groups related requirements and behaviors into features, with
 
 Where requirements and invariants both describe things the code must do, they serve different concerns. Requirements capture what the documentation claims — the functionality described to users or the protocol. Invariants capture what the code must enforce to protect against threats — the defensive properties that prevent threats from materializing. A collateral lending feature has a documented requirement that users can deposit ETH, but the invariant that only the position owner can withdraw collateral exists to protect against a threat, not to fulfill a documented claim. Requirements are verified by matching them to behaviors during reconciliation; invariants are verified by checking them against convergences in the source code.
 
+**5. Characteristic Synthesis.** System characteristics are extracted from documentation alongside requirements in step 2 (the per-section extraction call emits two parallel arrays — `feature_requirements` and `system_characteristics` — so claims framed in feature terms and claims framed as system-wide guarantees coexist without being conflated). After feature synthesis, step 5 consolidates and refines those raw characteristics. The synthesis call takes two inputs: the raw `security.md` notes (`audit_data.security_notes`) and the JSON-serialized list of extracted characteristics. It produces a refined set that merges overlapping claims, promotes `security.md`-only items to first-class topics with `section_topic = None`, and refines descriptions for clarity. The synthesis runs whenever either input has content — an absent `security.md` with extracted characteristics still benefits from cross-section consolidation; the step is skipped only when both inputs are empty.
+
+Each characteristic carries a `kind` drawn from a closed `SystemCharacteristicKind` enum; only `Security` is implemented at present, and the enum exists so other kinds (performance, convention, etc.) can be added without further schema bumps. Each `kind` is consumed by exactly one downstream pipeline step. Characteristics are deliberately not linked to features and not reconciled against behaviors — linking them to features would force a feature-level decomposition of claims that are system-wide by construction; reconciling them against behaviors would conflate the layer they live at with the behavior layer. Their self-contained nature is what lets downstream steps consume them in entirety without filtering.
+
+The pipeline order is deliberate: feature synthesis runs before characteristic synthesis (not after) so that the boundary stays clean. Feature synthesis sees only requirements and behaviors; characteristic synthesis sees only its raw `security.md` notes and the extracted characteristics. The split is enforced by what each step's renderer emits, not by prompt prose alone, and a permanent unit test verifies that no other step's renderer leaks `CharacteristicTopic` entries into its rendered context. On rerun, step 5 proactively clears prior `CharacteristicTopic` entries from `topic_metadata` and clears `audit_data.characteristics` and the `section_characteristics` reverse index before inserting the new set; the threats step does not need a separate clear because its consumption is read-only.
+
+The raw `security.md` content stays in `audit_data.security_notes` after Phase 5: it remains the input to step 5's synthesis on future reruns, it can be surfaced in the UI alongside the synthesized characteristics for diagnostic comparison, and the bytes cost is negligible. Phase 5 retired the use of `security_notes` as the threats prompt's free-form security blob; threats consume the rendered Security characteristic set instead.
+
+**6. Functional Purpose & Placement Generation.** For every non-pure source subject in an in-scope function with a feature link, the pipeline produces two sibling properties: the **functional purpose** (the business-logic reason the subject exists) and the **placement rationale** (the ordering reason the subject is at this point in its containing function rather than earlier or later). Both are produced by a single per-function LLM call that renders the function with each non-pure subject marked inline and injects the function's feature context plus the relevant functional semantics. See "Managing Functional Purpose" below for the design rationale (purpose and placement as siblings, per-function batching, adversarial second pass).
+
+**7. Condition Generation.** For each non-pure subject, conditions — positive assertions about what must hold for the subject's purpose+placement to be fulfilled — are produced uniformly. Each condition carries a `kind` drawn from the closed `ConditionKind` enum. Conditions provide threat generation with bounded, concrete inputs to invert rather than open-ended adversarial reasoning. See "Managing Conditions" below.
+
+**8. Threat Generation.** For each non-pure subject, threats are generated as adversarial inversions of its conditions — each threat states a scenario in which a specific condition fails to hold and links back to that condition. The audit-wide adversarial context is the rendered set of `Security`-kind characteristics from step 5 (a concatenated text block, one bullet per characteristic), which replaces the role the raw `security.md` blob used to play; the threats prompt no longer references `security_notes` directly. See "Managing Threats and Invariants" below.
+
 ### Out-of-Scope and Dependency Code
 
-The initial generation pipeline — semantic linking, requirement extraction, behavior extraction, and feature synthesis — runs only against **in-scope contracts**: the contracts listed in the audit's `scope.txt` file. Out-of-scope contracts and library dependencies (OpenZeppelin, Solmate, etc.) are excluded from the pipeline even though they are present in the analyzed codebase.
+The source-driven steps of the initial generation pipeline — behavior extraction, feature synthesis, functional purpose & placement generation, condition generation, and threat generation — run only against **in-scope contracts**: the contracts listed in the audit's `scope.txt` file. Out-of-scope contracts and library dependencies (OpenZeppelin, Solmate, etc.) are excluded from these steps even though they are present in the analyzed codebase. The documentation-driven steps (requirement extraction, characteristic synthesis) operate on the audit's documentation and `security.md` regardless of which contracts those documents reference. Semantic linking sits in between: it produces semantics for both in-scope declarations (so behavior extraction can use them) and out-of-scope declarations that in-scope code calls into (so the auditor knows what the dependency does).
 
 This distinction is fundamental. In-scope code is the code under review — it cannot be assumed to be correct, which is why it needs requirements extracted from documentation, behaviors reconciled against those requirements, threats identified on its non-pure subjects, and invariants checked at its convergences. The full security model exists to surface mismatches between what the documentation claims and what the code does.
 
@@ -98,6 +139,7 @@ When a user adds a new element to the security model, the relevant pipeline step
 
 - **New requirement** — Added under the relevant documentation section or feature. Requirements do not trigger threat generation; they are documentation claims that will be verified during reconciliation against behaviors.
 - **New behavior** — Created during code review, grouped under the code scope where it was observed. If features have already been synthesized, the behavior is associated with the appropriate feature based on its code scope. Behaviors are reconciliation artifacts and do not carry threat or invariant links.
+- **New system characteristic** — Authoring of new characteristics from the audit UI is deferred; the read-only flow ships now. Pipeline-produced characteristics participate in the universal comment and approval surface like any other topic, but cannot be directly created or rewritten by auditors in this milestone. When the create-endpoint lands, a new `Security` characteristic will trigger re-evaluation of threats on subjects whose threat generation incorporated the previous characteristic set, since the system-wide adversarial context will have shifted; the synthesis-clear in step 5 will be made author-aware so that auditor-authored entries survive pipeline reruns.
 - **New functional semantic** — Persisted on a declaration with provenance to its source documentation topic. If the semantic changes the meaning of a declaration, downstream properties (behaviors that reference the declaration, functional purpose on containing statements) may need re-evaluation.
 - **New functional purpose / placement rationale** — Generated as a sibling pair on a non-pure subject. If purpose is added or corrected, conditions and threats on the same subject re-evaluate against the new purpose. Placement rationale invalidates when surrounding statements in the containing function change; purpose invalidates when the subject's feature description changes.
 - **New condition** — Recorded as an assertion on a non-pure subject (what must hold for its purpose+placement to be fulfilled). Adding or correcting a condition triggers re-evaluation of the subject's threats, since each threat is anchored to a specific condition it falsifies; a new or revised assertion may surface threat scenarios not previously identified.
@@ -349,6 +391,54 @@ Behaviors are extracted preserving the code's scope structure (container, compon
 
 Behaviors are purely reconciliation artifacts. They do not carry threat links or invariant links — security analysis operates at the source subject level through threats and invariants on convergences. Behaviors exist to enable the comparison between what the documentation claims (requirements) and what the code does (behaviors) during reconciliation.
 
+### Managing System Characteristics
+
+System characteristics are system-wide claims about the project that an auditor must take as developer-asserted ground truth when reasoning about adversarial scenarios. They capture trust assumptions ("the relayer is honest within the bound of its bond"), role definitions ("the owner is the only address that can pause"), and threat-model statements ("front-running is in scope; censorship by the sequencer is not") — claims that bound what threat reasoning must consider rather than naming behaviors of any one feature.
+
+#### Data Model
+
+Each characteristic is represented by a `TopicMetadata::CharacteristicTopic` paired with an entry in `audit_data.characteristics`:
+
+- The `CharacteristicTopic` variant carries the topic (`S`-prefixed), the description, the `kind: SystemCharacteristicKind`, an optional `section_topic` (`D`-prefixed; `None` when the characteristic came from `security.md` rather than a documentation section), the author, and an optional `created_at`. The `Option<String>` on `created_at` matches the pipeline-author convention used by feature/requirement/behavior topics — pipeline-produced entities omit it.
+- The `Characteristic` struct holds the trace links: a list of `D`-prefixed documentation topics that informed the characteristic. Pipeline-only characteristics may have an empty list when the original source was `security.md` with no documentation anchor.
+- `SystemCharacteristicKind` is a closed enum. Only `Security` is implemented at present. The enum exists so additional kinds (performance, convention, etc.) can be added in an additive way; each kind has at most one downstream pipeline step that consumes it.
+- The `section_characteristics` reverse index on `AuditData` maps a `D`-prefixed section topic to the list of `S`-prefixed characteristic topics anchored to it. It is rebuilt by `rebuild_feature_context` from the `CharacteristicTopic.section_topic` field. Characteristics with `section_topic = None` are not indexed here.
+
+#### Lifecycle in the Pipeline
+
+Characteristics are produced in two pipeline steps:
+
+1. **Extraction (step 2).** The documentation extraction prompt asks the LLM to emit two parallel arrays per section: `feature_requirements` and `system_characteristics`. A claim that is both a feature-level requirement and a system-wide characteristic is emitted twice, framed appropriately in each array; no deduplication is attempted at this stage. The extraction schema enforces `kind` as a JSON Schema enum (currently `["security"]`); unknown values fail loudly at parse time. The multi-doc consolidation pass that runs over `feature_requirements` does not run over `system_characteristics` — duplicates across documents are expected and resolved in step 5.
+2. **Synthesis (step 5).** After feature synthesis, the synthesizer reads `audit_data.security_notes` and the JSON-rendered extracted characteristics, and produces a refined, consolidated set. The output replaces the prior characteristics: step 5 clears `CharacteristicTopic` entries from `topic_metadata`, clears `audit_data.characteristics`, allocates fresh `S`-IDs for the synthesized items, and rebuilds the `section_characteristics` reverse index. The synthesis is skipped only when both `security_notes` and the extracted set are empty.
+
+Steps 6–7 do not touch characteristics. Step 8 (threats) consumes them — see "Managing Threats and Invariants".
+
+#### Layer Boundary
+
+Feature synthesis does not see characteristics, and characteristic synthesis does not see features. The boundary is enforced by what each step's renderer emits, not by prompt prose; a permanent unit test asserts that no other step's renderer leaks `CharacteristicTopic` entries into its rendered context. This is the only mechanical guard against accidental drift across the layer split.
+
+#### Consumption by Downstream Steps
+
+Each `SystemCharacteristicKind` is consumed by exactly one downstream pipeline step. The mapping is hardcoded per kind, not data-driven. At present:
+
+- `Security` → threat generation (step 8). The threats prompt's `Security context:` block is built by rendering every `CharacteristicTopic { kind: Security }` description as a single concatenated text block (one bullet per characteristic, sorted by topic ID), replacing the role `audit_data.security_notes` played in earlier versions of the pipeline. When there are no `Security` characteristics, the block is omitted entirely (no fallback to the raw `security.md`).
+
+The set of characteristics of a given kind is consumed in entirety — there is no feature-level filtering. This is intentional: characteristics are system-wide claims that bound how every threat must be reasoned about; restricting them per-feature would defeat their role. As more kinds are added, each will name its own downstream consumer; the dispatch on `kind` lives in the consumer, not in the characteristic itself.
+
+#### Raw Security Notes
+
+`audit_data.security_notes: Option<String>` remains the raw text of the audit's `security.md` (if any). After step 5 retired its role in threat prompting, its remaining purposes are:
+
+- Input to step 5 synthesis on every pipeline run.
+- Diagnostic surfacing in the UI alongside synthesized characteristics, so an auditor can compare the synthesized set against the original prose.
+- Audit-trail durability: the field stays in the snapshot and the report so the original input is recoverable.
+
+There is no remaining server-side reader after step 5; the field is a quiet record of the input, not an active prompt segment.
+
+#### Auditor-Created Characteristics (Deferred)
+
+The DB tables for `user_characteristics` are provisioned in the schema, but no `POST /audits/:audit_id/characteristics` route exists in this milestone. When the create endpoint lands, the step 5 synthesis-clear path must filter on `Author` so that auditor-authored entries survive pipeline reruns. This work is deliberately deferred; the read-only flow ships first to validate the pipeline-produced set in real audits before adding an authoring surface that has to coexist with rerun semantics.
+
 ### Managing Dependencies
 
 Dependencies are things that a subject depends on outside of its interface (and thus cannot be expressed by a type constraint). These are things like a stateful function that requires another block to set some required piece of state for it to work with. Like an emergency exit function that requires an exit address to be set first. Because the dependency can be fulfilled by another block far away from the subject, statement chains have to be tracked throughout the project so we can tell where a project dependency could be fulfilled. To mark a dependency as fulfilled, the user has to provide a statement id that satisfies the dependency. This statement then becomes a convergence point for the dependency.
@@ -446,7 +536,7 @@ The chain: **purpose → conditions → threats → invariants**. Conditions are
 
 ### Managing Threats and Invariants
 
-Threats are generated on-demand for non-pure subjects only, after their conditions have been generated. When a non-pure subject is first evaluated during the audit, the LLM is given the subject, its conditions (the assertions that must hold for the subject's purpose to be fulfilled), its backward context, its feature description and requirements (as the adversarial context), and its type constraints (to avoid restating those), and asked "given these assertions, what scenarios would falsify each one — and what implementation-specific risks does that create?" The conditions provide concrete inputs — "the token address is constrained to one that no other party can pre-compute" — from which the LLM derives specific threats by inverting each assertion ("the deterministic token address can be pre-computed and `createPair` called first, bricking deployment") rather than reasoning from scratch. Each generated threat carries a link back to the condition it falsifies, so an auditor disagreeing with a threat can trace the disagreement to the assertion the threat targets without invalidating that assertion. A condition can be the target of many threats; each threat names exactly one condition. The result is cached on the subject and presented to the auditor for review.
+Threats are generated on-demand for non-pure subjects only, after their conditions have been generated. When a non-pure subject is first evaluated during the audit, the LLM is given the subject, its conditions (the assertions that must hold for the subject's purpose to be fulfilled), its backward context, its feature description and requirements (as the adversarial context), the audit's security characteristics (the complete set of `Security`-kind `CharacteristicTopic` entries rendered as a single text block — see "Managing System Characteristics"), and its type constraints (to avoid restating those), and asked "given these assertions, what scenarios would falsify each one — and what implementation-specific risks does that create?" The conditions provide concrete inputs — "the token address is constrained to one that no other party can pre-compute" — from which the LLM derives specific threats by inverting each assertion ("the deterministic token address can be pre-computed and `createPair` called first, bricking deployment") rather than reasoning from scratch. Each generated threat carries a link back to the condition it falsifies, so an auditor disagreeing with a threat can trace the disagreement to the assertion the threat targets without invalidating that assertion. A condition can be the target of many threats; each threat names exactly one condition. The result is cached on the subject and presented to the auditor for review.
 
 Each threat carries a structured **`controlled_by`** field that classifies the primary actor whose action drives the scenario, drawn from a closed eight-variant `ThreatActor` enum: `Caller` (an unauthenticated external caller of a public entry point), `PrivilegedRole` (a role-gated party such as an admin, owner, or operator — the specific role lives in the description, not in this variant), `External` (a third-party contract, typically the callee in an external call, an oracle, or a token the subject interacts with), `BlockProducer` (a miner, sequencer, or validator with control over transaction ordering or inclusion), `Counterparty` (a peer in the protocol's economic model whose interests differ from the subject's purpose), `Self_` (the contract itself reentering through an external call), `AnyParty` (no constraint on who triggers the scenario; permissionless), and `Other` (a genuinely novel actor classification, with the structure carried in the description). One primary actor per threat; multi-actor coordination scenarios are captured in the description prose. Threat descriptions themselves remain **actor-agnostic** — the prose names the scenario in passive or mechanism terms ("the deterministic token address can be pre-computed and `createPair` called first") rather than naming the party ("an attacker pre-computes..."). This keeps the actor classification a separately scrutinized artifact: an auditor can approve the description while disagreeing with the actor (or vice versa) without the prose forcing a paired interpretation.
 
@@ -468,7 +558,7 @@ This traceability enables prioritization: when the auditor is evaluating a conve
 
 ## Property Approval
 
-Every property in the security model — features, requirements, behaviors, functional semantics, functional purpose, placement rationale, conditions, threats, invariants — is subject to approval. Approval is the mechanism by which a property transitions from unverified to verified, and the mechanism by which one party in the audit (human auditor or AI agent) records agreement with another party's property.
+Every property in the security model — features, requirements, behaviors, system characteristics, functional semantics, functional purpose, placement rationale, conditions, threats, invariants — is subject to approval. Approval is the mechanism by which a property transitions from unverified to verified, and the mechanism by which one party in the audit (human auditor or AI agent) records agreement with another party's property.
 
 **Approval is bidirectional.** Human auditors approve AI-generated properties; AI agents approve human-authored properties. Both directions matter because the audit is a collaboration: an AI-generated property that no human has approved has not yet earned its place in downstream reasoning, and a human-authored property that no AI agent has reviewed has not been checked for consistency against the rest of the model. Approval makes agreement explicit so downstream analysis can rely on it.
 
@@ -487,12 +577,12 @@ Type constraint checks can be checked by a constraint algorithm. Specification c
 General audit flow is:
 
 1. Read and understand the docs and the purpose of the project
-2. Run the initial generation pipeline: extract requirements from documentation, generate functional semantics via semantic linking, extract behaviors from source code with semantics in context, synthesize features via reconciliation, and generate functional purpose and placement rationale for every non-pure subject in an in-scope function (with adversarial critique attached)
-3. Review and refine the generated security model — verify functional semantics, add missing requirements, correct behavior descriptions, adjust feature groupings, confirm or correct generated purpose and placement rationale
-4. Step through all convergences — for non-pure subjects, conditions are recorded as assertions about what must hold for the subject's purpose+placement to be fulfilled, then threats are generated as adversarial inversions of those assertions, and invariants from threats are attached and checked at convergences
+2. Run the initial generation pipeline (eight steps): semantic linking, requirement extraction, behavior extraction, feature synthesis via reconciliation, characteristic synthesis, functional purpose and placement generation on every non-pure subject in an in-scope function (with adversarial critique attached), condition generation, and threat generation against each condition
+3. Review and refine the generated security model — verify functional semantics, add missing requirements, correct behavior descriptions, adjust feature groupings, confirm or correct the synthesized security characteristics, confirm or correct generated purpose and placement rationale
+4. Step through all convergences — invariants from threats are attached and checked at convergences; conditions and threats are re-examined as needed
 5. Perform impact analysis — link threats to the features they affect, establishing severity and the relationship type ("is vulnerable to" or "defends against"); unlinked threats are flagged for review
 6. Re-reconcile requirements against behaviors per feature as needed, identifying unimplemented specification and undocumented implementation
-7. As new requirements, behaviors, conditions, threats, invariants, functional semantics, functional purpose, or placement rationale are discovered during code review, add them to the security model — the re-check system propagates them to all relevant subjects, ensuring nothing is missed
+7. As new requirements, behaviors, characteristics, conditions, threats, invariants, functional semantics, functional purpose, or placement rationale are discovered during code review, add them to the security model — the re-check system propagates them to all relevant subjects, ensuring nothing is missed
 
 ### Managing Convergences
 
