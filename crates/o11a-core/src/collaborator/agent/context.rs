@@ -1642,6 +1642,7 @@ fn render_solidity_ast_snippet(
             description,
             kind,
             threat_topic,
+            anchors,
             severity,
             ..
           }) = audit_data.topic_metadata.get(it)
@@ -1652,6 +1653,7 @@ fn render_solidity_ast_snippet(
               "kind": kind,
               "threat_topic": threat_topic.id(),
               "severity": severity.map(|s| s.as_str()),
+              "anchors": anchors.iter().map(|t| t.id()).collect::<Vec<_>>(),
             }))
           } else {
             None
@@ -8387,6 +8389,7 @@ mod batch_render_integration_tests {
         threat_topic: threat_a,
         subject_topic: assignment_topic,
         kind: domain::InvariantKind::AccessGate,
+        anchors: vec![],
         author: crate::collaborator::models::Author::AgentLarge,
         created_at: None,
         severity: None,
@@ -8401,6 +8404,7 @@ mod batch_render_integration_tests {
         threat_topic: threat_b,
         subject_topic: assignment_topic,
         kind: domain::InvariantKind::ReentrancyLock,
+        anchors: vec![],
         author: crate::collaborator::models::Author::AgentLarge,
         created_at: None,
         severity: Some(domain::ThreatSeverity::High),
@@ -8462,6 +8466,12 @@ mod batch_render_integration_tests {
       i1["severity"].is_null(),
       "severity is null when the parent threat has no severity yet"
     );
+    // Anchors render as an array, empty when none were cited.
+    assert_eq!(
+      i1["anchors"].as_array().map(|a| a.len()),
+      Some(0),
+      "anchors must render as an empty array when none were cited"
+    );
 
     // Second invariant: inherited severity rendered as the on-wire lowercase
     // token, matching `ThreatSeverity::as_str`.
@@ -8470,6 +8480,91 @@ mod batch_render_integration_tests {
     assert_eq!(i2["kind"].as_str(), Some("ReentrancyLock"));
     assert_eq!(i2["threat_topic"].as_str(), Some(threat_b.id().as_str()));
     assert_eq!(i2["severity"].as_str(), Some("high"));
+    assert_eq!(i2["anchors"].as_array().map(|a| a.len()), Some(0));
+  }
+
+  #[test]
+  fn render_invariants_stamps_anchors_field() {
+    // The renderer must serialize `anchors` as an array of topic ID
+    // strings so the validator (step 10) can consume them from the
+    // rendered batch JSON. This is the load-bearing input — without
+    // anchors on the wire, the validator has no per-kind dispatch
+    // signal.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+
+    let threat = topic::new_adversarial_property_topic(10);
+    let inv = topic::new_adversarial_property_topic(100);
+    let anchor_a = topic::new_node_topic(&77);
+    let anchor_b = topic::new_node_topic(&88);
+    audit.topic_metadata.insert(
+      inv,
+      TopicMetadata::InvariantTopic {
+        topic: inv,
+        description: "every privileged setter checks ownership".to_string(),
+        threat_topic: threat,
+        subject_topic: assignment_topic,
+        kind: domain::InvariantKind::AccessGate,
+        anchors: vec![anchor_a, anchor_b],
+        author: crate::collaborator::models::Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+    audit.subject_invariants.insert(assignment_topic, vec![inv]);
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    let invariants = find_invariants_inline(&value, &assignment_topic.id())
+      .expect("non-pure subject must carry inline invariants");
+    let anchors = invariants[0]["anchors"]
+      .as_array()
+      .expect("anchors must serialize as a JSON array");
+    let anchor_ids: Vec<&str> =
+      anchors.iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(anchor_ids, vec![anchor_a.id(), anchor_b.id()]);
   }
 
   #[test]
@@ -8626,6 +8721,7 @@ mod batch_render_integration_tests {
         threat_topic: threat,
         subject_topic: assignment_topic,
         kind: domain::InvariantKind::Other,
+        anchors: vec![],
         author: crate::collaborator::models::Author::AgentLarge,
         created_at: None,
         severity: None,

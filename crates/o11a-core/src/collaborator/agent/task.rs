@@ -4085,11 +4085,13 @@ fn description_starts_with_party_noun(desc: &str) -> bool {
 /// unified renderer inlines a `conditions` array (step 6) AND a `threats`
 /// array (step 7) on each non-pure subject — the threats array is the
 /// load-bearing input. Invariants are 1:N to the threat they defend; one
-/// threat can carry many invariants. Invariants carry no `evidence_topics`
-/// at generation time — whether each property actually holds in the code
-/// is the subject of a deferred later pipeline step (re-check
-/// propagation). See SPEC's "Conditions vs. Invariants" and
-/// `invariants-step-8.md`.
+/// threat can carry many invariants. Invariants carry no enforcement
+/// locations at generation time; they do carry an `anchors` array
+/// citing the declarations the property names (state variables,
+/// modifiers, parameters, …) for downstream consumption by the
+/// validator. Whether each property actually holds in the code is the
+/// subject of pipeline step 10 (validation). See SPEC's "Conditions
+/// vs. Invariants" and `invariants-step-8.md`.
 const EXTRACT_INVARIANTS_PROMPT: &str = "Below is one in-scope function \
 or modifier from a smart contract project. The function appears under \
 the `subject` field with:\n\
@@ -4138,11 +4140,24 @@ guarded by a check on X,\" \"the operation is preceded by a Y check\"). \
 If your invariant reads as a scenario (\"the caller might bypass X,\" \
 \"the value could be stale\"), you have miswritten a threat — invariants \
 state what holds across the codebase, not what could fail.\n\n\
-**Do not list `evidence_topics`.** Verification of where each invariant \
-actually holds in the code is a later pipeline step. State the property; \
-the codebase locations come later. This keeps the current prompt tight \
-on \"what defense is needed\" without mixing in \"where is the \
-defense.\"\n\n\
+**Cite the declarations the property names** in an `anchors` array of \
+topic IDs. The anchors are the topics — state variables, modifiers, \
+parameters, function declarations — the invariant is *about*. For \
+example: an `AccessGate` invariant naming the owner check would cite \
+the owner state variable and (if relevant) the gating modifier; a \
+`SumConservation` invariant would cite the balance mapping and the \
+total-supply variable. Anchors should reference declarations visible \
+in the rendered batch — citing a topic from outside the batch is \
+invalid and will be dropped. May be empty (`[]`) when the property \
+names no specific declaration; the validator falls back to \
+function-wide scanning in that case.\n\n\
+**Do not list code locations where the property is enforced.** \
+Verification of where each invariant actually holds in the code is a \
+later pipeline step (validation, step 10). Anchors are *declarations \
+the property names*; enforcement locations come from validation, not \
+generation. State the property; the codebase locations come later. \
+This keeps the current prompt tight on \"what defense is needed\" \
+without mixing in \"where is the defense.\"\n\n\
 For each invariant, choose a `kind` that names the **category of \
 defensive pattern** being expressed. The kinds are grouped by family \
 for legibility — scan to the right family first, then pick the variant \
@@ -4250,8 +4265,9 @@ each with:\n\
   - `threat_topic`: the threat's A-prefixed topic ID, taken from the \
 subject's inline `threats` array. Citing a threat topic that is not on \
 this subject is invalid and will be dropped.\n\
-  - `invariants`: an array of `{description, kind}` entries (may be \
-empty).\n\
+  - `invariants`: an array of `{description, kind, anchors}` entries \
+(may be empty). `anchors` is an array of topic ID strings (declarations \
+the property names, as described above; may be `[]`).\n\
   - `no_invariant_rationale`: a string explaining the empty-invariants \
 decision, or `null` when `invariants` is non-empty.\n\n\
 If a subject has no threats in the inline `threats` array, omit the \
@@ -4262,6 +4278,13 @@ subjects with threats, return `{\"subjects\": []}`.\n\n";
 struct LLMInvariant {
   description: String,
   kind: domain::InvariantKind,
+  /// Topic IDs the LLM cites as the declarations this property names.
+  /// Empty when the property names no specific declaration. The schema
+  /// requires the array to be present (matches `additionalProperties:
+  /// false`); `#[serde(default)]` lets test fixtures and earlier
+  /// snapshots omit it.
+  #[serde(default)]
+  anchors: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -4318,7 +4341,7 @@ static INVARIANTS_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
                     "items": {
                       "type": "object",
                       "additionalProperties": false,
-                      "required": ["description", "kind"],
+                      "required": ["description", "kind", "anchors"],
                       "properties": {
                         "description": { "type": "string" },
                         "kind": {
@@ -4349,6 +4372,11 @@ static INVARIANTS_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
                             "EconomicInvariant",
                             "Other"
                           ]
+                        },
+                        "anchors": {
+                          "type": "array",
+                          "items": { "type": "string" },
+                          "default": []
                         }
                       }
                     }
@@ -4393,6 +4421,11 @@ pub struct ParsedThreatInvariants {
 pub struct ParsedInvariant {
   pub description: String,
   pub kind: domain::InvariantKind,
+  /// Declaration topics the property names. Validated for well-
+  /// formedness only at parse time (malformed topic strings are
+  /// dropped and warned); stale anchors are surfaced at validation
+  /// time (pipeline step 10) as `Inconclusive` verdicts.
+  pub anchors: Vec<topic::Topic>,
 }
 
 /// Validation context derived from the rendered batch JSON. Carries the
@@ -4550,6 +4583,7 @@ fn parse_invariants_response(
   let mut rationale_dropped_alongside_invariants: Vec<String> = Vec::new();
   let mut empty_descriptions: Vec<String> = Vec::new();
   let mut recommendation_descriptions: Vec<String> = Vec::new();
+  let mut bad_anchors: Vec<String> = Vec::new();
 
   for s in wrapper.subjects {
     let subject_topic = match topic::parse_topic(&s.subject_topic) {
@@ -4633,9 +4667,26 @@ fn parse_invariants_response(
           // tighten the prompt rather than dropping output.
           recommendation_descriptions.push(description.clone());
         }
+        // Parse each anchor as a Topic; drop-on-defect with a warning
+        // bucket. Stale anchors (well-formed but referencing topics
+        // that aren't in the rendered batch) are accepted here and
+        // surfaced as `Inconclusive` verdicts at validation time
+        // (pipeline step 10). Same shape as ThreatTopic's
+        // `evidence_topics` parser, minus the in-function scope check.
+        let mut anchors: Vec<topic::Topic> =
+          Vec::with_capacity(inv.anchors.len());
+        for a in inv.anchors {
+          match topic::parse_topic(&a) {
+            Ok(parsed) => anchors.push(parsed),
+            Err(_) => {
+              bad_anchors.push(a);
+            }
+          }
+        }
         invariants.push(ParsedInvariant {
           description,
           kind: inv.kind,
+          anchors,
         });
       }
 
@@ -4752,6 +4803,15 @@ fn parse_invariants_response(
        must hold, not what to add; kept the invariant — tighten the \
        prompt if this rate spikes)",
       recommendation_descriptions.len()
+    );
+  }
+  if !bad_anchors.is_empty() {
+    tracing::warn!(
+      batch = %label,
+      "invariants: dropped {} malformed anchor topic ID(s) (kept the \
+       containing invariant): {:?}",
+      bad_anchors.len(),
+      bad_anchors
     );
   }
 
@@ -6654,8 +6714,8 @@ mod invariants_parser_tests {
     let json = r#"{"subjects":[
       {"subject_topic":"N10","threats":[
         {"threat_topic":"A5","invariants":[
-          {"description":"every privileged-state-modifying function checks ownership before mutating state","kind":"AccessGate"},
-          {"description":"the price returned by the oracle is read no more than STALENESS_WINDOW seconds after its latest update","kind":"FreshnessCheck"}
+          {"description":"every privileged-state-modifying function checks ownership before mutating state","kind":"AccessGate","anchors":["N10","N15"]},
+          {"description":"the price returned by the oracle is read no more than STALENESS_WINDOW seconds after its latest update","kind":"FreshnessCheck","anchors":[]}
         ],"no_invariant_rationale":null},
         {"threat_topic":"A6","invariants":[],"no_invariant_rationale":"the threat is mitigated by economic incentives; no codebase-level defense applies"}
       ]}
@@ -6670,7 +6730,12 @@ mod invariants_parser_tests {
     assert_eq!(t0.invariants.len(), 2);
     assert!(t0.no_invariant_rationale.is_none());
     assert_eq!(t0.invariants[0].kind, domain::InvariantKind::AccessGate);
+    assert_eq!(
+      t0.invariants[0].anchors,
+      vec![topic::new_node_topic(&10), topic::new_node_topic(&15)]
+    );
     assert_eq!(t0.invariants[1].kind, domain::InvariantKind::FreshnessCheck);
+    assert!(t0.invariants[1].anchors.is_empty());
 
     let t1 = &entries[0].threats[1];
     assert_eq!(t1.threat_topic, topic::new_adversarial_property_topic(6));
@@ -6682,6 +6747,86 @@ mod invariants_parser_tests {
          defense applies"
       )
     );
+  }
+
+  #[test]
+  fn parser_drops_malformed_anchors_keeps_invariant() {
+    // Anchors with malformed topic strings are dropped (with a warning),
+    // but the containing invariant is kept. Same drop-on-defect shape
+    // as `evidence_topics` on threats.
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"property","kind":"AccessGate","anchors":["N15","X99","N20","not-a-topic"]}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    let inv = &entries[0].threats[0].invariants[0];
+    // Two well-formed anchors kept; "X99" and "not-a-topic" dropped.
+    assert_eq!(
+      inv.anchors,
+      vec![topic::new_node_topic(&15), topic::new_node_topic(&20)]
+    );
+  }
+
+  #[test]
+  fn parser_accepts_empty_anchors_array() {
+    // An empty anchors array is the explicit "no specific declaration"
+    // signal — the validator falls back to function-wide scanning.
+    // No warning, no drop, just an empty Vec on the parsed entry.
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"a function-wide property","kind":"AccessGate","anchors":[]}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].threats[0].invariants[0].anchors.is_empty());
+  }
+
+  #[test]
+  fn parser_anchors_field_absence_defaults_to_empty() {
+    // The schema requires the field, but `#[serde(default)]` lets the
+    // parser handle field absence gracefully — same robustness shape
+    // as `no_invariant_rationale`. Field absent ⇒ empty anchors Vec.
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"a property","kind":"AccessGate"}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].threats[0].invariants[0].anchors.is_empty());
+  }
+
+  #[test]
+  fn parser_accepts_mixed_prefix_anchors() {
+    // Anchors are untyped — the LLM can cite any topic kind (N, D, S,
+    // etc.). The validator does role disambiguation per InvariantKind
+    // using TopicMetadata; the parser just verifies well-formedness.
+    let batch = build_batch_envelope("N100", "N10", &["A5"]);
+    let json = r#"{"subjects":[
+      {"subject_topic":"N10","threats":[
+        {"threat_topic":"A5","invariants":[
+          {"description":"property","kind":"AccessGate","anchors":["N15","D3","S7"]}
+        ],"no_invariant_rationale":null}
+      ]}
+    ]}"#;
+    let entries = run_parse(json, &batch);
+    let anchors = &entries[0].threats[0].invariants[0].anchors;
+    assert_eq!(anchors.len(), 3);
+    assert!(anchors.contains(&topic::new_node_topic(&15)));
+    assert!(anchors.contains(&topic::new_documentation_topic(3)));
+    assert!(anchors.contains(&topic::new_spec_topic(7)));
   }
 
   #[test]

@@ -838,6 +838,7 @@ mod tests {
         threat_topic: crate::domain::topic::new_adversarial_property_topic(5),
         subject_topic: crate::domain::topic::new_node_topic(&10),
         kind: crate::domain::InvariantKind::AccessGate,
+        anchors: vec![],
         author: Author::System,
         created_at: None,
         severity: None,

@@ -2401,6 +2401,24 @@ pub enum TopicMetadata {
     subject_topic: topic::Topic,
     /// Category of defensive pattern this invariant expresses.
     kind: InvariantKind,
+    /// Untyped citations: the declaration topics the property names.
+    /// The validator (pipeline step 10) interprets per kind — for
+    /// `AccessGate`, an anchor that resolves to a state variable is
+    /// likely the privilege; for `ReentrancyLock`, an anchor that
+    /// resolves to a modifier is likely the guard. Ambiguous cases
+    /// produce `Inconclusive` verdicts at validation time rather than
+    /// failing here.
+    ///
+    /// May be empty when the LLM doesn't cite specific declarations —
+    /// the validator falls back to function-wide harness scanning.
+    /// Parse-time validation drops only malformed topic strings (with
+    /// a warning); well-formed but stale anchors (referencing topics
+    /// that aren't in the rendered batch or have since been removed
+    /// from `topic_metadata`) are accepted here and surfaced as
+    /// `Inconclusive` verdicts at validation time. Same trust shape
+    /// as `evidence_topics` on `ConditionTopic` / `ThreatTopic`.
+    #[serde(default)]
+    anchors: Vec<topic::Topic>,
     author: crate::collaborator::models::Author,
     /// `None` for pipeline-produced entities — see FeatureTopic for
     /// rationale. (Following the FunctionalPurposeTopic / ConditionTopic
@@ -4668,6 +4686,7 @@ mod tests {
       threat_topic,
       subject_topic,
       kind: InvariantKind::AccessGate,
+      anchors: vec![],
       author: Author::AgentLarge,
       created_at: None,
       severity: None,
@@ -4697,6 +4716,7 @@ mod tests {
       threat_topic: tt,
       subject_topic: st,
       kind,
+      anchors,
       severity,
       ..
     } = retrieved
@@ -4704,6 +4724,7 @@ mod tests {
       assert_eq!(*tt, threat_topic);
       assert_eq!(*st, subject_topic);
       assert_eq!(*kind, InvariantKind::AccessGate);
+      assert!(anchors.is_empty());
       assert!(severity.is_none());
     }
   }
@@ -4720,6 +4741,11 @@ mod tests {
     let threat_topic = topic::new_adversarial_property_topic(11);
     let subject_topic = topic::new_node_topic(&7);
 
+    // Non-empty anchors here too — pins the multi-element-vector serde
+    // path so a future field-rename or attribute change can't silently
+    // drop anchors from the wire format.
+    let anchor_a = topic::new_node_topic(&77);
+    let anchor_b = topic::new_node_topic(&88);
     let metadata = TopicMetadata::InvariantTopic {
       topic: invariant_topic,
       description: "the operation is guarded by a non-reentrant lock"
@@ -4727,6 +4753,7 @@ mod tests {
       threat_topic,
       subject_topic,
       kind: InvariantKind::ReentrancyLock,
+      anchors: vec![anchor_a, anchor_b],
       author: Author::AgentLarge,
       created_at: Some("2026-05-13T12:00:00Z".to_string()),
       severity: Some(ThreatSeverity::High),
@@ -4735,8 +4762,15 @@ mod tests {
     let json = serde_json::to_string(&metadata).unwrap();
     let back: TopicMetadata = serde_json::from_str(&json).unwrap();
     assert_eq!(back.created_at(), Some("2026-05-13T12:00:00Z"));
-    if let TopicMetadata::InvariantTopic { kind, severity, .. } = back {
+    if let TopicMetadata::InvariantTopic {
+      kind,
+      anchors,
+      severity,
+      ..
+    } = back
+    {
       assert_eq!(kind, InvariantKind::ReentrancyLock);
+      assert_eq!(anchors, vec![anchor_a, anchor_b]);
       assert_eq!(severity, Some(ThreatSeverity::High));
     } else {
       panic!("expected InvariantTopic variant after round-trip");
@@ -4874,6 +4908,7 @@ mod tests {
         threat_topic: threat_x,
         subject_topic: subject_a,
         kind: InvariantKind::AccessGate,
+        anchors: vec![],
         author: Author::AgentLarge,
         created_at: None,
         severity: None,
@@ -4889,6 +4924,7 @@ mod tests {
         threat_topic: threat_x,
         subject_topic: subject_b,
         kind: InvariantKind::AccessGate,
+        anchors: vec![],
         author: Author::AgentLarge,
         created_at: None,
         severity: None,
@@ -4903,6 +4939,7 @@ mod tests {
         threat_topic: threat_y,
         subject_topic: subject_b,
         kind: InvariantKind::ReentrancyLock,
+        anchors: vec![],
         author: Author::AgentLarge,
         created_at: None,
         severity: Some(ThreatSeverity::High),
@@ -4968,6 +5005,7 @@ mod tests {
         threat_topic: threat_x,
         subject_topic: subject_a,
         kind: InvariantKind::AccessGate,
+        anchors: vec![],
         author: Author::AgentLarge,
         created_at: None,
         severity: None,
@@ -5035,6 +5073,7 @@ mod tests {
         threat_topic: threat_x,
         subject_topic: subject_a,
         kind: InvariantKind::AccessGate,
+        anchors: vec![],
         author: Author::AgentLarge,
         created_at: None,
         severity: None,

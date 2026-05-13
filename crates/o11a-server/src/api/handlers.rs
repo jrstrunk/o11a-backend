@@ -655,6 +655,7 @@ pub struct InvariantTopicResponse {
   pub threat_topic: String,
   pub subject_topic: String,
   pub kind: String,
+  pub anchors: Vec<String>,
   #[serde(rename = "author_id")]
   pub author: Author,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -951,6 +952,7 @@ fn topic_metadata_to_response(
       threat_topic,
       subject_topic,
       kind,
+      anchors,
       author: author_id,
       created_at,
       severity,
@@ -961,6 +963,7 @@ fn topic_metadata_to_response(
       threat_topic: threat_topic.id(),
       subject_topic: subject_topic.id(),
       kind: kind.as_str().to_string(),
+      anchors: anchors.iter().map(|t| t.id()).collect(),
       author: *author_id,
       created_at: created_at.clone(),
       severity: severity.map(|s| s.as_str().to_string()),
