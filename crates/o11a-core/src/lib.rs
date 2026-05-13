@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod analysis_artifact;
 pub mod audit_dump;
 pub mod code_refs;

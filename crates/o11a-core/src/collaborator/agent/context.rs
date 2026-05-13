@@ -8400,7 +8400,7 @@ mod batch_render_integration_tests {
           .to_string(),
         threat_topic: threat_b,
         subject_topic: assignment_topic,
-        kind: domain::InvariantKind::ReentrancyGuard,
+        kind: domain::InvariantKind::ReentrancyLock,
         author: crate::collaborator::models::Author::AgentLarge,
         created_at: None,
         severity: Some(domain::ThreatSeverity::High),
@@ -8467,7 +8467,7 @@ mod batch_render_integration_tests {
     // token, matching `ThreatSeverity::as_str`.
     let i2 = &invariants[1];
     assert_eq!(i2["topic"].as_str(), Some(inv_b.id().as_str()));
-    assert_eq!(i2["kind"].as_str(), Some("ReentrancyGuard"));
+    assert_eq!(i2["kind"].as_str(), Some("ReentrancyLock"));
     assert_eq!(i2["threat_topic"].as_str(), Some(threat_b.id().as_str()));
     assert_eq!(i2["severity"].as_str(), Some("high"));
   }

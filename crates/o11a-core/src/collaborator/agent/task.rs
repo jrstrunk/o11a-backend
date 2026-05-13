@@ -4144,25 +4144,85 @@ the codebase locations come later. This keeps the current prompt tight \
 on \"what defense is needed\" without mixing in \"where is the \
 defense.\"\n\n\
 For each invariant, choose a `kind` that names the **category of \
-defensive pattern** being expressed. The kinds are:\n\
+defensive pattern** being expressed. The kinds are grouped by family \
+for legibility — scan to the right family first, then pick the variant \
+that fits.\n\n\
+**Authorization & lifecycle.**\n\
 - `AccessGate` — A privilege check (modifier-based role gating, owner \
 check, or other authorization mechanism) gates the operation.\n\
-- `ReentrancyGuard` — A lock, reentrancy guard, or CEI ordering pattern \
-prevents reentry from observing partial state.\n\
 - `PauseGate` — A paused-state check halts the operation under \
 emergency-stop conditions.\n\
+- `PhaseGate` — A multi-state phase machine (auction Active, governance \
+Queued, presale Open) gates the operation; the contract must be in one \
+of the allowed phases before the operation runs.\n\
+- `TimelockedAction` — A wait-after-event constraint gates the \
+operation (governance proposal delay, admin action timelock); enforced \
+via `block.timestamp >= scheduled_at + delay`.\n\
+- `RateLimit` — A per-actor cooldown gates repeated calls (one \
+withdrawal per period, one mint per epoch); enforced via per-actor \
+last-action timestamp.\n\n\
+**Reentrancy & ordering.**\n\
+- `ReentrancyLock` — A lock, reentrancy guard variable, or \
+`nonReentrant`-style modifier prevents reentry from observing partial \
+state.\n\
+- `CheckEffectsInteractions` — Checks-effects-interactions: all state \
+writes precede every external call in the operation, preventing reentry \
+into partial state.\n\n\
+**Bounds & ranges.**\n\
 - `BoundedTolerance` — A bound on slippage, deadline, or numeric range \
-constrains the caller's tolerated outcome.\n\
+constrains the caller's tolerated outcome (caller supplies the \
+tolerance).\n\
+- `CapBound` — A state variable never exceeds a system-defined upper \
+bound (mint caps, supply caps, position caps); enforced at every write \
+site against a constant.\n\
+- `Monotonic` — A state variable changes only in one direction (nonces, \
+sequence numbers); enforced via `+=`/`-=` or an explicit \
+`require(new >= old)` at every write site.\n\n\
+**Freshness & oracles.**\n\
 - `FreshnessCheck` — A staleness check ensures the value read is \
-current relative to the operation's needs.\n\
-- `ConservationCheck` — A conservation invariant (sum, total, or \
-balance equality) holds across the operation.\n\
-- `InputValidation` — Argument well-formedness (zero address, range \
-bounds, sentinel checks) rejects malformed input before it \
+current relative to the operation's needs (timestamp-against-block \
+delta).\n\
+- `OracleManipulation` — The price/value source is \
+manipulation-resistant via TWAP, multi-source aggregation, sanity \
+bands, or similar — distinct from freshness (recency); this is source \
+trustworthiness.\n\n\
+**State conservation.**\n\
+- `SumConservation` — Sum identity: the sum of a set of balances \
+equals a recorded total (`sum(_balances) == _totalSupply`).\n\
+- `DualLedger` — Dual-ledger pairing: every write to ledger A is \
+accompanied by a matching write to ledger B in the same operation.\n\n\
+**Input well-formedness.**\n\
+- `InputValidation` — Argument well-formedness: length bounds, \
+sentinel checks, sortedness — rejects malformed input before it \
 propagates.\n\
-- `Other` — Genuinely novel defense; description carries the structure. \
-Use `Other` only when no kind above fits, rather than force-fitting to a \
-near-match.\n\n\
+- `ZeroAddressCheck` — Explicit rejection of `address(0)` on address \
+parameters before use.\n\n\
+**External call safety.**\n\
+- `ReturnValueCheck` — Every external call's success/return value is \
+checked (`SafeERC20`-style, `require(success)` on low-level calls).\n\
+- `CodePresenceCheck` — Before delegatecall or low-level call, the \
+callee address has non-zero code (`address(x).code.length > 0`).\n\n\
+**Cryptography & one-shot.**\n\
+- `ReplayProtection` — Nonces, signatures, or order IDs are consumed \
+exactly once (check-then-mark).\n\
+- `InitializerGuard` — One-shot setup: an `initialize` function can \
+only succeed once, enforced by a check-then-set on an `initialized` \
+flag.\n\
+- `SignatureValidation` — Signature validation: well-formedness, \
+EIP-712 domain binding, malleability rejection, recovery-returns-zero \
+rejection. Distinct from `ReplayProtection`'s consume-once mechanic.\n\n\
+**Computation.**\n\
+- `BoundedComputation` — Loop iteration count is bounded by a constant \
+or by a trusted input; no DoS by unbounded growth.\n\n\
+**Semantic (no v1 harness).**\n\
+- `EconomicInvariant` — Protocol-level math identity (constant \
+product, collateralization ratio, fee accounting). Reserved for \
+properties whose enforcement requires domain math, not code shape \
+recognition.\n\n\
+**Catch-all.**\n\
+- `Other` — Genuinely novel defense; description carries the \
+structure. Use `Other` only when no kind above fits, rather than \
+force-fitting to a near-match.\n\n\
 **Empty-invariants handling.** If a threat has no codebase-level \
 defense you can identify — because the threat is mitigated by user \
 discretion, by economic incentives, by an external trust assumption, or \
@@ -4265,12 +4325,28 @@ static INVARIANTS_SCHEMA: LazyLock<JsonSchema> = LazyLock::new(|| JsonSchema {
                           "type": "string",
                           "enum": [
                             "AccessGate",
-                            "ReentrancyGuard",
                             "PauseGate",
+                            "PhaseGate",
+                            "TimelockedAction",
+                            "RateLimit",
+                            "ReentrancyLock",
+                            "CheckEffectsInteractions",
                             "BoundedTolerance",
+                            "CapBound",
+                            "Monotonic",
                             "FreshnessCheck",
-                            "ConservationCheck",
+                            "OracleManipulation",
+                            "SumConservation",
+                            "DualLedger",
                             "InputValidation",
+                            "ZeroAddressCheck",
+                            "ReturnValueCheck",
+                            "CodePresenceCheck",
+                            "ReplayProtection",
+                            "InitializerGuard",
+                            "SignatureValidation",
+                            "BoundedComputation",
+                            "EconomicInvariant",
                             "Other"
                           ]
                         }
@@ -6616,7 +6692,7 @@ mod invariants_parser_tests {
       {"subject_topic":"N10","threats":[
         {"threat_topic":"A5","invariants":[
           {"description":"property A","kind":"AccessGate"},
-          {"description":"property B","kind":"ReentrancyGuard"},
+          {"description":"property B","kind":"ReentrancyLock"},
           {"description":"property C","kind":"PauseGate"}
         ],"no_invariant_rationale":null}
       ]}
@@ -6684,7 +6760,7 @@ mod invariants_parser_tests {
       ]},
       {"subject_topic":"N10","threats":[
         {"threat_topic":"A5","invariants":[
-          {"description":"second","kind":"ReentrancyGuard"}
+          {"description":"second","kind":"ReentrancyLock"}
         ],"no_invariant_rationale":null}
       ]}
     ]}"#;
@@ -6845,13 +6921,29 @@ mod invariants_parser_tests {
       {"subject_topic":"N10","threats":[
         {"threat_topic":"A5","invariants":[
           {"description":"a","kind":"AccessGate"},
-          {"description":"b","kind":"ReentrancyGuard"},
-          {"description":"c","kind":"PauseGate"},
-          {"description":"d","kind":"BoundedTolerance"},
-          {"description":"e","kind":"FreshnessCheck"},
-          {"description":"f","kind":"ConservationCheck"},
-          {"description":"g","kind":"InputValidation"},
-          {"description":"h","kind":"Other"}
+          {"description":"b","kind":"PauseGate"},
+          {"description":"c","kind":"PhaseGate"},
+          {"description":"d","kind":"TimelockedAction"},
+          {"description":"e","kind":"RateLimit"},
+          {"description":"f","kind":"ReentrancyLock"},
+          {"description":"g","kind":"CheckEffectsInteractions"},
+          {"description":"h","kind":"BoundedTolerance"},
+          {"description":"i","kind":"CapBound"},
+          {"description":"j","kind":"Monotonic"},
+          {"description":"k","kind":"FreshnessCheck"},
+          {"description":"l","kind":"OracleManipulation"},
+          {"description":"m","kind":"SumConservation"},
+          {"description":"n","kind":"DualLedger"},
+          {"description":"o","kind":"InputValidation"},
+          {"description":"p","kind":"ZeroAddressCheck"},
+          {"description":"q","kind":"ReturnValueCheck"},
+          {"description":"r","kind":"CodePresenceCheck"},
+          {"description":"s","kind":"ReplayProtection"},
+          {"description":"t","kind":"InitializerGuard"},
+          {"description":"u","kind":"SignatureValidation"},
+          {"description":"v","kind":"BoundedComputation"},
+          {"description":"w","kind":"EconomicInvariant"},
+          {"description":"x","kind":"Other"}
         ],"no_invariant_rationale":null}
       ]}
     ]}"#;
@@ -6866,12 +6958,28 @@ mod invariants_parser_tests {
       kinds,
       vec![
         domain::InvariantKind::AccessGate,
-        domain::InvariantKind::ReentrancyGuard,
         domain::InvariantKind::PauseGate,
+        domain::InvariantKind::PhaseGate,
+        domain::InvariantKind::TimelockedAction,
+        domain::InvariantKind::RateLimit,
+        domain::InvariantKind::ReentrancyLock,
+        domain::InvariantKind::CheckEffectsInteractions,
         domain::InvariantKind::BoundedTolerance,
+        domain::InvariantKind::CapBound,
+        domain::InvariantKind::Monotonic,
         domain::InvariantKind::FreshnessCheck,
-        domain::InvariantKind::ConservationCheck,
+        domain::InvariantKind::OracleManipulation,
+        domain::InvariantKind::SumConservation,
+        domain::InvariantKind::DualLedger,
         domain::InvariantKind::InputValidation,
+        domain::InvariantKind::ZeroAddressCheck,
+        domain::InvariantKind::ReturnValueCheck,
+        domain::InvariantKind::CodePresenceCheck,
+        domain::InvariantKind::ReplayProtection,
+        domain::InvariantKind::InitializerGuard,
+        domain::InvariantKind::SignatureValidation,
+        domain::InvariantKind::BoundedComputation,
+        domain::InvariantKind::EconomicInvariant,
         domain::InvariantKind::Other,
       ]
     );
@@ -7222,12 +7330,28 @@ mod invariants_parser_tests {
 
     let rust_variants: Vec<String> = [
       InvariantKind::AccessGate,
-      InvariantKind::ReentrancyGuard,
       InvariantKind::PauseGate,
+      InvariantKind::PhaseGate,
+      InvariantKind::TimelockedAction,
+      InvariantKind::RateLimit,
+      InvariantKind::ReentrancyLock,
+      InvariantKind::CheckEffectsInteractions,
       InvariantKind::BoundedTolerance,
+      InvariantKind::CapBound,
+      InvariantKind::Monotonic,
       InvariantKind::FreshnessCheck,
-      InvariantKind::ConservationCheck,
+      InvariantKind::OracleManipulation,
+      InvariantKind::SumConservation,
+      InvariantKind::DualLedger,
       InvariantKind::InputValidation,
+      InvariantKind::ZeroAddressCheck,
+      InvariantKind::ReturnValueCheck,
+      InvariantKind::CodePresenceCheck,
+      InvariantKind::ReplayProtection,
+      InvariantKind::InitializerGuard,
+      InvariantKind::SignatureValidation,
+      InvariantKind::BoundedComputation,
+      InvariantKind::EconomicInvariant,
       InvariantKind::Other,
     ]
     .into_iter()
@@ -7243,12 +7367,28 @@ mod invariants_parser_tests {
     fn _exhaustiveness_guard(k: InvariantKind) {
       match k {
         InvariantKind::AccessGate
-        | InvariantKind::ReentrancyGuard
         | InvariantKind::PauseGate
+        | InvariantKind::PhaseGate
+        | InvariantKind::TimelockedAction
+        | InvariantKind::RateLimit
+        | InvariantKind::ReentrancyLock
+        | InvariantKind::CheckEffectsInteractions
         | InvariantKind::BoundedTolerance
+        | InvariantKind::CapBound
+        | InvariantKind::Monotonic
         | InvariantKind::FreshnessCheck
-        | InvariantKind::ConservationCheck
+        | InvariantKind::OracleManipulation
+        | InvariantKind::SumConservation
+        | InvariantKind::DualLedger
         | InvariantKind::InputValidation
+        | InvariantKind::ZeroAddressCheck
+        | InvariantKind::ReturnValueCheck
+        | InvariantKind::CodePresenceCheck
+        | InvariantKind::ReplayProtection
+        | InvariantKind::InitializerGuard
+        | InvariantKind::SignatureValidation
+        | InvariantKind::BoundedComputation
+        | InvariantKind::EconomicInvariant
         | InvariantKind::Other => (),
       }
     }

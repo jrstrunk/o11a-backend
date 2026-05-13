@@ -1366,28 +1366,110 @@ pub enum ConditionKind {
 /// enum and the `as_str` match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvariantKind {
-  /// A privilege check — modifier-based role gating, owner check, or
-  /// other authorization mechanism — gates the operation.
+  // Authorization & lifecycle
+  /// A privilege check (modifier-based role gating, owner check, or
+  /// other authorization mechanism) gates the operation.
   AccessGate,
-  /// A lock, reentrancy guard, or CEI ordering pattern prevents reentry
-  /// from observing partial state.
-  ReentrancyGuard,
   /// A paused-state check halts the operation under emergency-stop
   /// conditions.
   PauseGate,
+  /// A multi-state phase machine (auction Active, governance Queued,
+  /// presale Open) gates the operation; the contract must be in one
+  /// of the allowed phases before the operation runs.
+  PhaseGate,
+  /// A wait-after-event constraint gates the operation (governance
+  /// proposal delay, admin action timelock); enforced via
+  /// `block.timestamp >= scheduled_at + delay`.
+  TimelockedAction,
+  /// A per-actor cooldown gates repeated calls (one withdrawal per
+  /// period, one mint per epoch); enforced via per-actor last-action
+  /// timestamp.
+  RateLimit,
+
+  // Reentrancy & ordering
+  /// A lock, reentrancy guard variable, or `nonReentrant`-style
+  /// modifier prevents reentry from observing partial state.
+  ReentrancyLock,
+  /// Checks-effects-interactions: all state writes precede every
+  /// external call in the operation, preventing reentry into partial
+  /// state.
+  CheckEffectsInteractions,
+
+  // Bounds & ranges
   /// A bound on slippage, deadline, or numeric range constrains the
-  /// caller's tolerated outcome.
+  /// caller's tolerated outcome (caller supplies the tolerance).
   BoundedTolerance,
+  /// A state variable never exceeds a system-defined upper bound
+  /// (mint caps, supply caps, position caps); enforced at every write
+  /// site against a constant.
+  CapBound,
+  /// A state variable changes only in one direction (nonces, sequence
+  /// numbers); enforced via `+=`/`-=` or an explicit
+  /// `require(new >= old)` at every write site.
+  Monotonic,
+
+  // Freshness & oracles
   /// A staleness check ensures the value read is current relative to
-  /// the operation's needs.
+  /// the operation's needs (timestamp-against-block delta).
   FreshnessCheck,
-  /// A conservation invariant — sum, total, or balance equality — holds
-  /// across the operation.
-  ConservationCheck,
-  /// Argument well-formedness — zero address, range bounds, sentinel
-  /// checks — rejects malformed input before it propagates.
+  /// The price/value source is manipulation-resistant via TWAP,
+  /// multi-source aggregation, sanity bands, or similar — distinct
+  /// from freshness (recency); this is source trustworthiness.
+  OracleManipulation,
+
+  // State conservation
+  /// Sum identity: the sum of a set of balances equals a recorded
+  /// total (`sum(_balances) == _totalSupply`).
+  SumConservation,
+  /// Dual-ledger pairing: every write to ledger A is accompanied by a
+  /// matching write to ledger B in the same operation.
+  DualLedger,
+
+  // Input well-formedness
+  /// Argument well-formedness: length bounds, sentinel checks,
+  /// sortedness — rejects malformed input before it propagates.
   InputValidation,
-  /// Genuinely novel defense; description carries the structure.
+  /// Explicit rejection of `address(0)` on address parameters before
+  /// use.
+  ZeroAddressCheck,
+
+  // External call safety
+  /// Every external call's success/return value is checked
+  /// (`SafeERC20`-style, `require(success)` on low-level calls).
+  ReturnValueCheck,
+  /// Before delegatecall or low-level call, the callee address has
+  /// non-zero code (`address(x).code.length > 0`).
+  CodePresenceCheck,
+
+  // Cryptography & one-shot
+  /// Nonces, signatures, or order IDs are consumed exactly once
+  /// (check-then-mark).
+  ReplayProtection,
+  /// One-shot setup: an `initialize` function can only succeed once,
+  /// enforced by a check-then-set on an `initialized` flag.
+  InitializerGuard,
+  /// Signature validation: well-formedness, EIP-712 domain binding,
+  /// malleability rejection, recovery-returns-zero rejection.
+  /// Distinct from `ReplayProtection`'s consume-once mechanic.
+  SignatureValidation,
+
+  // Computation
+  /// Loop iteration count is bounded by a constant or by a trusted
+  /// input; no DoS by unbounded growth.
+  BoundedComputation,
+
+  // Semantic (no v1 harness)
+  /// Protocol-level math identity (constant product, collateralization
+  /// ratio, fee accounting). No mechanical v1 harness — the validator
+  /// emits `Inconclusive` and surfaces for auditor reasoning.
+  /// Reserved for properties whose enforcement requires domain math,
+  /// not code shape recognition.
+  EconomicInvariant,
+
+  // Catch-all
+  /// Genuinely novel defense; description carries the structure. Use
+  /// only when no kind above fits, rather than force-fitting to a
+  /// near-match.
   Other,
 }
 
@@ -1400,12 +1482,28 @@ impl InvariantKind {
   pub fn as_str(self) -> &'static str {
     match self {
       InvariantKind::AccessGate => "AccessGate",
-      InvariantKind::ReentrancyGuard => "ReentrancyGuard",
       InvariantKind::PauseGate => "PauseGate",
+      InvariantKind::PhaseGate => "PhaseGate",
+      InvariantKind::TimelockedAction => "TimelockedAction",
+      InvariantKind::RateLimit => "RateLimit",
+      InvariantKind::ReentrancyLock => "ReentrancyLock",
+      InvariantKind::CheckEffectsInteractions => "CheckEffectsInteractions",
       InvariantKind::BoundedTolerance => "BoundedTolerance",
+      InvariantKind::CapBound => "CapBound",
+      InvariantKind::Monotonic => "Monotonic",
       InvariantKind::FreshnessCheck => "FreshnessCheck",
-      InvariantKind::ConservationCheck => "ConservationCheck",
+      InvariantKind::OracleManipulation => "OracleManipulation",
+      InvariantKind::SumConservation => "SumConservation",
+      InvariantKind::DualLedger => "DualLedger",
       InvariantKind::InputValidation => "InputValidation",
+      InvariantKind::ZeroAddressCheck => "ZeroAddressCheck",
+      InvariantKind::ReturnValueCheck => "ReturnValueCheck",
+      InvariantKind::CodePresenceCheck => "CodePresenceCheck",
+      InvariantKind::ReplayProtection => "ReplayProtection",
+      InvariantKind::InitializerGuard => "InitializerGuard",
+      InvariantKind::SignatureValidation => "SignatureValidation",
+      InvariantKind::BoundedComputation => "BoundedComputation",
+      InvariantKind::EconomicInvariant => "EconomicInvariant",
       InvariantKind::Other => "Other",
     }
   }
@@ -4628,7 +4726,7 @@ mod tests {
         .to_string(),
       threat_topic,
       subject_topic,
-      kind: InvariantKind::ReentrancyGuard,
+      kind: InvariantKind::ReentrancyLock,
       author: Author::AgentLarge,
       created_at: Some("2026-05-13T12:00:00Z".to_string()),
       severity: Some(ThreatSeverity::High),
@@ -4638,7 +4736,7 @@ mod tests {
     let back: TopicMetadata = serde_json::from_str(&json).unwrap();
     assert_eq!(back.created_at(), Some("2026-05-13T12:00:00Z"));
     if let TopicMetadata::InvariantTopic { kind, severity, .. } = back {
-      assert_eq!(kind, InvariantKind::ReentrancyGuard);
+      assert_eq!(kind, InvariantKind::ReentrancyLock);
       assert_eq!(severity, Some(ThreatSeverity::High));
     } else {
       panic!("expected InvariantTopic variant after round-trip");
@@ -4652,12 +4750,34 @@ mod tests {
     // constrains the wire form to exactly these strings.
     let cases = [
       (InvariantKind::AccessGate, "\"AccessGate\""),
-      (InvariantKind::ReentrancyGuard, "\"ReentrancyGuard\""),
       (InvariantKind::PauseGate, "\"PauseGate\""),
+      (InvariantKind::PhaseGate, "\"PhaseGate\""),
+      (InvariantKind::TimelockedAction, "\"TimelockedAction\""),
+      (InvariantKind::RateLimit, "\"RateLimit\""),
+      (InvariantKind::ReentrancyLock, "\"ReentrancyLock\""),
+      (
+        InvariantKind::CheckEffectsInteractions,
+        "\"CheckEffectsInteractions\"",
+      ),
       (InvariantKind::BoundedTolerance, "\"BoundedTolerance\""),
+      (InvariantKind::CapBound, "\"CapBound\""),
+      (InvariantKind::Monotonic, "\"Monotonic\""),
       (InvariantKind::FreshnessCheck, "\"FreshnessCheck\""),
-      (InvariantKind::ConservationCheck, "\"ConservationCheck\""),
+      (InvariantKind::OracleManipulation, "\"OracleManipulation\""),
+      (InvariantKind::SumConservation, "\"SumConservation\""),
+      (InvariantKind::DualLedger, "\"DualLedger\""),
       (InvariantKind::InputValidation, "\"InputValidation\""),
+      (InvariantKind::ZeroAddressCheck, "\"ZeroAddressCheck\""),
+      (InvariantKind::ReturnValueCheck, "\"ReturnValueCheck\""),
+      (InvariantKind::CodePresenceCheck, "\"CodePresenceCheck\""),
+      (InvariantKind::ReplayProtection, "\"ReplayProtection\""),
+      (InvariantKind::InitializerGuard, "\"InitializerGuard\""),
+      (
+        InvariantKind::SignatureValidation,
+        "\"SignatureValidation\"",
+      ),
+      (InvariantKind::BoundedComputation, "\"BoundedComputation\""),
+      (InvariantKind::EconomicInvariant, "\"EconomicInvariant\""),
       (InvariantKind::Other, "\"Other\""),
     ];
     for (kind, expected_json) in cases {
@@ -4693,12 +4813,28 @@ mod tests {
     // side without the other will trip the test.
     let cases = [
       InvariantKind::AccessGate,
-      InvariantKind::ReentrancyGuard,
       InvariantKind::PauseGate,
+      InvariantKind::PhaseGate,
+      InvariantKind::TimelockedAction,
+      InvariantKind::RateLimit,
+      InvariantKind::ReentrancyLock,
+      InvariantKind::CheckEffectsInteractions,
       InvariantKind::BoundedTolerance,
+      InvariantKind::CapBound,
+      InvariantKind::Monotonic,
       InvariantKind::FreshnessCheck,
-      InvariantKind::ConservationCheck,
+      InvariantKind::OracleManipulation,
+      InvariantKind::SumConservation,
+      InvariantKind::DualLedger,
       InvariantKind::InputValidation,
+      InvariantKind::ZeroAddressCheck,
+      InvariantKind::ReturnValueCheck,
+      InvariantKind::CodePresenceCheck,
+      InvariantKind::ReplayProtection,
+      InvariantKind::InitializerGuard,
+      InvariantKind::SignatureValidation,
+      InvariantKind::BoundedComputation,
+      InvariantKind::EconomicInvariant,
       InvariantKind::Other,
     ];
     for kind in cases {
@@ -4766,7 +4902,7 @@ mod tests {
           .to_string(),
         threat_topic: threat_y,
         subject_topic: subject_b,
-        kind: InvariantKind::ReentrancyGuard,
+        kind: InvariantKind::ReentrancyLock,
         author: Author::AgentLarge,
         created_at: None,
         severity: Some(ThreatSeverity::High),
