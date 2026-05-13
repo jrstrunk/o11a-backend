@@ -1964,6 +1964,46 @@ pub async fn build_conditions(
   Ok(())
 }
 
+/// Render every `CharacteristicTopic { kind: Security, .. }` as a single
+/// `- description` text block, sorted by numeric topic ID for deterministic
+/// output. Returns `None` when the audit has no Security characteristics —
+/// that signals the caller to omit the `Security context:` block from the
+/// threats prompt entirely (the `None` path of `extract_threats_from_batch`).
+///
+/// This is the step-8 consumer of step-5's synthesis output. The renderer
+/// reads only `topic_metadata`; no `audit_data.security_notes` read, since
+/// the raw `security.md` blob's role is fully absorbed by characteristic
+/// synthesis (the synthesizer reads it as one of its two inputs, then emits
+/// `CharacteristicTopic` entries that this function consumes).
+fn render_security_characteristics(
+  audit_data: &domain::AuditData,
+) -> Option<String> {
+  let mut items: Vec<(i32, String)> = audit_data
+    .topic_metadata
+    .values()
+    .filter_map(|m| match m {
+      domain::TopicMetadata::CharacteristicTopic {
+        topic,
+        description,
+        kind: domain::SystemCharacteristicKind::Security,
+        ..
+      } => Some((topic.numeric_id(), description.clone())),
+      _ => None,
+    })
+    .collect();
+  if items.is_empty() {
+    return None;
+  }
+  items.sort_by_key(|(id, _)| *id);
+  Some(
+    items
+      .into_iter()
+      .map(|(_, d)| format!("- {}", d))
+      .collect::<Vec<_>>()
+      .join("\n"),
+  )
+}
+
 /// For every condition on every non-pure subject in every in-scope, feature-
 /// linked function or modifier, generate a list of **threats** — adversarial
 /// scenarios in which the named assertion fails to hold. Each threat is its
@@ -2002,12 +2042,12 @@ pub async fn build_threats(
   // boundaries (step 8 will repopulate). Prune `threat_feature_links` of
   // any entry whose `threat_topic` no longer exists in `topic_metadata`
   // after the clear — non-orphaned links survive so impact-analysis state
-  // re-attaches across re-runs that preserve threat topic IDs. Also pull
-  // the security_notes string so the LLM call can include it as system
-  // context. Early-return if step 6 produced nothing: threats are
-  // downstream of conditions, so without conditions there is nothing to
-  // invert.
-  let security_notes: Option<String> = {
+  // re-attaches across re-runs that preserve threat topic IDs. Also render
+  // the audit's Security characteristics so the LLM call can include them
+  // as system context. Early-return if step 6 produced nothing: threats
+  // are downstream of conditions, so without conditions there is nothing
+  // to invert.
+  let security_context: Option<String> = {
     let mut ctx = state
       .data_context
       .lock()
@@ -2040,7 +2080,7 @@ pub async fn build_threats(
       return Ok(());
     }
 
-    audit_data.security_notes.clone()
+    render_security_characteristics(audit_data)
   };
 
   // Reuse the DAG batches from behavior extraction to enumerate members
@@ -2126,16 +2166,16 @@ pub async fn build_threats(
   // Per-member calls have no inter-member dependencies — each generates
   // threats from the inline conditions already stamped on every non-pure
   // subject by step 6's renderer hook. Spawn all LLM calls concurrently.
-  // `security_notes` is cloned per call so each spawned future owns its
-  // copy without cross-task borrowing.
+  // The rendered security-characteristics block is cloned per call so
+  // each spawned future owns its copy without cross-task borrowing.
   let mut handles = Vec::new();
   for rendered in rendered_members {
-    let notes = security_notes.clone();
+    let context_block = security_context.clone();
     handles.push(tokio::spawn(async move {
       let result = task::extract_threats_from_batch(
         &rendered.json,
         &rendered.label,
-        notes.as_deref(),
+        context_block.as_deref(),
       )
       .await;
       (rendered.label, result)
@@ -2349,8 +2389,8 @@ mod build_threats_tests {
   use super::*;
   use crate::collaborator::models::Author;
   use crate::domain::{
-    Invariant, ThreatActor, ThreatFeatureLink, ThreatFeatureRelation,
-    ThreatSeverity, TopicMetadata, new_data_context,
+    Invariant, SystemCharacteristicKind, ThreatActor, ThreatFeatureLink,
+    ThreatFeatureRelation, ThreatSeverity, TopicMetadata, new_data_context,
   };
   use std::collections::HashSet;
 
@@ -2657,6 +2697,188 @@ mod build_threats_tests {
       other => panic!("expected AuditNotFound, got {:?}", other),
     }
   }
+
+  /// `render_security_characteristics` returns `None` when no Security
+  /// characteristics exist. This is the structural switch that drives the
+  /// `_ => format!("{}Batch:\n{}", EXTRACT_THREATS_PROMPT, batch_json)`
+  /// arm of `extract_threats_from_batch` — the prompt is built without a
+  /// `Security context:` block so the LLM doesn't see an empty header
+  /// that could be mistaken for "no security considerations apply."
+  #[test]
+  fn render_security_characteristics_returns_none_when_no_characteristics() {
+    let mut ctx = new_data_context();
+    let audit_id = "no_chars_audit";
+    assert!(
+      ctx.create_audit(
+        audit_id.to_string(),
+        "Audit".to_string(),
+        HashSet::new(),
+        Some(
+          "Raw security.md kept on AuditData for diagnostic purposes only."
+            .to_string()
+        ),
+      )
+    );
+    let audit_data = ctx.get_audit(audit_id).unwrap();
+    assert!(
+      render_security_characteristics(audit_data).is_none(),
+      "no Security characteristics → None (drives the no-`Security context:` \
+       prompt branch in extract_threats_from_batch)"
+    );
+  }
+
+  /// One Security characteristic renders as a single `- description`
+  /// line. The verbatim-description property is what makes the threats
+  /// LLM call work — the LLM reads the bullet, treats it as a system-
+  /// wide claim, and uses it to pick realistic actors.
+  #[test]
+  fn render_security_characteristics_renders_single_characteristic_verbatim() {
+    let mut ctx = new_data_context();
+    let audit_id = "single_char_audit";
+    assert!(ctx.create_audit(
+      audit_id.to_string(),
+      "Audit".to_string(),
+      HashSet::new(),
+      None,
+    ));
+    let char_topic = topic::new_spec_topic(101);
+    let description = "The relayer key is trusted within the system \
+                       trust boundary.";
+    {
+      let audit_data = ctx.get_audit_mut(audit_id).unwrap();
+      audit_data.topic_metadata.insert(
+        char_topic,
+        TopicMetadata::CharacteristicTopic {
+          topic: char_topic,
+          description: description.to_string(),
+          kind: SystemCharacteristicKind::Security,
+          section_topic: None,
+          author: Author::AgentLarge,
+          created_at: None,
+        },
+      );
+    }
+    let audit_data = ctx.get_audit(audit_id).unwrap();
+    let rendered = render_security_characteristics(audit_data)
+      .expect("one Security characteristic → Some");
+    assert_eq!(rendered, format!("- {}", description));
+  }
+
+  /// Multiple Security characteristics are sorted by numeric topic ID
+  /// and joined with newlines. Determinism matters: the rendered block
+  /// is interpolated into every per-function threats prompt in the
+  /// audit, and non-deterministic ordering would invalidate prompt
+  /// caching at the LLM router level.
+  #[test]
+  fn render_security_characteristics_sorts_by_numeric_id() {
+    let mut ctx = new_data_context();
+    let audit_id = "sorted_audit";
+    assert!(ctx.create_audit(
+      audit_id.to_string(),
+      "Audit".to_string(),
+      HashSet::new(),
+      None,
+    ));
+    // Insert out of order so the sort step has to do real work — a
+    // BTreeMap iterator would already produce sorted output, so testing
+    // with already-sorted insertion would not actually exercise the
+    // sort_by_key path.
+    let high = topic::new_spec_topic(900);
+    let low = topic::new_spec_topic(100);
+    let mid = topic::new_spec_topic(500);
+    {
+      let audit_data = ctx.get_audit_mut(audit_id).unwrap();
+      for (t, d) in [
+        (high, "third claim"),
+        (low, "first claim"),
+        (mid, "second claim"),
+      ] {
+        audit_data.topic_metadata.insert(
+          t,
+          TopicMetadata::CharacteristicTopic {
+            topic: t,
+            description: d.to_string(),
+            kind: SystemCharacteristicKind::Security,
+            section_topic: None,
+            author: Author::AgentLarge,
+            created_at: None,
+          },
+        );
+      }
+    }
+    let audit_data = ctx.get_audit(audit_id).unwrap();
+    let rendered = render_security_characteristics(audit_data)
+      .expect("non-empty Security set → Some");
+    assert_eq!(rendered, "- first claim\n- second claim\n- third claim");
+  }
+
+  /// Non-`CharacteristicTopic` entries are skipped, and the rendered
+  /// output never includes their topic IDs. This is the "don't mix the
+  /// data sources" guarantee — the threats prompt's `Security context:`
+  /// block contains only Security characteristic descriptions, never
+  /// requirements/behaviors/features/conditions/comments.
+  #[test]
+  fn render_security_characteristics_ignores_non_characteristic_topics() {
+    let mut ctx = new_data_context();
+    let audit_id = "mixed_audit";
+    assert!(ctx.create_audit(
+      audit_id.to_string(),
+      "Audit".to_string(),
+      HashSet::new(),
+      None,
+    ));
+    let char_topic = topic::new_spec_topic(1);
+    let req_topic = topic::new_spec_topic(2);
+    let beh_topic = topic::new_spec_topic(3);
+    {
+      let audit_data = ctx.get_audit_mut(audit_id).unwrap();
+      audit_data.topic_metadata.insert(
+        char_topic,
+        TopicMetadata::CharacteristicTopic {
+          topic: char_topic,
+          description: "characteristic description".to_string(),
+          kind: SystemCharacteristicKind::Security,
+          section_topic: None,
+          author: Author::AgentLarge,
+          created_at: None,
+        },
+      );
+      audit_data.topic_metadata.insert(
+        req_topic,
+        TopicMetadata::RequirementTopic {
+          topic: req_topic,
+          description: "requirement description".to_string(),
+          section_topic: topic::Topic::Documentation(1),
+          author: Author::System,
+          created_at: None,
+        },
+      );
+      audit_data.topic_metadata.insert(
+        beh_topic,
+        TopicMetadata::BehaviorTopic {
+          topic: beh_topic,
+          description: "behavior description".to_string(),
+          member_topic: topic::new_node_topic(&1),
+          author: Author::System,
+          created_at: None,
+        },
+      );
+    }
+    let audit_data = ctx.get_audit(audit_id).unwrap();
+    let rendered = render_security_characteristics(audit_data)
+      .expect("a Security characteristic exists → Some");
+    assert_eq!(rendered, "- characteristic description");
+    assert!(
+      !rendered.contains("requirement description"),
+      "requirement bodies must not leak into the threats `Security \
+       context:` block"
+    );
+    assert!(
+      !rendered.contains("behavior description"),
+      "behavior bodies must not leak into the threats `Security \
+       context:` block"
+    );
+  }
 }
 
 /// Permanent drift guard: no renderer other than characteristic
@@ -2664,10 +2886,16 @@ mod build_threats_tests {
 ///
 /// The Phase 4 contract separates feature synthesis (sees requirements +
 /// behaviors only) from characteristic synthesis (sees the extracted
-/// characteristics + raw `security.md` only). The contract is enforced
-/// not by prose in the prompts but by what each step's renderer actually
-/// emits — if a renderer for steps 4 (features), 6 (functional
-/// properties), 7 (conditions), or 8 (threats) ever started including a
+/// characteristics + raw `security.md` only). Phase 5 added step 8
+/// (threats) as a *partial* consumer: its `Security context:` block
+/// receives Security characteristic *descriptions* via
+/// `render_security_characteristics`, but never their `S`-prefixed topic
+/// IDs — the bullet output is deliberately opaque so the LLM cannot
+/// treat characteristic topics as addressable cross-function anchors in
+/// `evidence_topics`. The contract is enforced not by prose in the
+/// prompts but by what each step's renderer actually emits — if a
+/// renderer for steps 4 (features), 6 (functional properties), 7
+/// (conditions), or 8 (threats) ever started including a
 /// `CharacteristicTopic` ID in its rendered context, the boundary would
 /// silently leak.
 ///
@@ -2678,11 +2906,17 @@ mod build_threats_tests {
 /// (positive case — *must* surface characteristics, so a regression
 /// that silently stops rendering them is also caught).
 ///
-/// Steps 6, 7, and 8 render through `context::render_batch_for_extraction`,
+/// Steps 6 and 7 render through `context::render_batch_for_extraction`,
 /// which is member-scoped and does not take a path through
-/// `audit_data.characteristics`. The realistic regression vector there
-/// is a prompt edit that asks the LLM to consider characteristics — that
-/// vector is guarded by `task::characteristic_synthesis_tests::
+/// `audit_data.characteristics`. Step 8 also uses
+/// `render_batch_for_extraction` for the per-function batch, plus the
+/// new audit-wide `render_security_characteristics` for the
+/// `Security context:` block — covered by the `build_threats_tests::
+/// render_security_characteristics_*` tests that assert no topic IDs
+/// and no non-characteristic descriptions leak into the block. The
+/// realistic prompt-text regression vector is a prompt edit that asks
+/// the LLM to consider characteristics — that vector is guarded by
+/// `task::characteristic_synthesis_tests::
 /// other_pipeline_prompts_do_not_mention_characteristics`, which asserts
 /// the prompt constants for steps 4/6/7/8 never reference the word
 /// "characteristic".

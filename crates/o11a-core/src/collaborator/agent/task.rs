@@ -3356,9 +3356,14 @@ the rationale is the audit signal that you considered the assertion and \
 found no falsifier. When you produce one or more threats for a \
 condition, set `no_threat_rationale` to `null`.\n\n\
 **Use the audit-wide security context.** Any `Security context` block \
-above this prompt names known threats, role definitions, and security \
-considerations specific to this audit. Use it to pick realistic actors \
-and to avoid restating defenses the auditor has already documented.\n\n\
+above this prompt names known threats, role definitions, security \
+considerations, and system-wide invariants specific to this audit. Use \
+it to pick realistic actors, to avoid restating defenses the auditor \
+has already documented, and to treat any explicit invariant as a \
+falsification target — a stated invariant is a claim worth attacking, \
+so when a condition on the current subject touches state named by such \
+an invariant, produce threats that would cause the invariant to \
+break.\n\n\
 Return a JSON object with a `subjects` key whose value is an array. \
 Each entry has:\n\
 - `subject_topic`: a topic ID from the `non_pure_subjects` list\n\
@@ -3532,13 +3537,22 @@ struct ThreatsValidationContext {
 
 /// Run the threats LLM task against a single function rendered by
 /// `context::render_batch_for_extraction` in `subject` shape. `label`
-/// identifies the function for logs. `security_notes` is the
-/// audit-wide framing loaded from `security.md`; when `Some`, it is
+/// identifies the function for logs. `security_notes` is the audit-wide
+/// framing rendered by `pipeline::render_security_characteristics` from
+/// the `Security`-kind `CharacteristicTopic` entries produced by
+/// characteristic synthesis (step 5); when `Some` and non-empty, it is
 /// prepended to the prompt as a `Security context:` block so the LLM
-/// picks realistic actors. Validation drops bad entries but keeps the
-/// good — a batch with one malformed evidence topic still produces
-/// threats with the remaining valid topics. Same drop-and-warn shape
-/// as steps 5 and 6.
+/// picks realistic actors and avoids restating already-documented
+/// defenses. The parameter name stays `security_notes` for continuity
+/// with the original signature; its source is now the synthesized
+/// characteristics rather than the raw `security.md` blob. The block is
+/// opaque bulleted text — characteristic topic IDs are deliberately not
+/// surfaced into the prompt, so the LLM produces threats grounded in
+/// the per-function batch rather than emitting cross-function
+/// references back into the characteristic layer. Validation drops bad
+/// entries but keeps the good — a batch with one malformed evidence
+/// topic still produces threats with the remaining valid topics. Same
+/// drop-and-warn shape as steps 5 and 6.
 pub async fn extract_threats_from_batch(
   batch_json: &str,
   label: &str,
