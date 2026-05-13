@@ -1627,6 +1627,41 @@ fn render_solidity_ast_snippet(
         obj["threats"] = json!(threats);
       }
     }
+    // Inline invariants for this non-pure subject from the reverse index.
+    // Stamped here so step 9 (per-function entry-boundary check) inherits
+    // the invariants payload for free — same shape as the conditions and
+    // threats hooks above, gated on presence (no placeholder values,
+    // orphan topics filtered out). Step 8 itself does not consume this
+    // hook; it is purely downstream prep.
+    if let Some(inv_topics) = audit_data.subject_invariants.get(&topic) {
+      let invariants: Vec<serde_json::Value> = inv_topics
+        .iter()
+        .filter_map(|it| {
+          if let Some(TopicMetadata::InvariantTopic {
+            topic: it_id,
+            description,
+            kind,
+            threat_topic,
+            severity,
+            ..
+          }) = audit_data.topic_metadata.get(it)
+          {
+            Some(json!({
+              "topic": it_id.id(),
+              "description": description,
+              "kind": kind,
+              "threat_topic": threat_topic.id(),
+              "severity": severity.map(|s| s.as_str()),
+            }))
+          } else {
+            None
+          }
+        })
+        .collect();
+      if !invariants.is_empty() {
+        obj["invariants"] = json!(invariants);
+      }
+    }
   }
   obj
 }
@@ -8286,6 +8321,367 @@ mod batch_render_integration_tests {
     assert_eq!(
       threats[0]["falsifies_condition"].as_str(),
       Some(cond.id().as_str())
+    );
+  }
+
+  /// Recurse into `v` and find the first node whose `id` matches
+  /// `target_id`, returning its `invariants` array (if any). Mirror of
+  /// `find_conditions_inline` / `find_threats_inline`.
+  fn find_invariants_inline(
+    v: &serde_json::Value,
+    target_id: &str,
+  ) -> Option<Vec<serde_json::Value>> {
+    match v {
+      serde_json::Value::Object(map) => {
+        if map.get("id").and_then(|v| v.as_str()) == Some(target_id)
+          && let Some(arr) = map.get("invariants")
+        {
+          return arr.as_array().cloned();
+        }
+        map
+          .values()
+          .find_map(|v| find_invariants_inline(v, target_id))
+      }
+      serde_json::Value::Array(arr) => arr
+        .iter()
+        .find_map(|v| find_invariants_inline(v, target_id)),
+      _ => None,
+    }
+  }
+
+  #[test]
+  fn render_inlines_invariants_on_non_pure_subjects() {
+    // Non-pure subject with InvariantTopic entries in subject_invariants
+    // must carry an inline `invariants` array on the rendered node,
+    // shaped as {topic, description, kind, threat_topic, severity}.
+    // Mirrors the conditions and threats hooks; step 9 will consume
+    // this payload directly. Step 8 itself does not read its own hook —
+    // the hook is added now so step 9 inherits it for free, the same
+    // way step 7 phase 3 prepared the threats hook before step 8.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+
+    // Two invariants on the same subject defending different threats,
+    // with different kinds. Second invariant carries an inherited
+    // severity.
+    let threat_a = topic::new_adversarial_property_topic(10);
+    let threat_b = topic::new_adversarial_property_topic(11);
+    let inv_a = topic::new_adversarial_property_topic(100);
+    let inv_b = topic::new_adversarial_property_topic(101);
+    audit.topic_metadata.insert(
+      inv_a,
+      TopicMetadata::InvariantTopic {
+        topic: inv_a,
+        description: "every privileged setter checks ownership".to_string(),
+        threat_topic: threat_a,
+        subject_topic: assignment_topic,
+        kind: domain::InvariantKind::AccessGate,
+        author: crate::collaborator::models::Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      inv_b,
+      TopicMetadata::InvariantTopic {
+        topic: inv_b,
+        description: "the operation is guarded by a non-reentrant lock"
+          .to_string(),
+        threat_topic: threat_b,
+        subject_topic: assignment_topic,
+        kind: domain::InvariantKind::ReentrancyGuard,
+        author: crate::collaborator::models::Author::AgentLarge,
+        created_at: None,
+        severity: Some(domain::ThreatSeverity::High),
+      },
+    );
+    // Populate the reverse index manually — normally rebuild_feature_context
+    // does this, but here we exercise the renderer in isolation.
+    audit
+      .subject_invariants
+      .insert(assignment_topic, vec![inv_a, inv_b]);
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    let invariants = find_invariants_inline(&value, &assignment_topic.id())
+      .expect("non-pure subject must carry inline invariants");
+    assert_eq!(invariants.len(), 2);
+
+    // First invariant: no severity present.
+    let i1 = &invariants[0];
+    assert_eq!(i1["topic"].as_str(), Some(inv_a.id().as_str()));
+    assert_eq!(
+      i1["description"].as_str(),
+      Some("every privileged setter checks ownership")
+    );
+    assert_eq!(i1["kind"].as_str(), Some("AccessGate"));
+    assert_eq!(i1["threat_topic"].as_str(), Some(threat_a.id().as_str()));
+    assert!(
+      i1["severity"].is_null(),
+      "severity is null when the parent threat has no severity yet"
+    );
+
+    // Second invariant: inherited severity rendered as the on-wire lowercase
+    // token, matching `ThreatSeverity::as_str`.
+    let i2 = &invariants[1];
+    assert_eq!(i2["topic"].as_str(), Some(inv_b.id().as_str()));
+    assert_eq!(i2["kind"].as_str(), Some("ReentrancyGuard"));
+    assert_eq!(i2["threat_topic"].as_str(), Some(threat_b.id().as_str()));
+    assert_eq!(i2["severity"].as_str(), Some("high"));
+  }
+
+  #[test]
+  fn render_omits_invariants_when_subject_invariants_is_empty() {
+    // Non-pure subject with no invariants: the `invariants` field must
+    // not appear on the rendered node. Same omit-on-empty contract as
+    // the conditions and threats hooks.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+    // subject_invariants is empty (default) — no InvariantTopic entries.
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    assert!(
+      find_invariants_inline(&value, &assignment_topic.id()).is_none(),
+      "non-pure subject without invariants must not carry inline `invariants`"
+    );
+  }
+
+  #[test]
+  fn render_invariants_gracefully_handles_orphan_index_entry() {
+    // If subject_invariants has an entry pointing at a topic that is
+    // missing from topic_metadata (e.g., after a partial rollback), the
+    // renderer should skip it without panicking. If all entries are
+    // orphans, the `invariants` field must be omitted entirely.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+    // Orphan: topic exists in subject_invariants but not in topic_metadata.
+    let orphan_inv = topic::new_adversarial_property_topic(999);
+    audit
+      .subject_invariants
+      .insert(assignment_topic, vec![orphan_inv]);
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    assert!(
+      find_invariants_inline(&value, &assignment_topic.id()).is_none(),
+      "orphan invariant topic in subject_invariants must not produce an \
+       invariants array"
+    );
+  }
+
+  #[test]
+  fn render_invariants_mixed_valid_and_orphan_only_emits_valid() {
+    // subject_invariants has both a valid InvariantTopic and an orphan.
+    // Only the valid one should appear in the output. Mirrors the
+    // matching conditions and threats tests.
+    let mut audit = empty_audit();
+    let container = domain::ProjectPath {
+      file_path: "test.sol".to_string(),
+    };
+    let component = topic::new_node_topic(&1);
+    audit.in_scope_files.insert(container.clone());
+
+    let assignment_node_id = 50;
+    let assignment_topic = add_unnamed(
+      &mut audit,
+      assignment_node_id,
+      UnnamedTopicKind::VariableMutation,
+    );
+
+    // Valid invariant
+    let valid_inv = topic::new_adversarial_property_topic(100);
+    let threat = topic::new_adversarial_property_topic(50);
+    audit.topic_metadata.insert(
+      valid_inv,
+      TopicMetadata::InvariantTopic {
+        topic: valid_inv,
+        description: "valid defense".to_string(),
+        threat_topic: threat,
+        subject_topic: assignment_topic,
+        kind: domain::InvariantKind::Other,
+        author: crate::collaborator::models::Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+    // Orphan — in subject_invariants but not in topic_metadata
+    let orphan_inv = topic::new_adversarial_property_topic(999);
+    audit
+      .subject_invariants
+      .insert(assignment_topic, vec![valid_inv, orphan_inv]);
+
+    let body = vec![ASTNode::Assignment {
+      node_id: assignment_node_id,
+      src_location: loc(),
+      operator: crate::solidity::ast::AssignmentOperator::Assign,
+      right_hand_side: Box::new(ASTNode::Literal {
+        node_id: 51,
+        src_location: loc(),
+        hex_value: String::new(),
+        kind: crate::solidity::ast::LiteralKind::Number,
+        type_descriptions: crate::solidity::ast::TypeDescriptions {
+          type_identifier: String::new(),
+          type_string: String::new(),
+        },
+        value: Some("1".to_string()),
+      }),
+      left_hand_side: Box::new(ASTNode::Identifier {
+        node_id: 52,
+        src_location: loc(),
+        name: "x".to_string(),
+        overloaded_declarations: vec![],
+        referenced_declaration: 99,
+      }),
+    }];
+    let member = topic::new_node_topic(&100);
+    install_simple_function(
+      &mut audit, member, "f", container, component, 200, body,
+    );
+
+    let rendered = render_batch_for_extraction(&[member], &audit)
+      .expect("single-member call renders");
+    let value: serde_json::Value =
+      serde_json::from_str(&rendered.json).expect("batch JSON parses");
+
+    let invariants = find_invariants_inline(&value, &assignment_topic.id())
+      .expect("valid invariant should appear");
+    assert_eq!(invariants.len(), 1, "orphan must be filtered out");
+    assert_eq!(
+      invariants[0]["topic"].as_str(),
+      Some(valid_inv.id().as_str())
+    );
+    assert_eq!(invariants[0]["description"].as_str(), Some("valid defense"));
+    assert_eq!(invariants[0]["kind"].as_str(), Some("Other"));
+    assert_eq!(
+      invariants[0]["threat_topic"].as_str(),
+      Some(threat.id().as_str())
     );
   }
 

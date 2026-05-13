@@ -591,6 +591,20 @@ pub struct AuditData {
   /// threats anchored to X). Derived from `ThreatTopic.falsifies_condition`,
   /// rebuilt with `rebuild_feature_context`.
   pub condition_threats: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Reverse index: A-prefixed threat topic → A-prefixed invariant topics
+  /// that defend it. Each threat has zero or more invariants. Canonical
+  /// replacement for the retired `audit_data.invariants` denormalization.
+  /// Used for the threat-detail UI ("show all defenses for this scenario")
+  /// and for re-derivation triggers (auditor edits threat X → re-run
+  /// invariants anchored to X). Derived from `InvariantTopic.threat_topic`,
+  /// rebuilt with `rebuild_feature_context`.
+  pub threat_invariants: BTreeMap<topic::Topic, Vec<topic::Topic>>,
+  /// Reverse index: non-pure subject topic → A-prefixed invariant topics
+  /// protecting it. Each subject has zero or more invariants. Drives the
+  /// per-subject inline-invariants renderer hook and step 9's per-function
+  /// entry-boundary check input. Derived from `InvariantTopic.subject_topic`,
+  /// rebuilt with `rebuild_feature_context`.
+  pub subject_invariants: BTreeMap<topic::Topic, Vec<topic::Topic>>,
   /// Impact analysis links between threats and features.
   pub threat_feature_links: Vec<ThreatFeatureLink>,
   /// Feature-to-requirement links (many-to-many). Keyed by S-prefixed topic.
@@ -3026,6 +3040,31 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }
   }
 
+  // Rebuild threat_invariants and subject_invariants from InvariantTopic
+  // entries. An invariant carries both the threat it defends and the
+  // non-pure subject it protects, so a single pass populates both indexes.
+  audit_data.threat_invariants.clear();
+  audit_data.subject_invariants.clear();
+  for (inv_topic, metadata) in &audit_data.topic_metadata {
+    if let TopicMetadata::InvariantTopic {
+      threat_topic,
+      subject_topic,
+      ..
+    } = metadata
+    {
+      audit_data
+        .threat_invariants
+        .entry(*threat_topic)
+        .or_default()
+        .push(*inv_topic);
+      audit_data
+        .subject_invariants
+        .entry(*subject_topic)
+        .or_default()
+        .push(*inv_topic);
+    }
+  }
+
   // Build reverse index: doc_topic -> [requirement_topics]
   let mut doc_to_requirements: HashMap<topic::Topic, Vec<topic::Topic>> =
     HashMap::new();
@@ -3282,18 +3321,41 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }
   }
 
-  // Build context for InvariantTopics: parent threat as a SourceContext entry
+  // Build context for InvariantTopics: parent threat (the upstream link)
+  // and the protected non-pure subject (the anchor) as SourceContext
+  // entries. Without the subject anchor the auditor UI's expanded view
+  // for an invariant misses the subject the invariant protects; mirror
+  // the shape ThreatTopic uses above (subject ref first, then the
+  // self/upstream ref). The SourceContext's `sort_key` tracks its own
+  // `scope` (the invariant), matching the convention every other
+  // single-context builder uses (BehaviorTopic, FunctionalSemanticTopic,
+  // ThreatTopic) — sort_key on the inner Reference entries continues to
+  // track each ref's `reference_topic`.
   for (inv_topic, metadata) in &audit_data.topic_metadata {
-    if let TopicMetadata::InvariantTopic { threat_topic, .. } = metadata {
-      let sort_key = Some(threat_topic.numeric_id() as usize);
+    if let TopicMetadata::InvariantTopic {
+      threat_topic,
+      subject_topic,
+      ..
+    } = metadata
+    {
+      let inv_sort_key = Some(inv_topic.numeric_id() as usize);
+      let subj_sort_key = Some(subject_topic.numeric_id() as usize);
+      let threat_sort_key = Some(threat_topic.numeric_id() as usize);
+      let scope_references = vec![
+        Reference::ProjectReference {
+          reference_topic: *subject_topic,
+          sort_key: subj_sort_key,
+        },
+        Reference::ProjectReference {
+          reference_topic: *threat_topic,
+          sort_key: threat_sort_key,
+        },
+      ];
       let context = vec![SourceContext {
         scope: *inv_topic,
-        sort_key,
+        sort_key: inv_sort_key,
         is_in_scope: true,
-        scope_references: vec![Reference::ProjectReference {
-          reference_topic: *threat_topic,
-          sort_key,
-        }],
+        scope_references,
         nested_references: vec![],
       }];
       audit_data.topic_context.insert(*inv_topic, context);
@@ -3484,6 +3546,8 @@ pub fn new_audit_data(
     subject_conditions: BTreeMap::new(),
     subject_threats: BTreeMap::new(),
     condition_threats: BTreeMap::new(),
+    threat_invariants: BTreeMap::new(),
+    subject_invariants: BTreeMap::new(),
     threat_feature_links: Vec::new(),
     feature_requirement_links: BTreeMap::new(),
     feature_behavior_links: BTreeMap::new(),
@@ -4596,5 +4660,253 @@ mod tests {
     assert!(serde_json::from_str::<InvariantKind>("\"Guard\"").is_err());
     assert!(serde_json::from_str::<InvariantKind>("\"accessGate\"").is_err());
     assert!(serde_json::from_str::<InvariantKind>("\"\"").is_err());
+  }
+
+  #[test]
+  fn rebuild_feature_context_populates_threat_and_subject_invariants() {
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&10);
+    let subject_b = topic::new_node_topic(&20);
+    let threat_x = topic::new_adversarial_property_topic(1);
+    let threat_y = topic::new_adversarial_property_topic(2);
+
+    // Two invariants on threat_x — same threat, different subjects.
+    // Exercises the 1:N shape on the threat side. A third invariant on
+    // threat_y / subject_b covers the second threat and confirms
+    // subject_b also receives an entry.
+    let inv_xa = topic::new_adversarial_property_topic(11);
+    let inv_xb = topic::new_adversarial_property_topic(12);
+    let inv_yb = topic::new_adversarial_property_topic(13);
+
+    audit.topic_metadata.insert(
+      inv_xa,
+      TopicMetadata::InvariantTopic {
+        topic: inv_xa,
+        description: "every privileged setter checks ownership".to_string(),
+        threat_topic: threat_x,
+        subject_topic: subject_a,
+        kind: InvariantKind::AccessGate,
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      inv_xb,
+      TopicMetadata::InvariantTopic {
+        topic: inv_xb,
+        description:
+          "every privileged setter checks ownership (sibling subject)"
+            .to_string(),
+        threat_topic: threat_x,
+        subject_topic: subject_b,
+        kind: InvariantKind::AccessGate,
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      inv_yb,
+      TopicMetadata::InvariantTopic {
+        topic: inv_yb,
+        description: "the operation is guarded by a non-reentrant lock"
+          .to_string(),
+        threat_topic: threat_y,
+        subject_topic: subject_b,
+        kind: InvariantKind::ReentrancyGuard,
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: Some(ThreatSeverity::High),
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+
+    // threat_x is defended by two invariants (different subjects); threat_y
+    // by one. Same 1:N shape `condition_threats` carries for threats.
+    let x_invs = audit
+      .threat_invariants
+      .get(&threat_x)
+      .expect("threat_x should have invariants");
+    assert_eq!(x_invs.len(), 2);
+    assert!(x_invs.contains(&inv_xa));
+    assert!(x_invs.contains(&inv_xb));
+    let y_invs = audit
+      .threat_invariants
+      .get(&threat_y)
+      .expect("threat_y should have invariants");
+    assert_eq!(y_invs.len(), 1);
+    assert_eq!(y_invs[0], inv_yb);
+
+    // subject_a has one invariant; subject_b has two (from both threats).
+    let a_invs = audit
+      .subject_invariants
+      .get(&subject_a)
+      .expect("subject_a should have invariants");
+    assert_eq!(a_invs.len(), 1);
+    assert_eq!(a_invs[0], inv_xa);
+    let b_invs = audit
+      .subject_invariants
+      .get(&subject_b)
+      .expect("subject_b should have invariants");
+    assert_eq!(b_invs.len(), 2);
+    assert!(b_invs.contains(&inv_xb));
+    assert!(b_invs.contains(&inv_yb));
+
+    // A subject/threat with no invariants is absent from the index.
+    let subject_c = topic::new_node_topic(&30);
+    let threat_z = topic::new_adversarial_property_topic(3);
+    assert!(!audit.subject_invariants.contains_key(&subject_c));
+    assert!(!audit.threat_invariants.contains_key(&threat_z));
+  }
+
+  #[test]
+  fn rebuild_feature_context_clears_invariant_indexes_before_rebuilding() {
+    // Calling rebuild_feature_context twice must not accumulate stale
+    // entries — both invariant indexes are always rebuilt from scratch.
+    // Mirrors the threat-index clear test.
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&10);
+    let threat_x = topic::new_adversarial_property_topic(1);
+    let inv_xa = topic::new_adversarial_property_topic(11);
+    audit.topic_metadata.insert(
+      inv_xa,
+      TopicMetadata::InvariantTopic {
+        topic: inv_xa,
+        description: "defense statement".to_string(),
+        threat_topic: threat_x,
+        subject_topic: subject_a,
+        kind: InvariantKind::AccessGate,
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+
+    // First rebuild populates both indexes.
+    rebuild_feature_context(&mut audit);
+    assert_eq!(
+      audit.threat_invariants.get(&threat_x).map(|v| v.len()),
+      Some(1)
+    );
+    assert_eq!(
+      audit.subject_invariants.get(&subject_a).map(|v| v.len()),
+      Some(1)
+    );
+
+    // Remove the invariant topic and rebuild — both indexes must clear.
+    audit.topic_metadata.remove(&inv_xa);
+    rebuild_feature_context(&mut audit);
+    assert!(
+      !audit.threat_invariants.contains_key(&threat_x),
+      "threat_invariants must be cleared before rebuild"
+    );
+    assert!(
+      !audit.subject_invariants.contains_key(&subject_a),
+      "subject_invariants must be cleared before rebuild"
+    );
+  }
+
+  #[test]
+  fn rebuild_feature_context_with_no_invariants_yields_empty_indexes() {
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    rebuild_feature_context(&mut audit);
+    assert!(
+      audit.threat_invariants.is_empty(),
+      "no InvariantTopic entries means empty threat_invariants"
+    );
+    assert!(
+      audit.subject_invariants.is_empty(),
+      "no InvariantTopic entries means empty subject_invariants"
+    );
+  }
+
+  #[test]
+  fn rebuild_feature_context_invariant_topic_context_carries_subject_and_threat()
+   {
+    // The InvariantTopic context-builder must emit SourceContext entries
+    // for both the parent threat (upstream link) and the protected
+    // subject (anchor) — before Phase 3 the context referenced only the
+    // threat. Without the subject anchor, the auditor UI's expanded
+    // view for an invariant misses the subject the invariant protects.
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&42);
+    let threat_x = topic::new_adversarial_property_topic(5);
+    let inv_xa = topic::new_adversarial_property_topic(50);
+
+    audit.topic_metadata.insert(
+      inv_xa,
+      TopicMetadata::InvariantTopic {
+        topic: inv_xa,
+        description: "every privileged setter checks ownership".to_string(),
+        threat_topic: threat_x,
+        subject_topic: subject_a,
+        kind: InvariantKind::AccessGate,
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+
+    let context = audit
+      .topic_context
+      .get(&inv_xa)
+      .expect("InvariantTopic must have a topic_context entry");
+    assert_eq!(context.len(), 1);
+    let entry = &context[0];
+    assert_eq!(entry.scope, inv_xa);
+    assert!(entry.is_in_scope);
+    // `SourceContext.sort_key` tracks the entry's own `scope` (the
+    // invariant), matching the convention every other single-context
+    // builder uses (BehaviorTopic, FunctionalSemanticTopic, ThreatTopic).
+    // Pinning this here so any future refactor that reverts to the
+    // earlier threat-based sort_key trips the test — the wrong key
+    // tied invariants defending the same threat to identical sort_keys,
+    // collapsing their order under `merge_context_groups`.
+    assert_eq!(
+      entry.sort_key(),
+      Some(inv_xa.numeric_id() as usize),
+      "SourceContext.sort_key must track its own scope (the invariant)"
+    );
+    assert_eq!(
+      entry.scope_references.len(),
+      2,
+      "scope_references must carry the subject anchor and the parent threat"
+    );
+    // Order is part of the contract: subject ref first (the protected
+    // anchor), then the threat ref (the upstream link), matching the
+    // ThreatTopic context-builder's shape.
+    assert_eq!(
+      *entry.scope_references[0].reference_topic(),
+      subject_a,
+      "subject anchor must be the first scope_reference"
+    );
+    assert_eq!(
+      *entry.scope_references[1].reference_topic(),
+      threat_x,
+      "parent threat must be the second scope_reference"
+    );
+    // Each Reference's `sort_key` tracks its own `reference_topic` —
+    // this is the gold-standard convention at the Reference layer,
+    // distinct from the SourceContext-level sort_key above.
+    assert_eq!(
+      entry.scope_references[0].sort_key(),
+      Some(subject_a.numeric_id() as usize),
+      "subject Reference.sort_key must track subject_topic"
+    );
+    assert_eq!(
+      entry.scope_references[1].sort_key(),
+      Some(threat_x.numeric_id() as usize),
+      "threat Reference.sort_key must track threat_topic"
+    );
   }
 }

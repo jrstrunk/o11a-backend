@@ -37,8 +37,10 @@
 //!     `feature_behavior_links` — applied from `audit.json` via
 //!     `report::apply_report`
 //!   - `section_requirements`, `section_characteristics`, `member_behaviors`,
-//!     `declaration_semantics` — derivable reverse indexes, rebuilt via
-//!     `domain::rebuild_feature_context`
+//!     `declaration_semantics`, `subject_purposes`, `subject_placements`,
+//!     `subject_conditions`, `subject_threats`, `condition_threats`,
+//!     `threat_invariants`, `subject_invariants` — derivable reverse
+//!     indexes, rebuilt via `domain::rebuild_feature_context`
 //!
 //! ## Version compatibility
 //!
@@ -172,6 +174,8 @@ pub fn apply_snapshot(audit_data: &mut AuditData, snap: AuditDataSnapshot) {
   audit_data.subject_conditions.clear();
   audit_data.subject_threats.clear();
   audit_data.condition_threats.clear();
+  audit_data.threat_invariants.clear();
+  audit_data.subject_invariants.clear();
 }
 
 /// Errors that can occur when reading, writing, or decoding an artifact.
