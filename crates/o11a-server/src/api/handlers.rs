@@ -960,7 +960,7 @@ fn topic_metadata_to_response(
       description: description.clone(),
       threat_topic: threat_topic.id(),
       subject_topic: subject_topic.id(),
-      kind: format!("{:?}", kind),
+      kind: kind.as_str().to_string(),
       author: *author_id,
       created_at: created_at.clone(),
       severity: severity.map(|s| s.as_str().to_string()),

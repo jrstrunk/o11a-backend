@@ -33,9 +33,9 @@ pub fn reseed_functional_property_id(max_loaded: i32) {
   NEXT_FUNCTIONAL_PROPERTY_ID.store(max_loaded + 1, Ordering::Relaxed);
 }
 
-/// Allocate an `A`-prefixed topic ID. Shared across `ThreatTopic` and
-/// `InvariantTopic` (and, in a future step, `ConditionTopic`) — all of which
-/// are "adversarial properties" in the security model.
+/// Allocate an `A`-prefixed topic ID. Shared across `ConditionTopic`,
+/// `ThreatTopic`, and `InvariantTopic` — all "adversarial properties"
+/// in the security model.
 pub fn allocate_adversarial_property_id() -> i32 {
   NEXT_ADVERSARIAL_PROPERTY_ID.fetch_add(1, Ordering::Relaxed)
 }

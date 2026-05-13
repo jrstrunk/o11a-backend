@@ -1360,8 +1360,10 @@ pub enum ConditionKind {
 /// index (not by name). Renaming a variant in place is safe; reordering,
 /// removing, or inserting variants is a wire-format break that requires
 /// bumping `analysis_artifact::ARTIFACT_SCHEMA_VERSION`. The HTTP API
-/// emits the variant name (`format!("{:?}", kind)` in handlers.rs), so
-/// any rename is also a surface-level API change for downstream clients.
+/// emits the variant name via [`InvariantKind::as_str`] (pinned to the
+/// declared variant identifiers), so any rename is also a surface-level
+/// API change for downstream clients and must be reflected in both the
+/// enum and the `as_str` match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvariantKind {
   /// A privilege check — modifier-based role gating, owner check, or
@@ -1387,6 +1389,26 @@ pub enum InvariantKind {
   InputValidation,
   /// Genuinely novel defense; description carries the structure.
   Other,
+}
+
+impl InvariantKind {
+  /// Canonical wire-format display form for the HTTP API. The variant
+  /// names returned here are the surface contract with downstream
+  /// clients — keep them in lockstep with the variant identifiers
+  /// above. Adding a variant requires adding a match arm here; the
+  /// compiler enforces that.
+  pub fn as_str(self) -> &'static str {
+    match self {
+      InvariantKind::AccessGate => "AccessGate",
+      InvariantKind::ReentrancyGuard => "ReentrancyGuard",
+      InvariantKind::PauseGate => "PauseGate",
+      InvariantKind::BoundedTolerance => "BoundedTolerance",
+      InvariantKind::FreshnessCheck => "FreshnessCheck",
+      InvariantKind::ConservationCheck => "ConservationCheck",
+      InvariantKind::InputValidation => "InputValidation",
+      InvariantKind::Other => "Other",
+    }
+  }
 }
 
 /// Non-pure subject type. Filter facet on the auditor UI; classifies
@@ -4660,6 +4682,34 @@ mod tests {
     assert!(serde_json::from_str::<InvariantKind>("\"Guard\"").is_err());
     assert!(serde_json::from_str::<InvariantKind>("\"accessGate\"").is_err());
     assert!(serde_json::from_str::<InvariantKind>("\"\"").is_err());
+  }
+
+  #[test]
+  fn invariant_kind_as_str_matches_serde_wire_form() {
+    // Display form and on-wire form must agree, so the API layer can
+    // render `kind` via `as_str()` without reaching into Debug. Mirrors
+    // `threat_actor_as_str_matches_serde_wire_form` — pins every
+    // variant against its serde representation so a rename of either
+    // side without the other will trip the test.
+    let cases = [
+      InvariantKind::AccessGate,
+      InvariantKind::ReentrancyGuard,
+      InvariantKind::PauseGate,
+      InvariantKind::BoundedTolerance,
+      InvariantKind::FreshnessCheck,
+      InvariantKind::ConservationCheck,
+      InvariantKind::InputValidation,
+      InvariantKind::Other,
+    ];
+    for kind in cases {
+      let wire = serde_json::to_value(kind).unwrap();
+      assert_eq!(
+        wire.as_str().expect("wire form is a string"),
+        kind.as_str(),
+        "as_str() must equal serde wire form for {:?}",
+        kind
+      );
+    }
   }
 
   #[test]

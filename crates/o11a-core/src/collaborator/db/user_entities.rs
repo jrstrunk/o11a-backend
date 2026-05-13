@@ -692,35 +692,184 @@ pub fn apply_user_entities_snapshot(
       .push(topic::new_topic(&behavior_topic));
   }
 
-  // Reseed the S- and P-counters past the highest user-entity ID just
-  // installed. `apply_report` already reseeded once based on the pipeline
-  // output; this second call covers any user-entity row whose DB ID exceeds
-  // the pipeline's max (e.g. a user-authored entity allocated by a previous
-  // server process). Scanning the merged `topic_metadata` keys is safe
-  // because `reseed_*` performs an unconditional store, and the post-merge
-  // max is never lower than `apply_report`'s.
-  let (max_spec, max_func_prop) =
-    topic_metadata_max_spec_and_functional_property(audit_data);
-  crate::ids::reseed_spec_id(max_spec);
-  crate::ids::reseed_functional_property_id(max_func_prop);
+  // Reseed every per-prefix counter past the highest user-entity ID just
+  // installed. `apply_report` already reseeded based on the merged
+  // post-snapshot, post-report state; this call covers any user-entity
+  // row whose DB ID exceeds those maxes (e.g. a user-authored entity
+  // allocated by a previous server process). Scanning the merged
+  // `topic_metadata` keys is safe because `reseed_*` performs an
+  // unconditional store and the post-merge max is never lower than
+  // `apply_report`'s. The `A`-counter reseed covers user-authored
+  // Condition/Threat/Invariant rows once those user-create surfaces
+  // ship; today only pipeline-allocated A-IDs exist in the metadata,
+  // but wiring the reseed now keeps the invariant ("every counter is
+  // advanced past every existing topic of its variant after hydration
+  // finishes") true regardless of which user-create surfaces are live.
+  let maxes = topic_metadata_max_ids_per_prefix(audit_data);
+  crate::ids::reseed_spec_id(maxes.spec);
+  crate::ids::reseed_functional_property_id(maxes.functional_property);
+  crate::ids::reseed_adversarial_property_id(maxes.adversarial_property);
 }
 
-/// Highest numeric ID across `Topic::Spec` and `Topic::FunctionalProperty`
-/// keys in `topic_metadata`, returned as `(max_spec, max_functional_property)`.
-/// Either component is 0 when no key of that variant exists.
-fn topic_metadata_max_spec_and_functional_property(
+/// Highest numeric ID per per-counter-prefix observed in `topic_metadata`.
+/// Each field is 0 when no key of that variant exists. Computed in one
+/// pass over the keys for efficiency.
+struct TopicCounterMaxes {
+  spec: i32,
+  functional_property: i32,
+  adversarial_property: i32,
+}
+
+/// One-pass scan of `topic_metadata.keys()` returning the highest numeric
+/// suffix per counter-backed prefix (`S`, `P`, `A`). Replaces the prior
+/// two-counter helper now that adversarial-property hydration also needs
+/// a reseed bound.
+fn topic_metadata_max_ids_per_prefix(
   audit_data: &AuditData,
-) -> (i32, i32) {
-  let mut max_spec = 0;
-  let mut max_func_prop = 0;
+) -> TopicCounterMaxes {
+  let mut maxes = TopicCounterMaxes {
+    spec: 0,
+    functional_property: 0,
+    adversarial_property: 0,
+  };
   for key in audit_data.topic_metadata.keys() {
     match key {
-      topic::Topic::Spec(id) if *id > max_spec => max_spec = *id,
-      topic::Topic::FunctionalProperty(id) if *id > max_func_prop => {
-        max_func_prop = *id
+      topic::Topic::Spec(id) if *id > maxes.spec => maxes.spec = *id,
+      topic::Topic::FunctionalProperty(id)
+        if *id > maxes.functional_property =>
+      {
+        maxes.functional_property = *id
+      }
+      topic::Topic::AdversarialProperty(id)
+        if *id > maxes.adversarial_property =>
+      {
+        maxes.adversarial_property = *id
       }
       _ => {}
     }
   }
-  (max_spec, max_func_prop)
+  maxes
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::domain::{ProjectPath, new_audit_data};
+  use std::collections::HashSet;
+
+  fn empty_audit() -> AuditData {
+    new_audit_data("test".to_string(), HashSet::<ProjectPath>::new(), None)
+  }
+
+  #[test]
+  fn topic_metadata_max_ids_per_prefix_returns_zeros_when_empty() {
+    let audit = empty_audit();
+    let maxes = topic_metadata_max_ids_per_prefix(&audit);
+    assert_eq!(maxes.spec, 0);
+    assert_eq!(maxes.functional_property, 0);
+    assert_eq!(maxes.adversarial_property, 0);
+  }
+
+  #[test]
+  fn topic_metadata_max_ids_per_prefix_finds_highest_per_prefix() {
+    // Sprinkle entries of every counter-backed variant at various IDs so
+    // the helper has to track each prefix independently and pick the max
+    // per prefix (not the overall max). The TopicMetadata variants are
+    // chosen for cheapness — the helper reads only the keys.
+    let mut audit = empty_audit();
+    for (topic, metadata) in [
+      // Spec entries — max should be 12.
+      (
+        topic::new_spec_topic(3),
+        TopicMetadata::FeatureTopic {
+          topic: topic::new_spec_topic(3),
+          name: "f3".to_string(),
+          description: String::new(),
+          author: Author::System,
+          created_at: None,
+        },
+      ),
+      (
+        topic::new_spec_topic(12),
+        TopicMetadata::FeatureTopic {
+          topic: topic::new_spec_topic(12),
+          name: "f12".to_string(),
+          description: String::new(),
+          author: Author::System,
+          created_at: None,
+        },
+      ),
+      // Functional-property entries — max should be 7.
+      (
+        topic::new_functional_property_topic(5),
+        TopicMetadata::FunctionalSemanticTopic {
+          topic: topic::new_functional_property_topic(5),
+          description: String::new(),
+          declaration_topic: topic::new_node_topic(&1),
+          documentation_topics: vec![],
+          author: Author::System,
+          created_at: None,
+          match_source: None,
+        },
+      ),
+      (
+        topic::new_functional_property_topic(7),
+        TopicMetadata::FunctionalSemanticTopic {
+          topic: topic::new_functional_property_topic(7),
+          description: String::new(),
+          declaration_topic: topic::new_node_topic(&2),
+          documentation_topics: vec![],
+          author: Author::System,
+          created_at: None,
+          match_source: None,
+        },
+      ),
+      // Adversarial-property entries — max should be 99.
+      (
+        topic::new_adversarial_property_topic(99),
+        TopicMetadata::InvariantTopic {
+          topic: topic::new_adversarial_property_topic(99),
+          description: String::new(),
+          threat_topic: topic::new_adversarial_property_topic(50),
+          subject_topic: topic::new_node_topic(&10),
+          kind: crate::domain::InvariantKind::AccessGate,
+          author: Author::System,
+          created_at: None,
+          severity: None,
+        },
+      ),
+      (
+        topic::new_adversarial_property_topic(11),
+        TopicMetadata::InvariantTopic {
+          topic: topic::new_adversarial_property_topic(11),
+          description: String::new(),
+          threat_topic: topic::new_adversarial_property_topic(50),
+          subject_topic: topic::new_node_topic(&10),
+          kind: crate::domain::InvariantKind::AccessGate,
+          author: Author::System,
+          created_at: None,
+          severity: None,
+        },
+      ),
+      // Node entry — should not affect any of the three counter maxes.
+      // The helper reads only `topic_metadata.keys()`, so the value's
+      // variant is irrelevant; pick the cheapest one to construct.
+      (
+        topic::new_node_topic(&500),
+        TopicMetadata::UnnamedTopic {
+          topic: topic::new_node_topic(&500),
+          scope: crate::domain::Scope::Global,
+          kind: crate::domain::UnnamedTopicKind::Literal,
+          transitive_topic: None,
+        },
+      ),
+    ] {
+      audit.topic_metadata.insert(topic, metadata);
+    }
+
+    let maxes = topic_metadata_max_ids_per_prefix(&audit);
+    assert_eq!(maxes.spec, 12);
+    assert_eq!(maxes.functional_property, 7);
+    assert_eq!(maxes.adversarial_property, 99);
+  }
 }

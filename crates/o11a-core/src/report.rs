@@ -413,10 +413,15 @@ impl std::error::Error for ApplyReportError {}
 /// populated from source parsing (ASTs, symbol tables, topic metadata for
 /// parsed declarations). This installs the LLM-derived topics (features,
 /// requirements, behaviors, characteristics, functional semantics) and their
-/// links. Also reseeds the process-wide `S`-prefixed ID counter past the
-/// highest spec ID in the merged `topic_metadata`, so subsequent in-memory
-/// allocations (user-entity hydration, comment authoring, pipeline rerun)
-/// never collide with anything the report installed.
+/// links. Also reseeds every per-prefix ID counter (`S`, `P`, `A`) past the
+/// highest ID of that variant in the merged `topic_metadata`, so subsequent
+/// in-memory allocations (user-entity hydration, comment authoring, pipeline
+/// rerun) never collide with anything the report installed or with anything
+/// `apply_snapshot` hydrated earlier in the startup sequence. The `A` reseed
+/// is load-bearing here even though `apply_report` does not itself install
+/// `A`-prefixed topics: the binary snapshot hydrated immediately beforehand
+/// carries `ConditionTopic` / `ThreatTopic` / `InvariantTopic` entries that
+/// must not be re-allocated over.
 ///
 /// Callers should invoke `crate::domain::rebuild_feature_context` on the audit
 /// data after applying the report, so that reverse indexes are refreshed.
@@ -579,13 +584,32 @@ pub fn apply_report(
       .push(topic::new_topic(&link.topic));
   }
 
-  // Reseed the S-counter so that any subsequent allocation skips past every
-  // spec topic the report installed. The four pipeline-output `TopicMetadata`
-  // kinds (Feature/Requirement/Behavior/Characteristic) all key by
-  // `Topic::Spec`, and link maps reference only topics that were just
-  // inserted into `topic_metadata`, so scanning `topic_metadata` keys covers
-  // every spec ID this report introduced.
+  // Reseed every per-prefix counter so subsequent allocations skip past
+  // every topic this report installed and every topic `apply_snapshot`
+  // hydrated earlier in the startup sequence.
+  //
+  // - `S` (spec): the four pipeline-output spec-family kinds
+  //   (Feature/Requirement/Behavior/Characteristic) all key by
+  //   `Topic::Spec`. Apply_report just reinserted them; scanning
+  //   `topic_metadata` keys covers every spec ID this report introduced.
+  // - `P` (functional property): functional semantics also key by
+  //   `Topic::FunctionalProperty` and were just reinserted; for
+  //   functional_purpose / placement_rationale topics, those came from
+  //   the snapshot and are also present in the merged `topic_metadata`.
+  // - `A` (adversarial property): `ConditionTopic` / `ThreatTopic` /
+  //   `InvariantTopic` are not in the report — they come from the
+  //   snapshot. Since `apply_report` runs after `apply_snapshot` in the
+  //   server startup sequence, scanning the merged `topic_metadata`
+  //   here covers them too.
+  //
+  // Each scan is O(n) over `topic_metadata` and runs at startup only.
   crate::ids::reseed_spec_id(max_spec_id(audit_data));
+  crate::ids::reseed_functional_property_id(max_functional_property_id(
+    audit_data,
+  ));
+  crate::ids::reseed_adversarial_property_id(max_adversarial_property_id(
+    audit_data,
+  ));
 
   Ok(())
 }
@@ -599,6 +623,39 @@ fn max_spec_id(audit_data: &AuditData) -> i32 {
     .keys()
     .filter_map(|t| match t {
       crate::domain::topic::Topic::Spec(id) => Some(*id),
+      _ => None,
+    })
+    .max()
+    .unwrap_or(0)
+}
+
+/// Highest numeric ID across every `Topic::FunctionalProperty` key in
+/// `topic_metadata`, or 0 if there are none. Peer of `max_spec_id`; used
+/// to bound the functional-property-counter reseed.
+fn max_functional_property_id(audit_data: &AuditData) -> i32 {
+  audit_data
+    .topic_metadata
+    .keys()
+    .filter_map(|t| match t {
+      crate::domain::topic::Topic::FunctionalProperty(id) => Some(*id),
+      _ => None,
+    })
+    .max()
+    .unwrap_or(0)
+}
+
+/// Highest numeric ID across every `Topic::AdversarialProperty` key in
+/// `topic_metadata`, or 0 if there are none. Peer of `max_spec_id`; used
+/// to bound the adversarial-property-counter reseed. Adversarial-property
+/// topics enter `topic_metadata` via `apply_snapshot`, not via the report
+/// itself, so this scan finds the snapshot's ConditionTopic / ThreatTopic
+/// / InvariantTopic entries that must not be re-allocated over.
+fn max_adversarial_property_id(audit_data: &AuditData) -> i32 {
+  audit_data
+    .topic_metadata
+    .keys()
+    .filter_map(|t| match t {
+      crate::domain::topic::Topic::AdversarialProperty(id) => Some(*id),
       _ => None,
     })
     .max()
@@ -645,11 +702,27 @@ mod tests {
     }
   }
 
+  /// Acquire every per-prefix counter lock the `apply_report` reseed
+  /// touches, in a stable order. Returns the guards so the caller can
+  /// drop them together at test end. Stable acquisition order avoids
+  /// the cross-test deadlock that would otherwise be possible (e.g.
+  /// test A grabs S then P, test B grabs P then S).
+  fn lock_all_counters() -> (
+    std::sync::MutexGuard<'static, ()>,
+    std::sync::MutexGuard<'static, ()>,
+    std::sync::MutexGuard<'static, ()>,
+  ) {
+    let spec = crate::ids::SPEC_LOCK.lock().unwrap();
+    let functional = crate::ids::FUNCTIONAL_PROPERTY_LOCK.lock().unwrap();
+    let adversarial = crate::ids::ADVERSARIAL_PROPERTY_LOCK.lock().unwrap();
+    (spec, functional, adversarial)
+  }
+
   #[test]
   fn apply_report_reseeds_spec_counter_past_highest_pipeline_topic() {
-    // Holds for the duration of the test so the parallel ids.rs counter
-    // tests don't race on NEXT_SPEC_ID.
-    let _guard = crate::ids::SPEC_LOCK.lock().unwrap();
+    // `apply_report` reseeds all three counters; hold every lock so
+    // parallel tests in `ids` don't race on the side-effected counters.
+    let _guards = lock_all_counters();
 
     // Bottom out the counter so allocation after apply_report observably
     // skips past the report's max — proving the reseed fired.
@@ -697,7 +770,7 @@ mod tests {
 
   #[test]
   fn apply_report_with_no_spec_topics_reseeds_counter_to_one() {
-    let _guard = crate::ids::SPEC_LOCK.lock().unwrap();
+    let _guards = lock_all_counters();
 
     crate::ids::reseed_spec_id(0);
     let mut audit = empty_audit();
@@ -710,5 +783,99 @@ mod tests {
 
     // No spec topics → max is 0 → reseed(0) → next allocation is 1.
     assert_eq!(crate::ids::allocate_spec_id(), 1);
+  }
+
+  #[test]
+  fn apply_report_reseeds_functional_property_counter_past_pipeline_semantic() {
+    // Functional semantics in the report key by `Topic::FunctionalProperty`.
+    // Without the P-counter reseed wired into apply_report, user-entity
+    // hydration (which runs next in startup) would collide on these IDs.
+    let _guards = lock_all_counters();
+
+    crate::ids::reseed_functional_property_id(0);
+
+    let mut pipeline = empty_pipeline();
+    pipeline
+      .functional_semantics
+      .push(ReportFunctionalSemantic {
+        topic: "P57".to_string(),
+        description: "what this declaration means".to_string(),
+        declaration_topic: "N9".to_string(),
+        documentation_topics: vec!["D2".to_string()],
+        match_source: None,
+      });
+
+    let mut audit = empty_audit();
+    apply_report("audit-1", &mut audit, &report_with_pipeline(pipeline))
+      .expect("apply_report");
+
+    let next = crate::ids::allocate_functional_property_id();
+    assert_eq!(
+      next, 58,
+      "functional-property counter must reseed past max pipeline P-id"
+    );
+  }
+
+  #[test]
+  fn apply_report_reseeds_adversarial_property_counter_past_snapshot_topic() {
+    // Adversarial-property topics (Condition/Threat/Invariant) enter
+    // `topic_metadata` via `apply_snapshot`, not via the report. Simulate
+    // that by pre-seeding an A-prefixed entry and asserting apply_report's
+    // reseed picks it up. Without this, the next user-create on any
+    // A-prefixed topic would collide.
+    let _guards = lock_all_counters();
+
+    crate::ids::reseed_adversarial_property_id(0);
+
+    let mut audit = empty_audit();
+    let invariant_topic =
+      crate::domain::topic::new_adversarial_property_topic(73);
+    audit.topic_metadata.insert(
+      invariant_topic,
+      crate::domain::TopicMetadata::InvariantTopic {
+        topic: invariant_topic,
+        description: "every privileged setter checks ownership".to_string(),
+        threat_topic: crate::domain::topic::new_adversarial_property_topic(5),
+        subject_topic: crate::domain::topic::new_node_topic(&10),
+        kind: crate::domain::InvariantKind::AccessGate,
+        author: Author::System,
+        created_at: None,
+        severity: None,
+      },
+    );
+
+    apply_report(
+      "audit-1",
+      &mut audit,
+      &report_with_pipeline(empty_pipeline()),
+    )
+    .expect("apply_report");
+
+    let next = crate::ids::allocate_adversarial_property_id();
+    assert_eq!(
+      next, 74,
+      "adversarial-property counter must reseed past max A-id in topic_metadata"
+    );
+  }
+
+  #[test]
+  fn apply_report_with_no_p_or_a_topics_reseeds_counters_to_one() {
+    // Empty audit + empty report → both P and A counters reseed to 0,
+    // next allocation is 1 on each. Matches the equivalent S-counter
+    // test above.
+    let _guards = lock_all_counters();
+
+    crate::ids::reseed_functional_property_id(0);
+    crate::ids::reseed_adversarial_property_id(0);
+    let mut audit = empty_audit();
+    apply_report(
+      "audit-1",
+      &mut audit,
+      &report_with_pipeline(empty_pipeline()),
+    )
+    .expect("apply_report");
+
+    assert_eq!(crate::ids::allocate_functional_property_id(), 1);
+    assert_eq!(crate::ids::allocate_adversarial_property_id(), 1);
   }
 }
