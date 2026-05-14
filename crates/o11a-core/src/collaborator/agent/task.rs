@@ -631,90 +631,16 @@ pub async fn extract_requirements_from_documentation(
     return Ok(parsed_per_doc.into_iter().next().unwrap());
   }
 
-  let consolidation_input = render_consolidation_input(&parsed_per_doc);
-  let prompt =
-    format!("{}{}", CONSOLIDATE_REQUIREMENTS_PROMPT, consolidation_input);
-  let response = router::chat_completion(
-    TaskSize::Large,
-    router::SYSTEM_MESSAGE_DOCUMENTATION,
-    &prompt,
-    Some("requirements_consolidate"),
-    Some(&REQUIREMENTS_SCHEMA),
-  )
-  .await?;
-
-  let mut consolidated = parse_requirements_response(&response, &prompt)?;
-
-  // The consolidation prompt instructs the LLM to emit
-  // `system_characteristics: []` because characteristics are consolidated
-  // later in Phase 4 with the raw `security.md` as additional context.
-  // Defensively drop any characteristics the LLM might still emit so the
-  // per-doc accumulation below is the single source of truth — otherwise
-  // a noncompliant LLM response would double-count characteristics.
-  consolidated.characteristics.clear();
-  consolidated.section_characteristics.clear();
-  consolidated.topic_metadata.retain(|_, m| {
-    !matches!(m, domain::TopicMetadata::CharacteristicTopic { .. })
-  });
-
-  // Merge characteristics from every per-doc parse into the consolidated
-  // result with fresh local IDs that don't collide with the consolidation's
-  // requirement IDs. The pipeline-level remap will reallocate process-wide
-  // IDs for everything regardless, so these local IDs need only be unique
-  // within the returned `ParsedRequirements`.
-  let mut next_local_id = consolidated
-    .topic_metadata
-    .keys()
-    .map(|t| t.numeric_id())
-    .max()
-    .unwrap_or(0);
-
-  for per_doc in parsed_per_doc {
-    let ParsedRequirements {
-      characteristics,
-      topic_metadata,
-      ..
-    } = per_doc;
-
-    for (old_topic, characteristic) in characteristics {
-      let (description, kind, section_topic) =
-        match topic_metadata.get(&old_topic) {
-          Some(domain::TopicMetadata::CharacteristicTopic {
-            description,
-            kind,
-            section_topic,
-            ..
-          }) => (description.clone(), *kind, *section_topic),
-          _ => continue,
-        };
-
-      next_local_id += 1;
-      let new_topic = topic::new_spec_topic(next_local_id);
-
-      consolidated.topic_metadata.insert(
-        new_topic,
-        domain::TopicMetadata::CharacteristicTopic {
-          topic: new_topic,
-          description,
-          kind,
-          section_topic,
-          author: Author::System,
-          created_at: None,
-        },
-      );
-      consolidated
-        .characteristics
-        .insert(new_topic, characteristic);
-
-      if let Some(st) = section_topic {
-        consolidated
-          .section_characteristics
-          .entry(st)
-          .or_default()
-          .push(new_topic);
-      }
-    }
-  }
+  // Chunked consolidation: when many documents produce a large set
+  // of requirements, a single consolidation call can exceed the
+  // model's output token limit (observed with 9 docs / 162
+  // requirements against glm-5.1). Split into chunks of
+  // CONSOLIDATION_CHUNK_SIZE documents each, consolidate per chunk,
+  // then consolidate the chunk results together. Two documents per
+  // chunk keeps the per-call output well within limits; the final
+  // merge of chunk results is smaller because each chunk has already
+  // been deduplicated.
+  let consolidated = consolidate_requirements_chunked(&parsed_per_doc).await?;
 
   Ok(consolidated)
 }
@@ -1063,6 +989,177 @@ mod requirements_parser_tests {
       ]
     );
   }
+}
+
+/// Maximum number of per-doc results to send to a single consolidation
+/// LLM call. Too many documents in one call produces an output that
+/// exceeds the model's token limit (observed with 9 docs / 162
+/// requirements). Two documents per chunk keeps per-call output well
+/// within limits; chunk results are then merged in a final pass.
+const CONSOLIDATION_CHUNK_SIZE: usize = 2;
+
+/// Consolidate per-document requirements using a hierarchical chunked
+/// strategy: merge docs in small batches, then merge the batch results.
+/// This avoids exceeding the model's output token limit when many
+/// documents produce a large combined set of requirements.
+///
+/// Characteristics bypass consolidation entirely (Phase 4 owns that)
+/// and are accumulated verbatim from every per-doc parse, exactly as
+/// the single-call path did.
+async fn consolidate_requirements_chunked(
+  parsed_per_doc: &[ParsedRequirements],
+) -> Result<ParsedRequirements, TaskError> {
+  // Fast path: few enough docs for a single call.
+  if parsed_per_doc.len() <= CONSOLIDATION_CHUNK_SIZE {
+    return consolidate_requirements_single(parsed_per_doc).await;
+  }
+
+  tracing::info!(
+    "Chunking {} documents into batches of {} for consolidation",
+    parsed_per_doc.len(),
+    CONSOLIDATION_CHUNK_SIZE,
+  );
+
+  // Phase 1: consolidate each chunk in parallel.
+  let chunks: Vec<Vec<&ParsedRequirements>> = parsed_per_doc
+    .chunks(CONSOLIDATION_CHUNK_SIZE)
+    .map(|c| c.iter().collect())
+    .collect();
+  let mut chunk_handles = Vec::new();
+  for chunk in chunks {
+    // Collect into an owned Vec so the spawned task doesn't
+    // borrow the slice.
+    let chunk_owned: Vec<ParsedRequirements> = chunk
+      .into_iter()
+      .map(|r| ParsedRequirements {
+        requirements: r.requirements.clone(),
+        topic_metadata: r.topic_metadata.clone(),
+        section_requirements: r.section_requirements.clone(),
+        characteristics: r.characteristics.clone(),
+        section_characteristics: r.section_characteristics.clone(),
+      })
+      .collect();
+    chunk_handles.push(tokio::spawn(async move {
+      consolidate_requirements_single(&chunk_owned).await
+    }));
+  }
+
+  let mut chunk_results: Vec<ParsedRequirements> = Vec::new();
+  for (i, handle) in chunk_handles.into_iter().enumerate() {
+    match handle.await {
+      Ok(Ok(result)) => chunk_results.push(result),
+      Ok(Err(e)) => {
+        tracing::error!("consolidation chunk {} failed: {}", i, e);
+      }
+      Err(e) => {
+        tracing::error!("consolidation chunk {} panicked: {}", i, e);
+      }
+    }
+  }
+
+  if chunk_results.is_empty() {
+    return Err(TaskError::Other(
+      "All consolidation chunks failed".to_string(),
+    ));
+  }
+
+  // Phase 2: merge the chunk results. If only one chunk succeeded,
+  // skip the final merge call — nothing to consolidate.
+  if chunk_results.len() == 1 {
+    return Ok(chunk_results.into_iter().next().unwrap());
+  }
+
+  tracing::info!(
+    "Final consolidation pass: merging {} chunk results",
+    chunk_results.len(),
+  );
+  let result = consolidate_requirements_single(&chunk_results).await?;
+  Ok(result)
+}
+
+/// Single consolidation call: send the given per-doc results to one
+/// LLM call and parse the response. Characteristics are stripped
+/// from the LLM output and accumulated verbatim from the inputs
+/// instead (Phase 4's `synthesize_characteristics` is the canonical
+/// consolidation point for those).
+async fn consolidate_requirements_single(
+  docs: &[ParsedRequirements],
+) -> Result<ParsedRequirements, TaskError> {
+  let consolidation_input = render_consolidation_input(docs);
+  let prompt =
+    format!("{}{}", CONSOLIDATE_REQUIREMENTS_PROMPT, consolidation_input);
+  let response = router::chat_completion(
+    TaskSize::Large,
+    router::SYSTEM_MESSAGE_DOCUMENTATION,
+    &prompt,
+    Some("requirements_consolidate"),
+    Some(&REQUIREMENTS_SCHEMA),
+  )
+  .await?;
+
+  let mut consolidated = parse_requirements_response(&response, &prompt)?;
+
+  // The consolidation prompt instructs the LLM to emit
+  // `system_characteristics: []` because characteristics are consolidated
+  // later in Phase 4. Defensively drop any the LLM might emit.
+  consolidated.characteristics.clear();
+  consolidated.section_characteristics.clear();
+  consolidated.topic_metadata.retain(|_, m| {
+    !matches!(m, domain::TopicMetadata::CharacteristicTopic { .. })
+  });
+
+  // Accumulate characteristics verbatim from every input doc with
+  // fresh local IDs that don't collide with the consolidation's
+  // requirement IDs.
+  let mut next_local_id = consolidated
+    .topic_metadata
+    .keys()
+    .map(|t| t.numeric_id())
+    .max()
+    .unwrap_or(0);
+
+  for per_doc in docs {
+    for (old_topic, characteristic) in &per_doc.characteristics {
+      let (description, kind, section_topic) =
+        match per_doc.topic_metadata.get(old_topic) {
+          Some(domain::TopicMetadata::CharacteristicTopic {
+            description,
+            kind,
+            section_topic,
+            ..
+          }) => (description.clone(), *kind, *section_topic),
+          _ => continue,
+        };
+
+      next_local_id += 1;
+      let new_topic = topic::new_spec_topic(next_local_id);
+
+      consolidated.topic_metadata.insert(
+        new_topic,
+        domain::TopicMetadata::CharacteristicTopic {
+          topic: new_topic,
+          description,
+          kind,
+          section_topic,
+          author: Author::System,
+          created_at: None,
+        },
+      );
+      consolidated
+        .characteristics
+        .insert(new_topic, characteristic.clone());
+
+      if let Some(st) = section_topic {
+        consolidated
+          .section_characteristics
+          .entry(st)
+          .or_default()
+          .push(new_topic);
+      }
+    }
+  }
+
+  Ok(consolidated)
 }
 
 /// Render the per-doc parsed requirements as a feature-requirements-only
