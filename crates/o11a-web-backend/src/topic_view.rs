@@ -45,6 +45,8 @@ pub enum ConversationEntryKind {
   Behavior,
   Requirement,
   Characteristic,
+  FunctionalPurpose,
+  PlacementRationale,
   Condition,
   Threat,
   Invariant,
@@ -1471,6 +1473,8 @@ pub fn build_topic_panel_prefix(
     }
     Some(m @ TopicMetadata::RequirementTopic { .. }) => m,
     Some(m @ TopicMetadata::CharacteristicTopic { .. }) => m,
+    Some(m @ TopicMetadata::FunctionalPurposeTopic { .. }) => m,
+    Some(m @ TopicMetadata::PlacementRationaleTopic { .. }) => m,
     Some(m @ TopicMetadata::ConditionTopic { .. }) => m,
     Some(m @ TopicMetadata::ThreatTopic { .. }) => m,
     Some(m @ TopicMetadata::InvariantTopic { .. }) => m,
@@ -1489,6 +1493,12 @@ pub fn build_topic_panel_prefix(
       characteristic_breadcrumb_label(*kind),
       ConversationEntryKind::Characteristic,
     )),
+    TopicMetadata::FunctionalPurposeTopic { .. } => {
+      Some(("Purpose", ConversationEntryKind::FunctionalPurpose))
+    }
+    TopicMetadata::PlacementRationaleTopic { .. } => {
+      Some(("Placement", ConversationEntryKind::PlacementRationale))
+    }
     TopicMetadata::ConditionTopic { .. } => {
       Some(("Condition", ConversationEntryKind::Condition))
     }
@@ -1767,6 +1777,8 @@ pub fn render_entry_html(
     ConversationEntryKind::Behavior => "behavior",
     ConversationEntryKind::Characteristic => "characteristic",
     ConversationEntryKind::FunctionalSemantics => "functional-semantics",
+    ConversationEntryKind::FunctionalPurpose => "functional-purpose",
+    ConversationEntryKind::PlacementRationale => "placement-rationale",
     ConversationEntryKind::Condition => "condition",
     ConversationEntryKind::Threat => "threat",
     ConversationEntryKind::Invariant => "invariant",
@@ -1842,6 +1854,12 @@ fn entry_kind_for(metadata: &TopicMetadata) -> Option<ConversationEntryKind> {
     TopicMetadata::FunctionalSemanticTopic { .. } => {
       Some(ConversationEntryKind::FunctionalSemantics)
     }
+    TopicMetadata::FunctionalPurposeTopic { .. } => {
+      Some(ConversationEntryKind::FunctionalPurpose)
+    }
+    TopicMetadata::PlacementRationaleTopic { .. } => {
+      Some(ConversationEntryKind::PlacementRationale)
+    }
     TopicMetadata::ConditionTopic { .. } => {
       Some(ConversationEntryKind::Condition)
     }
@@ -1879,10 +1897,19 @@ pub fn build_conversation(
   // Entries are emitted in **pipeline derivation order** so that reading
   // the panel top-to-bottom mirrors how each artifact builds on the ones
   // above it: semantic linking (1) → requirements (2) → behaviors (3) →
-  // characteristics (5) → conditions (7) → threats (8) → invariants (9)
-  // → validations (10). Feature synthesis (4) and functional purpose /
-  // placement (6) are not currently surfaced as conversation entries —
-  // if/when they are, slot them in at their pipeline-numbered position.
+  // characteristics (5) → functional purpose / placement (6) →
+  // conditions (7) → threats (8) → invariants (9) → validations (10).
+  // Feature synthesis (4) is not surfaced as a conversation entry.
+  // subject_purposes / subject_placements are single-value maps, so
+  // collect into a small vec to fit the chain pattern.
+  let purpose_and_placement: Vec<topic::Topic> = [
+    audit_data.subject_purposes.get(&resolved_topic).copied(),
+    audit_data.subject_placements.get(&resolved_topic).copied(),
+  ]
+  .into_iter()
+  .flatten()
+  .collect();
+
   let related_iter = audit_data
     .declaration_semantics
     .get(&resolved_topic)
@@ -1890,6 +1917,7 @@ pub fn build_conversation(
     .chain(audit_data.section_requirements.get(&resolved_topic))
     .chain(audit_data.member_behaviors.get(&resolved_topic))
     .chain(audit_data.section_characteristics.get(&resolved_topic))
+    .chain(Some(&purpose_and_placement).into_iter())
     .chain(audit_data.subject_conditions.get(&resolved_topic))
     .chain(audit_data.subject_threats.get(&resolved_topic))
     .chain(audit_data.subject_invariants.get(&resolved_topic))
