@@ -16,8 +16,8 @@ static REQUEST_SEMAPHORE: LazyLock<Semaphore> =
   LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_REQUESTS));
 
 const LARGE_MODEL: &str = "z-ai/glm-5.1"; // "anthropic/claude-opus-4.6";
-const MEDIUM_MODEL: &str = "z-ai/glm-5.1";
-const SMALL_MODEL: &str = "google/gemma-4-31b-it";
+const MEDIUM_MODEL: &str = "google/gemma-4-31b-it"; // "z-ai/glm-5.1",
+const SMALL_MODEL: &str = "google/gemma-4-31b-it"; // "google/gemma-4-31b-it", "qwen/qwen3.6-35b-a3b", "google/gemma-4-26b-a4b-it"
 
 pub const SYSTEM_MESSAGE_CODE: &str = "\
 You are an expert smart contract security auditor. \
