@@ -22,6 +22,12 @@ use std::process::ExitCode;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 fn init_tracing() {
+  // Ensure the agent-log directory exists so JSONL logging in
+  // `o11a_core::collaborator::agent::log` doesn't silently drop every
+  // write. The server creates this in its main(); the analyzer must do
+  // the same.
+  let _ = std::fs::create_dir_all("data");
+
   tracing_subscriber::registry()
     .with(fmt::layer().with_target(false))
     .with(

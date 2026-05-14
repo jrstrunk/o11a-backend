@@ -128,39 +128,166 @@ pub async fn run_full_pipeline(
   state: &PipelineState,
   audit_id: &str,
 ) -> Result<(), PipelineError> {
+  use std::time::Instant;
+
+  let pipeline_start = Instant::now();
   tracing::info!("Starting full analysis pipeline for audit {}", audit_id);
 
-  tracing::info!("[1/10] Semantic Linking");
-  build_semantic_links(state, audit_id).await?;
+  // Each step logs elapsed time, artifact counts, and saves a
+  // checkpoint so a late-stage failure doesn't lose prior expensive
+  // LLM output. The checkpoint is written to
+  // `<output_dir>/audit.checkpoint.json` using the same report
+  // format as `audit.json` — the server can load it by pointing
+  // `AUDIT_REPORT` at the checkpoint file.
+  macro_rules! run_step {
+    ($label:expr, $fn:expr) => {{
+      tracing::info!($label);
+      let step_start = Instant::now();
+      $fn(state, audit_id).await?;
+      let elapsed = step_start.elapsed();
+      log_artifact_counts(state, audit_id);
+      tracing::info!("{} — done in {:.1}s", $label, elapsed.as_secs_f64());
+      if let Some(ref output_dir) = state.output_dir {
+        if let Err(e) = save_checkpoint(output_dir, audit_id, state) {
+          tracing::warn!("{} — checkpoint save failed: {}", $label, e);
+        } else {
+          tracing::info!("{} — checkpoint saved", $label);
+        }
+      }
+    }};
+  }
 
-  tracing::info!("[2/10] Requirement Extraction");
-  build_requirements(state, audit_id).await?;
+  run_step!("[1/10] Semantic Linking", build_semantic_links);
+  run_step!("[2/10] Requirement Extraction", build_requirements);
+  run_step!("[3/10] Behavior Extraction", build_behaviors);
+  run_step!("[4/10] Feature Synthesis", synthesize_features);
+  run_step!(
+    "[5/10] Characteristic Synthesis",
+    synthesize_characteristics
+  );
+  run_step!(
+    "[6/10] Functional Purpose & Placement Generation",
+    build_functional_properties
+  );
+  run_step!("[7/10] Condition Generation", build_conditions);
+  run_step!("[8/10] Threat Generation", build_threats);
+  run_step!("[9/10] Invariant Generation", build_invariants);
+  run_step!("[10/10] Invariant Validation", build_validations);
 
-  tracing::info!("[3/10] Behavior Extraction");
-  build_behaviors(state, audit_id).await?;
+  tracing::info!(
+    "Pipeline complete for audit {} — {:.1}s total",
+    audit_id,
+    pipeline_start.elapsed().as_secs_f64()
+  );
+  Ok(())
+}
 
-  tracing::info!("[4/10] Feature Synthesis");
-  synthesize_features(state, audit_id).await?;
+/// Log a summary of every artifact kind currently in `topic_metadata`.
+/// Gives the operator a running view of pipeline progress and surfaces
+/// unexpected zeros early (e.g. a step that produced nothing because
+/// the renderer emitted an empty payload).
+fn log_artifact_counts(state: &PipelineState, audit_id: &str) {
+  let ctx = match state.data_context.lock() {
+    Ok(guard) => guard,
+    Err(e) => {
+      tracing::warn!("artifact counts: lock poisoned: {}", e);
+      return;
+    }
+  };
+  let Some(audit_data) = ctx.get_audit(audit_id) else {
+    return;
+  };
+  let mut features = 0usize;
+  let mut requirements = 0usize;
+  let mut behaviors = 0usize;
+  let mut characteristics = 0usize;
+  let mut semantics = 0usize;
+  let mut purposes = 0usize;
+  let mut placements = 0usize;
+  let mut conditions = 0usize;
+  let mut threats = 0usize;
+  let mut invariants = 0usize;
+  let mut validations = 0usize;
+  for m in audit_data.topic_metadata.values() {
+    match m {
+      domain::TopicMetadata::FeatureTopic { .. } => features += 1,
+      domain::TopicMetadata::RequirementTopic { .. } => requirements += 1,
+      domain::TopicMetadata::BehaviorTopic { .. } => behaviors += 1,
+      domain::TopicMetadata::CharacteristicTopic { .. } => characteristics += 1,
+      domain::TopicMetadata::FunctionalSemanticTopic { .. } => semantics += 1,
+      domain::TopicMetadata::FunctionalPurposeTopic { .. } => purposes += 1,
+      domain::TopicMetadata::PlacementRationaleTopic { .. } => placements += 1,
+      domain::TopicMetadata::ConditionTopic { .. } => conditions += 1,
+      domain::TopicMetadata::ThreatTopic { .. } => threats += 1,
+      domain::TopicMetadata::InvariantTopic { .. } => invariants += 1,
+      domain::TopicMetadata::ValidationTopic { .. } => validations += 1,
+      _ => {}
+    }
+  }
+  tracing::info!(
+    "Artifact counts: {} features, {} requirements, {} behaviors, \
+     {} characteristics, {} semantics, {} purposes, {} placements, \
+     {} conditions, {} threats, {} invariants, {} validations",
+    features,
+    requirements,
+    behaviors,
+    characteristics,
+    semantics,
+    purposes,
+    placements,
+    conditions,
+    threats,
+    invariants,
+    validations,
+  );
+}
 
-  tracing::info!("[5/10] Characteristic Synthesis");
-  synthesize_characteristics(state, audit_id).await?;
+/// Save a checkpoint of the current pipeline state to
+/// `<output_dir>/audit.checkpoint.json`. The checkpoint uses the same
+/// report format as `audit.json` so the server can load it directly
+/// (by pointing `AUDIT_REPORT` at the checkpoint file).
+fn save_checkpoint(
+  output_dir: &std::path::Path,
+  audit_id: &str,
+  state: &PipelineState,
+) -> Result<(), PipelineError> {
+  let generated_at = ids::now_iso8601();
 
-  tracing::info!("[6/10] Functional Purpose & Placement Generation");
-  build_functional_properties(state, audit_id).await?;
+  // Rebuild reverse indexes for a consistent snapshot.
+  {
+    let mut ctx = state
+      .data_context
+      .lock()
+      .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+    if let Some(audit_data) = ctx.get_audit_mut(audit_id) {
+      domain::rebuild_feature_context(audit_data);
+    }
+  }
 
-  tracing::info!("[7/10] Condition Generation");
-  build_conditions(state, audit_id).await?;
+  let ctx = state
+    .data_context
+    .lock()
+    .map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
+  let audit_data =
+    ctx
+      .get_audit(audit_id)
+      .ok_or_else(|| PipelineError::AuditNotFound {
+        audit_id: audit_id.to_string(),
+      })?;
 
-  tracing::info!("[8/10] Threat Generation");
-  build_threats(state, audit_id).await?;
+  let report = crate::report::build_report(audit_id, audit_data, generated_at);
+  let json = serde_json::to_string_pretty(&report).map_err(|e| {
+    PipelineError::Other(format!("checkpoint serialize: {}", e))
+  })?;
 
-  tracing::info!("[9/10] Invariant Generation");
-  build_invariants(state, audit_id).await?;
+  let path = output_dir.join("audit.checkpoint.json");
+  // Write atomically: tmp + rename.
+  let tmp_path = path.with_extension("json.tmp");
+  std::fs::write(&tmp_path, &json)
+    .map_err(|e| PipelineError::Other(format!("checkpoint write: {}", e)))?;
+  std::fs::rename(&tmp_path, &path)
+    .map_err(|e| PipelineError::Other(format!("checkpoint rename: {}", e)))?;
 
-  tracing::info!("[10/10] Invariant Validation");
-  build_validations(state, audit_id).await?;
-
-  tracing::info!("Pipeline complete for audit {}", audit_id);
   Ok(())
 }
 
