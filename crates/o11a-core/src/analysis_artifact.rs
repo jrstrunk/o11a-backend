@@ -167,6 +167,11 @@ pub fn apply_snapshot(audit_data: &mut AuditData, snap: AuditDataSnapshot) {
   audit_data.topic_context = snap.topic_context;
   audit_data.expanded_topic_context = snap.expanded_topic_context;
   audit_data.mentions_index = snap.mentions_index;
+  // Pipeline-output fields: cleared by apply_snapshot so that apply_report
+  // repopulates them from audit.json. NamedTopic topic_context entries
+  // for the containing functions are already present via the snapshot's
+  // topic_context (functions are not pipeline-output variants).
+  audit_data.threat_feature_links.clear();
   audit_data.requirements.clear();
   audit_data.characteristics.clear();
   audit_data.feature_requirement_links.clear();

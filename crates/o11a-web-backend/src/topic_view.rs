@@ -4,7 +4,8 @@ use o11a_core::domain::{
   self, AuditData, BlockAnnotationKind, ContractKind, ControlFlowBranch,
   ControlFlowStatementKind, FunctionKind, NamedTopicKind, NamedTopicVisibility,
   Node, Reference, Scope, SourceChild, SourceContext, SystemCharacteristicKind,
-  TitledTopicKind, TopicMetadata, UnnamedTopicKind, VariableMutability, topic,
+  TitledTopicKind, TopicMetadata, UnnamedTopicKind, ValidationVerdict,
+  VariableMutability, topic,
 };
 
 use crate::formatting::{self, html_escape};
@@ -2093,4 +2094,218 @@ pub fn build_documentation_panel(
 
   let merged = o11a_core::domain::merge_context_groups(all_contexts);
   render_grouped_source_panel(&merged, audit_data, source_text_cache)
+}
+
+// ============================================================================
+// Invalidated-invariants list endpoint
+// ============================================================================
+
+/// A single invalidated invariant in the findings list.
+#[derive(Debug, Serialize)]
+pub struct InvalidatedInvariantEntry {
+  /// The invariant's A-prefixed topic ID.
+  pub invariant_topic_id: String,
+  /// The validation's A-prefixed topic ID.
+  pub validation_topic_id: String,
+  /// The verdict: "absent" or "partial".
+  pub verdict: String,
+  /// Severity inherited from the invariant ("critical", "high", "medium",
+  /// "low", or "pending" if no severity assigned yet).
+  pub severity: String,
+  /// The invariant description ("X must Y" / "every Z does W").
+  pub invariant_description: String,
+  /// The validation rationale.
+  pub rationale: String,
+  /// The threat description.
+  pub threat_description: String,
+  /// The condition description (empty string if unresolvable).
+  pub condition_description: String,
+  /// The containing function name (empty string if unresolvable).
+  pub function_name: String,
+  /// Pre-rendered HTML for the invariant's topic-panel prefix (header
+  /// block with keyword, author, time).
+  pub prefix_html: String,
+  /// Pre-rendered HTML for the invariant's source panel (subject →
+  /// condition → threat references).
+  pub topic_panel_html: String,
+  /// Pre-rendered HTML for the expanded references panel (containing
+  /// function body + anchors).
+  pub expanded_references_panel_html: String,
+  /// Pre-rendered HTML for the validation entry.
+  pub validation_html: String,
+  /// CSS for highlighting the subject in code views.
+  pub highlight_css: String,
+}
+
+/// Response for the invalidated-invariants endpoint.
+#[derive(Debug, Serialize)]
+pub struct InvalidatedInvariantsResponse {
+  pub entries: Vec<InvalidatedInvariantEntry>,
+}
+
+/// Build the full list of invalidated invariants, sorted by severity
+/// (critical first) then by topic ID for stable ordering.
+///
+/// An invariant is "invalidated" if it has at least one validation with
+/// verdict `Absent` or `Partial`. For each such invariant, the response
+/// carries the invariant metadata, the parent threat, the condition the
+/// threat falsifies, the validation verdict/rationale, and pre-rendered
+/// HTML panels for the topic view.
+pub fn build_invalidated_invariants(
+  audit_data: &AuditData,
+  source_text_cache: &mut std::collections::HashMap<String, String>,
+) -> InvalidatedInvariantsResponse {
+  let mut entries: Vec<InvalidatedInvariantEntry> = Vec::new();
+
+  // Collect (validation_topic, invariant_topic) pairs for Absent/Partial.
+  for (inv_topic, val_topics) in &audit_data.invariant_validations {
+    for val_topic in val_topics {
+      let val_meta = match audit_data.topic_metadata.get(val_topic) {
+        Some(m @ TopicMetadata::ValidationTopic { .. }) => m,
+        _ => continue,
+      };
+      let (verdict, rationale) = match val_meta {
+        TopicMetadata::ValidationTopic {
+          verdict, rationale, ..
+        } => (*verdict, rationale.clone()),
+        _ => unreachable!(),
+      };
+      if !matches!(
+        verdict,
+        ValidationVerdict::Absent | ValidationVerdict::Partial
+      ) {
+        continue;
+      }
+
+      let inv_meta = match audit_data.topic_metadata.get(inv_topic) {
+        Some(m @ TopicMetadata::InvariantTopic { .. }) => m,
+        _ => continue,
+      };
+      let (inv_description, threat_topic, subject_topic, severity) =
+        match inv_meta {
+          TopicMetadata::InvariantTopic {
+            description,
+            threat_topic,
+            subject_topic,
+            severity,
+            ..
+          } => (description.clone(), *threat_topic, *subject_topic, severity),
+          _ => unreachable!(),
+        };
+
+      // Resolve the threat description.
+      let (threat_description, condition_topic) =
+        match audit_data.topic_metadata.get(&threat_topic) {
+          Some(TopicMetadata::ThreatTopic {
+            description,
+            falsifies_condition,
+            ..
+          }) => (description.clone(), Some(*falsifies_condition)),
+          _ => (String::new(), None),
+        };
+
+      // Resolve the condition description.
+      let condition_description = condition_topic
+        .and_then(|ct| audit_data.topic_metadata.get(&ct))
+        .and_then(|m| m.description())
+        .unwrap_or("")
+        .to_string();
+
+      // Resolve the containing function name for context.
+      let function_name = audit_data
+        .topic_metadata
+        .get(&subject_topic)
+        .and_then(|subj_meta| match subj_meta.scope() {
+          Scope::Member { member, .. }
+          | Scope::ContainingBlock { member, .. } => Some(*member),
+          _ => None,
+        })
+        .and_then(|member_topic| {
+          audit_data
+            .topic_metadata
+            .get(&member_topic)
+            .and_then(|m| m.name())
+        })
+        .unwrap_or("")
+        .to_string();
+
+      // Pre-render the invariant's topic view panels.
+      let inv_id_str = inv_topic.id().to_string();
+      let prefix =
+        build_topic_panel_prefix(&inv_id_str, audit_data, source_text_cache);
+      let cached = None; // No caching for list entries.
+      let topic_view = build_topic_view(
+        &inv_id_str,
+        audit_data,
+        source_text_cache,
+        cached,
+        &prefix,
+      );
+
+      let (topic_panel_html, expanded_html, highlight_css) = match topic_view {
+        Some(tv) => (
+          tv.topic_panel_html,
+          tv.expanded_references_panel_html,
+          tv.highlight_css,
+        ),
+        None => (String::new(), String::new(), String::new()),
+      };
+
+      // Pre-render the validation entry HTML.
+      let val_id_str = val_topic.id().to_string();
+      let val_body =
+        render_source_text(val_topic, audit_data).unwrap_or_default();
+      let val_header = render_entry_header(val_meta);
+      let validation_html = format!(
+        "<div style=\"{}\"><div class=\"component-group\" \
+         style=\"margin-bottom: 0.5rem;\">\n  {}\n  {}\n</div></div>",
+        COMMENT_META_STYLE, val_header, val_body,
+      );
+
+      entries.push(InvalidatedInvariantEntry {
+        invariant_topic_id: inv_id_str,
+        validation_topic_id: val_id_str,
+        verdict: verdict.as_str().to_string(),
+        severity: severity
+          .map(|s| s.as_str().to_string())
+          .unwrap_or_else(|| "pending".to_string()),
+        invariant_description: inv_description,
+        rationale,
+        threat_description,
+        condition_description,
+        function_name,
+        prefix_html: prefix,
+        topic_panel_html,
+        expanded_references_panel_html: expanded_html,
+        validation_html,
+        highlight_css,
+      });
+    }
+  }
+
+  // Sort: severity descending (Critical > High > Medium > Low), then
+  // pending last (None treated as below Low). Within same severity,
+  // sort by topic ID for stable ordering.
+  entries.sort_by(|a, b| {
+    let sev_a = parse_severity_for_sort(&a.severity);
+    let sev_b = parse_severity_for_sort(&b.severity);
+    // Higher severity first.
+    sev_b
+      .cmp(&sev_a)
+      .then_with(|| a.invariant_topic_id.cmp(&b.invariant_topic_id))
+  });
+
+  InvalidatedInvariantsResponse { entries }
+}
+
+/// Convert severity string to an ordering value for sorting.
+/// Critical=3, High=2, Medium=1, Low=0, pending=-1.
+fn parse_severity_for_sort(s: &str) -> i8 {
+  match s {
+    "critical" => 3,
+    "high" => 2,
+    "medium" => 1,
+    "low" => 0,
+    _ => -1,
+  }
 }

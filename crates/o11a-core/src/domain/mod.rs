@@ -3612,11 +3612,13 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }
   }
 
-  // Build context for InvariantTopics: subject (source anchor) → parent
-  // threat (the upstream link). The invariant's own description is
-  // rendered by `build_topic_panel_prefix` as a metadata-headed block
-  // above this panel; see the ThreatTopic builder for the no-self-ref
-  // rationale. Anchors live in `expanded_topic_context` (built below).
+  // Build context for InvariantTopics: subject (source anchor) →
+  // condition (the assertion the threat falsifies) → parent threat
+  // (the upstream link). The invariant's own description is rendered by
+  // `build_topic_panel_prefix` as a metadata-headed block above this
+  // panel. Including the condition gives the auditor the full chain
+  // (what must hold → how it breaks → what defends against it) in one
+  // panel. Anchors live in `expanded_topic_context` (built below).
   for (inv_topic, metadata) in &audit_data.topic_metadata {
     if let TopicMetadata::InvariantTopic {
       threat_topic,
@@ -3627,16 +3629,36 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
       let inv_sort_key = Some(inv_topic.numeric_id() as usize);
       let subj_sort_key = Some(subject_topic.numeric_id() as usize);
       let threat_sort_key = Some(threat_topic.numeric_id() as usize);
-      let scope_references = vec![
-        Reference::ProjectReference {
-          reference_topic: *subject_topic,
-          sort_key: subj_sort_key,
-        },
-        Reference::ProjectReference {
-          reference_topic: *threat_topic,
-          sort_key: threat_sort_key,
-        },
-      ];
+
+      // Resolve the condition via the parent threat's
+      // `falsifies_condition` field. If the threat metadata is missing
+      // or not a ThreatTopic, skip the condition gracefully.
+      let condition_topic = audit_data
+        .topic_metadata
+        .get(threat_topic)
+        .and_then(|tm| match tm {
+          TopicMetadata::ThreatTopic {
+            falsifies_condition,
+            ..
+          } => Some(*falsifies_condition),
+          _ => None,
+        });
+
+      let mut scope_references = vec![Reference::ProjectReference {
+        reference_topic: *subject_topic,
+        sort_key: subj_sort_key,
+      }];
+      if let Some(ct) = condition_topic {
+        scope_references.push(Reference::ProjectReference {
+          reference_topic: ct,
+          sort_key: Some(ct.numeric_id() as usize),
+        });
+      }
+      scope_references.push(Reference::ProjectReference {
+        reference_topic: *threat_topic,
+        sort_key: threat_sort_key,
+      });
+
       let context = vec![SourceContext {
         scope: *inv_topic,
         sort_key: inv_sort_key,
@@ -3911,6 +3933,57 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
 
   for (t, ctx) in citation_contexts {
     audit_data.expanded_topic_context.insert(t, ctx);
+  }
+
+  // Expand InvariantTopic expanded_context to include the full
+  // containing function of the subject. The anchor-based citation
+  // context above shows individual declarations the invariant names,
+  // but an auditor verifying a finding needs to see the entire
+  // function body — ordering of state writes relative to external
+  // calls, the modifier list on the function signature, and the
+  // control flow around the subject — to judge whether the invariant
+  // actually holds. The containing function is the natural evidence
+  // boundary per SPEC ("evidence scope is constrained to the subject's
+  // containing function").
+  //
+  // For each invariant, resolve the subject's scope to find its
+  // containing member (function), then merge that member's
+  // `topic_context` into the invariant's expanded context. The
+  // anchor-based context is preserved; the function context is
+  // appended.
+  let inv_function_contexts: Vec<(topic::Topic, Vec<SourceContext>)> =
+    audit_data
+      .topic_metadata
+      .iter()
+      .filter_map(|(inv_topic, m)| {
+        let subject_topic = match m {
+          TopicMetadata::InvariantTopic { subject_topic, .. } => *subject_topic,
+          _ => return None,
+        };
+        // Resolve the containing function from the subject's scope.
+        let member_topic = audit_data
+          .topic_metadata
+          .get(&subject_topic)
+          .and_then(|subj_meta| match subj_meta.scope() {
+            Scope::Member { member, .. }
+            | Scope::ContainingBlock { member, .. } => Some(*member),
+            _ => None,
+          })?;
+        // Get the function's topic_context (full source rendering).
+        let func_ctx = audit_data.topic_context.get(&member_topic)?.clone();
+        Some((*inv_topic, func_ctx))
+      })
+      .collect();
+
+  for (inv_topic, func_ctx) in inv_function_contexts {
+    let existing = audit_data
+      .expanded_topic_context
+      .get(&inv_topic)
+      .cloned()
+      .unwrap_or_default();
+    let merged =
+      merge_context_groups(existing.into_iter().chain(func_ctx).collect());
+    audit_data.expanded_topic_context.insert(inv_topic, merged);
   }
 }
 
@@ -5606,9 +5679,10 @@ mod tests {
     assert_eq!(
       entry.scope_references.len(),
       2,
-      "scope_references must carry only the subject anchor and the parent \
-       threat — the invariant's own description renders in the panel-prefix \
-       block, not here"
+      "scope_references must carry the subject anchor and the parent \
+       threat (condition omitted because parent threat metadata is absent \
+       in this test) — the invariant's own description renders in the \
+       panel-prefix block, not here"
     );
     // Order is part of the contract: subject anchor (where it lives)
     // → parent threat (what it defends against). The invariant's
@@ -6187,5 +6261,187 @@ mod tests {
         label
       );
     }
+  }
+
+  #[test]
+  fn rebuild_feature_context_invariant_topic_context_includes_condition_from_parent_threat()
+   {
+    // When the parent threat's `falsifies_condition` resolves, the
+    // invariant's topic_context should include three scope_references:
+    // subject → condition → threat.
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&42);
+    let cond_c = topic::new_adversarial_property_topic(3);
+    let threat_x = topic::new_adversarial_property_topic(5);
+    let inv_xa = topic::new_adversarial_property_topic(50);
+
+    // Insert the full chain: threat falsifies condition.
+    audit.topic_metadata.insert(
+      threat_x,
+      TopicMetadata::ThreatTopic {
+        topic: threat_x,
+        description: "unauthorized access".to_string(),
+        subject_topic: subject_a,
+        falsifies_condition: cond_c,
+        controlled_by: ThreatActor::Caller,
+        evidence_topics: vec![],
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      cond_c,
+      TopicMetadata::ConditionTopic {
+        topic: cond_c,
+        description: "caller is authorized".to_string(),
+        subject_topic: subject_a,
+        kind: ConditionKind::AuthorizedAccess,
+        evidence_topics: vec![],
+        author: Author::AgentLarge,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      inv_xa,
+      TopicMetadata::InvariantTopic {
+        topic: inv_xa,
+        description: "access gate enforced".to_string(),
+        threat_topic: threat_x,
+        subject_topic: subject_a,
+        kind: InvariantKind::AccessGate,
+        anchors: vec![],
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+
+    let context = audit
+      .topic_context
+      .get(&inv_xa)
+      .expect("InvariantTopic must have a topic_context entry");
+    let refs = &context[0].scope_references;
+    assert_eq!(
+      refs.len(),
+      3,
+      "scope_references must carry subject → condition → threat"
+    );
+    assert_eq!(*refs[0].reference_topic(), subject_a, "first = subject");
+    assert_eq!(*refs[1].reference_topic(), cond_c, "second = condition");
+    assert_eq!(*refs[2].reference_topic(), threat_x, "third = threat");
+  }
+
+  #[test]
+  fn rebuild_feature_context_invariant_expanded_context_includes_containing_function()
+   {
+    // The invariant's expanded_context must include the containing
+    // function's full topic_context, giving the auditor the entire
+    // function body to reason about whether the invariant holds.
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&42);
+    let function_f = topic::new_node_topic(&100);
+    let threat_x = topic::new_adversarial_property_topic(5);
+    let inv_xa = topic::new_adversarial_property_topic(50);
+    let anchor_mod = topic::new_node_topic(&200);
+
+    // Subject is inside function_f (ContainingBlock scope).
+    audit.topic_metadata.insert(
+      subject_a,
+      TopicMetadata::UnnamedTopic {
+        topic: subject_a,
+        scope: Scope::ContainingBlock {
+          container: ProjectPath {
+            file_path: "test.sol".to_string(),
+          },
+          component: topic::new_node_topic(&1),
+          member: function_f,
+          containing_blocks: vec![],
+        },
+        kind: UnnamedTopicKind::FunctionCall(CallKind::NonPure),
+        transitive_topic: None,
+      },
+    );
+    // Function has its own topic_context (the full function body).
+    audit.topic_context.insert(
+      function_f,
+      vec![SourceContext {
+        scope: function_f,
+        sort_key: Some(100),
+        is_in_scope: true,
+        scope_references: vec![Reference::ProjectReference {
+          reference_topic: function_f,
+          sort_key: Some(100),
+        }],
+        nested_references: vec![],
+      }],
+    );
+    // Anchor has topic_context.
+    audit.topic_context.insert(
+      anchor_mod,
+      vec![SourceContext {
+        scope: anchor_mod,
+        sort_key: Some(200),
+        is_in_scope: true,
+        scope_references: vec![Reference::ProjectReference {
+          reference_topic: anchor_mod,
+          sort_key: Some(200),
+        }],
+        nested_references: vec![],
+      }],
+    );
+    audit.topic_metadata.insert(
+      threat_x,
+      TopicMetadata::ThreatTopic {
+        topic: threat_x,
+        description: "unauthorized access".to_string(),
+        subject_topic: subject_a,
+        falsifies_condition: topic::new_adversarial_property_topic(3),
+        controlled_by: ThreatActor::Caller,
+        evidence_topics: vec![],
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      inv_xa,
+      TopicMetadata::InvariantTopic {
+        topic: inv_xa,
+        description: "access gate enforced".to_string(),
+        threat_topic: threat_x,
+        subject_topic: subject_a,
+        kind: InvariantKind::AccessGate,
+        anchors: vec![anchor_mod],
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+
+    let expanded = audit
+      .expanded_topic_context
+      .get(&inv_xa)
+      .expect("InvariantTopic must have an expanded_topic_context");
+    // Must contain both the anchor context and the function context.
+    let scopes: Vec<_> = expanded.iter().map(|g| g.scope).collect();
+    assert!(
+      scopes.contains(&anchor_mod),
+      "expanded_context must contain the anchor's context: {:?}",
+      scopes
+    );
+    assert!(
+      scopes.contains(&function_f),
+      "expanded_context must contain the containing function's context: {:?}",
+      scopes
+    );
   }
 }

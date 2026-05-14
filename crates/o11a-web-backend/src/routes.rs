@@ -30,5 +30,9 @@ pub fn create_router(state: FrontendState) -> Router {
       "/api/v1/audits/:audit_id/documentation",
       post(handlers::get_documentation_panel),
     )
+    .route(
+      "/api/v1/audits/:audit_id/invalidated_invariants",
+      get(handlers::get_invalidated_invariants),
+    )
     .with_state(state)
 }

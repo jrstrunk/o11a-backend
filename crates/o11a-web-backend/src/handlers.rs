@@ -364,3 +364,38 @@ pub async fn get_documentation_panel(
 
   Ok(Html(html))
 }
+
+/// GET /api/v1/audits/:audit_id/invalidated_invariants
+/// Returns all invariants with Absent or Partial validation verdicts,
+/// sorted by severity (critical first), with pre-rendered HTML panels.
+pub async fn get_invalidated_invariants(
+  State(state): State<FrontendState>,
+  Path(audit_id): Path<String>,
+) -> Result<Json<crate::topic_view::InvalidatedInvariantsResponse>, StatusCode>
+{
+  tracing::debug!("GET /api/v1/audits/{}/invalidated_invariants", audit_id);
+
+  let ctx = state.app.data_context.lock().map_err(|e| {
+    tracing::error!("Mutex poisoned in get_invalidated_invariants: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?;
+
+  let audit_data = ctx.get_audit(&audit_id).ok_or(StatusCode::NOT_FOUND)?;
+
+  let mut source_text_cache = state.source_text_cache.lock().map_err(|e| {
+    tracing::warn!("Source text cache poisoned: {}", e);
+    StatusCode::INTERNAL_SERVER_ERROR
+  })?;
+  let cache = source_text_cache.entry(audit_id.clone()).or_default();
+
+  let response =
+    crate::topic_view::build_invalidated_invariants(audit_data, cache);
+
+  tracing::info!(
+    "Invalidated invariants for {}: {} entries",
+    audit_id,
+    response.entries.len()
+  );
+
+  Ok(Json(response))
+}
