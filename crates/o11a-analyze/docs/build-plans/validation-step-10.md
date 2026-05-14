@@ -59,7 +59,7 @@ Read these first; this doc points at them by line number throughout.
 | `context::render_batch_for_extraction(&[member], audit_data)` | `o11a-core/src/collaborator/agent/context.rs:~2700` | Renders one member's full envelope JSON. Already inlines `conditions` and `threats` on non-pure subject nodes (steps 6/7 hooks) and `invariants` (step 8 hook). Phase 4 of this work adds `anchors` to each invariant entry and a `validations` array on each subject (so step 11/12 inherits it for free). |
 | `context::member_has_feature_link` | `o11a-core/src/collaborator/agent/context.rs:3417` | Returns whether a member has any behavior linked to any feature. Use to gate the LLM call (skip non-feature-linked members). |
 | `synthetic::create_synthetic_dev_comment` | `o11a-core/src/collaborator/synthetic.rs:27` | Creates an agent-authored comment on any topic. Used in steps 7/8 for `no_*_rationale` comments. Step 10 does *not* use this (verdicts are first-class topics, not comments) — but worth knowing the pattern so you don't reinvent it. |
-| `render_security_characteristics` | `o11a-core/src/collaborator/agent/pipeline.rs:1990` | Renders the audit's `Security`-kind characteristics as a bullet block, prepended to the LLM call. Reuse: validation also benefits from the audit-wide security framing. |
+| `render_security_characteristics` | `o11a-core/src/collaborator/agent/pipeline.rs:1990` | Renders the audit's `Security`-kind characteristics as a bullet block, prepended to the LLM call in steps 7/8. **Not used by step 10.** Each invariant + its `anchors` already names the property to verify, so audit-wide framing would be noise — the question is "is *this property* enforced in *this function*?", not "what defenses does this audit document?" |
 | `domain::rebuild_feature_context` | `o11a-core/src/domain/mod.rs:~2900` | Re-derives every reverse index in `AuditData` from `topic_metadata`. Phase 3 extends it with the two new indexes. Always called once at the end of each storage block. |
 | `id::allocate_adversarial_property_id` / `reseed_adversarial_property_id` | `o11a-core/src/ids.rs:39, :43` | The A-counter. Validation joins the family — one A-ID per validation. Phase 0 wires the reseed up (it's currently dead code). |
 | Schema-drift guard test | `o11a-core/src/collaborator/agent/task.rs:7220` (`schema_kind_enum_matches_rust_variants_exactly`) | The pattern for asserting JSON schema and Rust enum stay in sync. Mirror this for the new `ValidationVerdict` enum and for the expanded `InvariantKind` shortlist. |
@@ -897,9 +897,6 @@ Cite topics inside the function: the subject node, its descendants, \
 sibling statements in the same semantic block, the containing function, \
 its modifiers, its parameters. Cross-function evidence is invalid — \
 that's a propagation concern handled in a later pipeline step.\n\n\
-**Use the audit-wide security context.** Any `Security context` block \
-above this prompt names known defenses and role definitions. Use it \
-to anchor your judgment of what enforcement counts at this audit.\n\n\
 Return a JSON object with a `validations` key whose value is an \
 array. Each entry has:\n\
 - `invariant_topic`: an A-prefixed topic ID from the \
@@ -983,23 +980,14 @@ pub struct ParsedValidation {
 }
 ```
 
-Add the entry point. Mirror `extract_invariants_from_batch` (line 4353):
+Add the entry point. Mirror `extract_invariants_from_batch` (line 4353), but **do not** thread the audit's `Security`-kind characteristics through — the invariant + its `anchors` already names the property to verify, so audit-wide framing would be noise here:
 
 ```rust
 pub async fn extract_validations_from_batch(
   batch_json: &str,
   label: &str,
-  security_notes: Option<&str>,
 ) -> Result<ParsedValidations, TaskError> {
-  let prompt = match security_notes {
-    Some(notes) if !notes.trim().is_empty() => format!(
-      "Security context:\n{}\n\n{}Batch:\n{}",
-      notes.trim(),
-      EXTRACT_VALIDATIONS_PROMPT,
-      batch_json
-    ),
-    _ => format!("{}Batch:\n{}", EXTRACT_VALIDATIONS_PROMPT, batch_json),
-  };
+  let prompt = format!("{}Batch:\n{}", EXTRACT_VALIDATIONS_PROMPT, batch_json);
 
   let log_label = format!("validations_{}", label);
   let response = router::chat_completion(
@@ -1178,11 +1166,13 @@ pub async fn build_validations(
 
   // Clear any prior `ValidationTopic` entries so re-runs don't
   // accumulate stale verdicts, rebuild reverse indexes so the
-  // post-clear state is internally consistent, render the audit's
-  // Security characteristics for use as system context, and
-  // early-return if step 9 produced nothing — validations are
-  // downstream of invariants.
-  let security_context: Option<String> = {
+  // post-clear state is internally consistent, and early-return if
+  // step 9 produced nothing — validations are downstream of
+  // invariants. Unlike step 8 (threat generation), step 10 does not
+  // render the audit's `Security`-kind characteristics: the invariant
+  // + its `anchors` already names the property to verify, so audit-
+  // wide framing would be noise here.
+  {
     let mut ctx = state
       .data_context
       .lock()
@@ -1201,9 +1191,7 @@ pub async fn build_validations(
       tracing::info!("No invariants found, skipping validation generation");
       return Ok(());
     }
-
-    render_security_characteristics(audit_data)
-  };
+  }
 
   let batches = {
     let ctx = state.data_context.lock().map_err(|e| PipelineError::LockPoisoned(e.to_string()))?;
@@ -1266,11 +1254,9 @@ pub async fn build_validations(
   );
 
   // Per-member calls have no inter-member dependencies. Spawn all LLM
-  // calls concurrently. The rendered security-characteristics block
-  // is cloned per call so each spawned future owns its copy.
+  // calls concurrently.
   let mut handles = Vec::new();
   for (rendered, invariant_topics) in rendered_members {
-    let context_block = security_context.clone();
     // Patch the rendered envelope to add the
     // `invariants_to_validate` top-level array. This is the
     // step-10-specific input; the unified renderer doesn't know
@@ -1280,7 +1266,6 @@ pub async fn build_validations(
       let result = task::extract_validations_from_batch(
         &augmented_json,
         &rendered.label,
-        context_block.as_deref(),
       )
       .await;
       (rendered.label, result)

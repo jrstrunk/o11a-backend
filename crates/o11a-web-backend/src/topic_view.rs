@@ -44,16 +44,19 @@ pub enum ConversationEntryKind {
   Behavior,
   Requirement,
   Characteristic,
+  Condition,
   Threat,
   Invariant,
+  Validation,
   Comment,
   Mention,
 }
 
 /// Structured rendering of a single conversation entry node.
-/// All entry types (comments, requirements, behaviors, functional semantics,
-/// mentions, threats, invariants) produce one of these. Thread children are
-/// represented as a recursive tree.
+/// All entry types (comments, requirements, behaviors, characteristics,
+/// functional semantics, mentions, conditions, threats, invariants,
+/// validations) produce one of these. Thread children are represented as
+/// a recursive tree.
 #[derive(Debug, Clone)]
 pub struct RenderedEntry {
   pub topic_id: String,
@@ -471,6 +474,16 @@ fn get_breadcrumb_parts<'a>(
     ];
   }
 
+  // Conditions: parent subject then "Condition" label
+  if matches!(metadata, TopicMetadata::ConditionTopic { .. })
+    && let Some(subject_topic) = metadata.target_topic()
+  {
+    return vec![
+      BreadcrumbPart::Topic(subject_topic),
+      BreadcrumbPart::Text("Condition"),
+    ];
+  }
+
   // Invariants: parent subject then "Invariant" label (target_topic now
   // resolves to `subject_topic`, mirroring how ThreatTopic anchors above).
   if matches!(metadata, TopicMetadata::InvariantTopic { .. })
@@ -479,6 +492,20 @@ fn get_breadcrumb_parts<'a>(
     return vec![
       BreadcrumbPart::Topic(subject_topic),
       BreadcrumbPart::Text("Invariant"),
+    ];
+  }
+
+  // Validations: parent subject then "Validation" label. Anchored at
+  // the subject like the rest of the AP family — the breadcrumb names
+  // where the artifact lives in the audit; the parent-invariant
+  // relationship is surfaced in the topic panel's chain order, not
+  // here.
+  if matches!(metadata, TopicMetadata::ValidationTopic { .. })
+    && let Some(subject_topic) = metadata.target_topic()
+  {
+    return vec![
+      BreadcrumbPart::Topic(subject_topic),
+      BreadcrumbPart::Text("Validation"),
     ];
   }
 
@@ -664,6 +691,9 @@ fn authored_topic_label(
     TopicMetadata::PlacementRationaleTopic { .. } => {
       Some(("placement".to_string(), "placement"))
     }
+    TopicMetadata::ConditionTopic { .. } => {
+      Some(("condition".to_string(), "condition"))
+    }
     TopicMetadata::ThreatTopic { severity, .. } => {
       let sev = severity.map(|s| s.as_str()).unwrap_or("pending");
       Some((format!("threat [{}]", sev), "threat"))
@@ -671,6 +701,9 @@ fn authored_topic_label(
     TopicMetadata::InvariantTopic { severity, .. } => {
       let sev = severity.map(|s| s.as_str()).unwrap_or("pending");
       Some((format!("inv [{}]", sev), "invariant"))
+    }
+    TopicMetadata::ValidationTopic { verdict, .. } => {
+      Some((format!("validation [{}]", verdict.as_str()), "validation"))
     }
     _ => None,
   }
@@ -720,10 +753,12 @@ fn render_body_html(
 /// Render source text HTML for a topic from its data.
 /// Returns None if the topic has no renderable content.
 ///
-/// For authored topics (Feature/Requirement/Behavior/FunctionalSemantic/
-/// Threat/Invariant) returns just the body: the description wrapped in a
+/// For authored topics (Feature / Requirement / Behavior / Characteristic
+/// / FunctionalSemantic / FunctionalPurpose / PlacementRationale /
+/// Condition / Threat / Invariant / Validation) returns just the body:
+/// the description (or, for Validation, the rationale) wrapped in a
 /// plain `<div data-topic>` (no header, no styled container). For other
-/// topics returns raw source/documentation/comment HTML.
+/// topics returns raw source / documentation / comment HTML.
 pub fn render_source_text(
   topic: &topic::Topic,
   audit_data: &AuditData,
@@ -1435,13 +1470,15 @@ pub fn build_topic_panel_prefix(
     }
     Some(m @ TopicMetadata::RequirementTopic { .. }) => m,
     Some(m @ TopicMetadata::CharacteristicTopic { .. }) => m,
+    Some(m @ TopicMetadata::ConditionTopic { .. }) => m,
     Some(m @ TopicMetadata::ThreatTopic { .. }) => m,
     Some(m @ TopicMetadata::InvariantTopic { .. }) => m,
+    Some(m @ TopicMetadata::ValidationTopic { .. }) => m,
     _ => return String::new(),
   };
 
-  // For requirements/characteristics/threats/invariants, render as a
-  // standalone entry.
+  // For requirements / characteristics / conditions / threats / invariants
+  // / validations, render as a standalone entry.
   let standalone: Option<(&'static str, ConversationEntryKind)> = match metadata
   {
     TopicMetadata::RequirementTopic { .. } => {
@@ -1451,11 +1488,17 @@ pub fn build_topic_panel_prefix(
       characteristic_breadcrumb_label(*kind),
       ConversationEntryKind::Characteristic,
     )),
+    TopicMetadata::ConditionTopic { .. } => {
+      Some(("Condition", ConversationEntryKind::Condition))
+    }
     TopicMetadata::ThreatTopic { .. } => {
       Some(("Threat", ConversationEntryKind::Threat))
     }
     TopicMetadata::InvariantTopic { .. } => {
       Some(("Invariant", ConversationEntryKind::Invariant))
+    }
+    TopicMetadata::ValidationTopic { .. } => {
+      Some(("Validation", ConversationEntryKind::Validation))
     }
     _ => None,
   };
@@ -1661,8 +1704,9 @@ fn collect_thread_children(
 
 /// Render a single conversation entry as a `RenderedEntry` tree.
 /// Handles comments, mentions (as comments), requirements, behaviors,
-/// functional semantics, threats, and invariants. Recursively collects
-/// comment thread children for all types.
+/// characteristics, functional semantics, conditions, threats, invariants,
+/// and validations. Recursively collects comment thread children for all
+/// types.
 ///
 /// `description_container` overrides the owner topic passed to
 /// `render_description_html` for authored topics. This is needed for
@@ -1722,8 +1766,10 @@ pub fn render_entry_html(
     ConversationEntryKind::Behavior => "behavior",
     ConversationEntryKind::Characteristic => "characteristic",
     ConversationEntryKind::FunctionalSemantics => "functional-semantics",
+    ConversationEntryKind::Condition => "condition",
     ConversationEntryKind::Threat => "threat",
     ConversationEntryKind::Invariant => "invariant",
+    ConversationEntryKind::Validation => "validation",
   };
   let content_class = match entry.kind {
     ConversationEntryKind::Comment | ConversationEntryKind::Mention => {
@@ -1795,9 +1841,15 @@ fn entry_kind_for(metadata: &TopicMetadata) -> Option<ConversationEntryKind> {
     TopicMetadata::FunctionalSemanticTopic { .. } => {
       Some(ConversationEntryKind::FunctionalSemantics)
     }
+    TopicMetadata::ConditionTopic { .. } => {
+      Some(ConversationEntryKind::Condition)
+    }
     TopicMetadata::ThreatTopic { .. } => Some(ConversationEntryKind::Threat),
     TopicMetadata::InvariantTopic { .. } => {
       Some(ConversationEntryKind::Invariant)
+    }
+    TopicMetadata::ValidationTopic { .. } => {
+      Some(ConversationEntryKind::Validation)
     }
     _ => None,
   }
@@ -1823,15 +1875,25 @@ pub fn build_conversation(
 
   let mut entries: Vec<ConversationEntry> = Vec::new();
 
-  // Functional semantics, behaviors, requirements, and characteristics via
-  // reverse indexes.
+  // Entries are emitted in **pipeline derivation order** so that reading
+  // the panel top-to-bottom mirrors how each artifact builds on the ones
+  // above it: semantic linking (1) → requirements (2) → behaviors (3) →
+  // characteristics (5) → conditions (7) → threats (8) → invariants (9)
+  // → validations (10). Feature synthesis (4) and functional purpose /
+  // placement (6) are not currently surfaced as conversation entries —
+  // if/when they are, slot them in at their pipeline-numbered position.
   let related_iter = audit_data
     .declaration_semantics
     .get(&resolved_topic)
     .into_iter()
-    .chain(audit_data.member_behaviors.get(&resolved_topic))
     .chain(audit_data.section_requirements.get(&resolved_topic))
+    .chain(audit_data.member_behaviors.get(&resolved_topic))
     .chain(audit_data.section_characteristics.get(&resolved_topic))
+    .chain(audit_data.subject_conditions.get(&resolved_topic))
+    .chain(audit_data.subject_threats.get(&resolved_topic))
+    .chain(audit_data.subject_invariants.get(&resolved_topic))
+    .chain(audit_data.subject_validations.get(&resolved_topic))
+    .chain(audit_data.invariant_validations.get(&resolved_topic))
     .flatten();
   for rt in related_iter {
     let Some(metadata) = audit_data.topic_metadata.get(rt) else {

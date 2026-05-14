@@ -2660,11 +2660,13 @@ pub async fn build_validations(
 
   // Clear any prior `ValidationTopic` entries so re-runs don't
   // accumulate stale verdicts, rebuild reverse indexes so the
-  // post-clear state is internally consistent, render the audit's
-  // Security characteristics for use as system context, and
-  // early-return if step 9 produced nothing — validations are
-  // downstream of invariants.
-  let security_context: Option<String> = {
+  // post-clear state is internally consistent, and early-return if
+  // step 9 produced nothing — validations are downstream of invariants.
+  // Unlike step 8 (threat generation), step 10 does not render the
+  // audit's `Security`-kind characteristics: the invariant + its
+  // anchors already names the property to verify, so audit-wide
+  // framing would be noise here.
+  {
     let mut ctx = state
       .data_context
       .lock()
@@ -2683,9 +2685,7 @@ pub async fn build_validations(
       tracing::info!("No invariants found, skipping validation generation");
       return Ok(());
     }
-
-    render_security_characteristics(audit_data)
-  };
+  }
 
   let batches = {
     let ctx = state
@@ -2767,11 +2767,9 @@ pub async fn build_validations(
   );
 
   // Per-member calls have no inter-member dependencies. Spawn all LLM
-  // calls concurrently. The rendered security-characteristics block
-  // is cloned per call so each spawned future owns its copy.
+  // calls concurrently.
   let mut handles = Vec::new();
   for (rendered, invariant_topics) in rendered_members {
-    let context_block = security_context.clone();
     // Patch the rendered envelope to add the
     // `invariants_to_validate` top-level array. This is the
     // step-10-specific input; the unified renderer doesn't know
@@ -2779,12 +2777,9 @@ pub async fn build_validations(
     let augmented_json =
       augment_with_invariants_to_validate(&rendered.json, &invariant_topics);
     handles.push(tokio::spawn(async move {
-      let result = task::extract_validations_from_batch(
-        &augmented_json,
-        &rendered.label,
-        context_block.as_deref(),
-      )
-      .await;
+      let result =
+        task::extract_validations_from_batch(&augmented_json, &rendered.label)
+          .await;
       (rendered.label, result)
     }));
   }

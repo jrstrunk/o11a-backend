@@ -3572,22 +3572,33 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     audit_data.topic_context.insert(*sem_topic, context);
   }
 
-  // Build context for ThreatTopics: subject + threat as scope refs.
-  // Nested invariant refs are rebuilt by step 8 once the
-  // `threat_invariants` reverse index lands; until then, threats have
-  // no nested children here.
+  // Build context for ThreatTopics: subject (source anchor) → falsified
+  // condition (the parent in the adversarial chain). The threat's own
+  // description is rendered by `build_topic_panel_prefix` as a
+  // metadata-headed standalone block ABOVE this panel — including a
+  // self-ref here would render the description twice. Reading the
+  // combined view top-to-bottom: prefix shows what the threat is (with
+  // [severity] keyword + author + time); panel shows where it plays
+  // out → which assertion it adversarially inverts. Evidence topics
+  // live in `expanded_topic_context` (built below).
   for (threat_topic, metadata) in &audit_data.topic_metadata {
-    if let TopicMetadata::ThreatTopic { subject_topic, .. } = metadata {
+    if let TopicMetadata::ThreatTopic {
+      subject_topic,
+      falsifies_condition,
+      ..
+    } = metadata
+    {
       let subj_sort_key = Some(subject_topic.numeric_id() as usize);
       let threat_sort_key = Some(threat_topic.numeric_id() as usize);
+      let cond_sort_key = Some(falsifies_condition.numeric_id() as usize);
       let scope_references = vec![
         Reference::ProjectReference {
           reference_topic: *subject_topic,
           sort_key: subj_sort_key,
         },
         Reference::ProjectReference {
-          reference_topic: *threat_topic,
-          sort_key: threat_sort_key,
+          reference_topic: *falsifies_condition,
+          sort_key: cond_sort_key,
         },
       ];
       let context = vec![SourceContext {
@@ -3601,16 +3612,11 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }
   }
 
-  // Build context for InvariantTopics: parent threat (the upstream link)
-  // and the protected non-pure subject (the anchor) as SourceContext
-  // entries. Without the subject anchor the auditor UI's expanded view
-  // for an invariant misses the subject the invariant protects; mirror
-  // the shape ThreatTopic uses above (subject ref first, then the
-  // self/upstream ref). The SourceContext's `sort_key` tracks its own
-  // `scope` (the invariant), matching the convention every other
-  // single-context builder uses (BehaviorTopic, FunctionalSemanticTopic,
-  // ThreatTopic) — sort_key on the inner Reference entries continues to
-  // track each ref's `reference_topic`.
+  // Build context for InvariantTopics: subject (source anchor) → parent
+  // threat (the upstream link). The invariant's own description is
+  // rendered by `build_topic_panel_prefix` as a metadata-headed block
+  // above this panel; see the ThreatTopic builder for the no-self-ref
+  // rationale. Anchors live in `expanded_topic_context` (built below).
   for (inv_topic, metadata) in &audit_data.topic_metadata {
     if let TopicMetadata::InvariantTopic {
       threat_topic,
@@ -3642,13 +3648,12 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     }
   }
 
-  // Build context for ValidationTopics: parent invariant (upstream
-  // link) and validated non-pure subject (anchor) as SourceContext
-  // entries. Mirrors the InvariantTopic context-builder above —
-  // subject ref first, then the self/upstream ref. The SourceContext's
-  // `sort_key` tracks its own `scope` (the validation), matching the
-  // single-context-builder convention used elsewhere (the wrong
-  // sort_key collapses ordering under `merge_context_groups`).
+  // Build context for ValidationTopics: subject (source anchor) →
+  // parent invariant (the upstream link). The validation's own
+  // rationale + verdict is rendered by `build_topic_panel_prefix` as
+  // a metadata-headed block above this panel; see the ThreatTopic
+  // builder for the no-self-ref rationale. Evidence topics live in
+  // `expanded_topic_context` (built below).
   for (val_topic, metadata) in &audit_data.topic_metadata {
     if let TopicMetadata::ValidationTopic {
       invariant_topic,
@@ -3677,6 +3682,93 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
         nested_references: vec![],
       }];
       audit_data.topic_context.insert(*val_topic, context);
+    }
+  }
+
+  // Build context for FunctionalPurposeTopics: subject (source anchor) →
+  // purpose self-ref (description). The functional-property family doesn't
+  // have an adversarial-chain parent to render below; the panel reads
+  // "where this subject lives → why it exists in business terms."
+  for (purpose_topic, metadata) in &audit_data.topic_metadata {
+    if let TopicMetadata::FunctionalPurposeTopic { subject_topic, .. } =
+      metadata
+    {
+      let purpose_sort_key = Some(purpose_topic.numeric_id() as usize);
+      let subj_sort_key = Some(subject_topic.numeric_id() as usize);
+      let scope_references = vec![
+        Reference::ProjectReference {
+          reference_topic: *subject_topic,
+          sort_key: subj_sort_key,
+        },
+        Reference::ProjectReference {
+          reference_topic: *purpose_topic,
+          sort_key: purpose_sort_key,
+        },
+      ];
+      let context = vec![SourceContext {
+        scope: *purpose_topic,
+        sort_key: purpose_sort_key,
+        is_in_scope: true,
+        scope_references,
+        nested_references: vec![],
+      }];
+      audit_data.topic_context.insert(*purpose_topic, context);
+    }
+  }
+
+  // Build context for PlacementRationaleTopics: subject (source anchor) →
+  // placement self-ref (description). Sibling of FunctionalPurposeTopic
+  // (step 6); same shape.
+  for (placement_topic, metadata) in &audit_data.topic_metadata {
+    if let TopicMetadata::PlacementRationaleTopic { subject_topic, .. } =
+      metadata
+    {
+      let placement_sort_key = Some(placement_topic.numeric_id() as usize);
+      let subj_sort_key = Some(subject_topic.numeric_id() as usize);
+      let scope_references = vec![
+        Reference::ProjectReference {
+          reference_topic: *subject_topic,
+          sort_key: subj_sort_key,
+        },
+        Reference::ProjectReference {
+          reference_topic: *placement_topic,
+          sort_key: placement_sort_key,
+        },
+      ];
+      let context = vec![SourceContext {
+        scope: *placement_topic,
+        sort_key: placement_sort_key,
+        is_in_scope: true,
+        scope_references,
+        nested_references: vec![],
+      }];
+      audit_data.topic_context.insert(*placement_topic, context);
+    }
+  }
+
+  // Build context for ConditionTopics: subject (source anchor) only.
+  // The condition's own description is rendered by
+  // `build_topic_panel_prefix` as a metadata-headed standalone block
+  // above this panel; see the ThreatTopic builder for the no-self-ref
+  // rationale. Conditions are step 7 — first in the A-family — so
+  // there's no upstream chain parent to render here. Evidence topics
+  // live in `expanded_topic_context` (built below).
+  for (cond_topic, metadata) in &audit_data.topic_metadata {
+    if let TopicMetadata::ConditionTopic { subject_topic, .. } = metadata {
+      let cond_sort_key = Some(cond_topic.numeric_id() as usize);
+      let subj_sort_key = Some(subject_topic.numeric_id() as usize);
+      let scope_references = vec![Reference::ProjectReference {
+        reference_topic: *subject_topic,
+        sort_key: subj_sort_key,
+      }];
+      let context = vec![SourceContext {
+        scope: *cond_topic,
+        sort_key: cond_sort_key,
+        is_in_scope: true,
+        scope_references,
+        nested_references: vec![],
+      }];
+      audit_data.topic_context.insert(*cond_topic, context);
     }
   }
 
@@ -3769,6 +3861,56 @@ pub fn rebuild_feature_context(audit_data: &mut AuditData) {
     } else {
       audit_data.expanded_topic_context.insert(ft, ctx);
     }
+  }
+
+  // Populate expanded_context for ConditionTopic / ThreatTopic /
+  // ValidationTopic / InvariantTopic — each one shows the source
+  // surface of the citations the LLM emitted alongside the artifact:
+  //   - ConditionTopic.evidence_topics — justifications for the assertion
+  //   - ThreatTopic.evidence_topics — the vulnerable code surface
+  //   - ValidationTopic.evidence_topics — the code surface backing the verdict
+  //   - InvariantTopic.anchors — the declarations the property names
+  // For each citation topic, look up its existing `topic_context`
+  // entries (built by the per-language extractors or by the per-topic
+  // self-ref builders above) and merge. Citations without a
+  // topic_context entry are silently skipped — a stale anchor is not
+  // a panel-rendering error, it's a validation concern handled by the
+  // validator step.
+  let citation_contexts: Vec<(topic::Topic, Vec<SourceContext>)> = audit_data
+    .topic_metadata
+    .iter()
+    .filter_map(|(t, m)| {
+      let citations: &[topic::Topic] = match m {
+        TopicMetadata::ConditionTopic {
+          evidence_topics, ..
+        }
+        | TopicMetadata::ThreatTopic {
+          evidence_topics, ..
+        }
+        | TopicMetadata::ValidationTopic {
+          evidence_topics, ..
+        } => evidence_topics,
+        TopicMetadata::InvariantTopic { anchors, .. } => anchors,
+        _ => return None,
+      };
+      if citations.is_empty() {
+        return None;
+      }
+      let mut all_contexts: Vec<SourceContext> = Vec::new();
+      for ct in citations {
+        if let Some(ctx) = audit_data.topic_context.get(ct) {
+          all_contexts.extend(ctx.iter().cloned());
+        }
+      }
+      if all_contexts.is_empty() {
+        return None;
+      }
+      Some((*t, merge_context_groups(all_contexts)))
+    })
+    .collect();
+
+  for (t, ctx) in citation_contexts {
+    audit_data.expanded_topic_context.insert(t, ctx);
   }
 }
 
@@ -5415,10 +5557,11 @@ mod tests {
   fn rebuild_feature_context_invariant_topic_context_carries_subject_and_threat()
    {
     // The InvariantTopic context-builder must emit SourceContext entries
-    // for both the parent threat (upstream link) and the protected
-    // subject (anchor) — before Phase 3 the context referenced only the
-    // threat. Without the subject anchor, the auditor UI's expanded
-    // view for an invariant misses the subject the invariant protects.
+    // for the protected subject (anchor) and the parent threat (the
+    // upstream link). The invariant's own description renders in the
+    // panel-prefix block (with metadata header); putting a self-ref
+    // here too would render the description twice. See the
+    // ThreatTopic / ValidationTopic builders for the same shape.
     use crate::collaborator::models::Author;
 
     let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
@@ -5452,12 +5595,9 @@ mod tests {
     assert_eq!(entry.scope, inv_xa);
     assert!(entry.is_in_scope);
     // `SourceContext.sort_key` tracks the entry's own `scope` (the
-    // invariant), matching the convention every other single-context
-    // builder uses (BehaviorTopic, FunctionalSemanticTopic, ThreatTopic).
-    // Pinning this here so any future refactor that reverts to the
-    // earlier threat-based sort_key trips the test — the wrong key
-    // tied invariants defending the same threat to identical sort_keys,
-    // collapsing their order under `merge_context_groups`.
+    // invariant). The wrong key tied invariants defending the same
+    // threat to identical sort_keys, collapsing their order under
+    // `merge_context_groups`.
     assert_eq!(
       entry.sort_key(),
       Some(inv_xa.numeric_id() as usize),
@@ -5466,11 +5606,14 @@ mod tests {
     assert_eq!(
       entry.scope_references.len(),
       2,
-      "scope_references must carry the subject anchor and the parent threat"
+      "scope_references must carry only the subject anchor and the parent \
+       threat — the invariant's own description renders in the panel-prefix \
+       block, not here"
     );
-    // Order is part of the contract: subject ref first (the protected
-    // anchor), then the threat ref (the upstream link), matching the
-    // ThreatTopic context-builder's shape.
+    // Order is part of the contract: subject anchor (where it lives)
+    // → parent threat (what it defends against). The invariant's
+    // description sits in the prefix block above; rendering it again
+    // here would duplicate.
     assert_eq!(
       *entry.scope_references[0].reference_topic(),
       subject_a,
@@ -5482,8 +5625,8 @@ mod tests {
       "parent threat must be the second scope_reference"
     );
     // Each Reference's `sort_key` tracks its own `reference_topic` —
-    // this is the gold-standard convention at the Reference layer,
-    // distinct from the SourceContext-level sort_key above.
+    // the convention at the Reference layer, distinct from the
+    // SourceContext-level sort_key above.
     assert_eq!(
       entry.scope_references[0].sort_key(),
       Some(subject_a.numeric_id() as usize),
@@ -5493,6 +5636,16 @@ mod tests {
       entry.scope_references[1].sort_key(),
       Some(threat_x.numeric_id() as usize),
       "threat Reference.sort_key must track threat_topic"
+    );
+    // Guard against regressing to the duplicating shape that briefly
+    // landed: the invariant must NOT appear in its own scope_references.
+    assert!(
+      !entry
+        .scope_references
+        .iter()
+        .any(|r| *r.reference_topic() == inv_xa),
+      "invariant must not self-ref in topic_context (would double-render \
+       with the panel prefix)"
     );
   }
 
@@ -5661,9 +5814,10 @@ mod tests {
   fn rebuild_feature_context_validation_topic_context_carries_subject_and_invariant()
    {
     // The ValidationTopic context-builder must emit SourceContext entries
-    // for both the parent invariant (upstream link) and the validated
-    // non-pure subject (anchor). Mirrors the InvariantTopic context
-    // builder's contract — subject ref first, then the self/upstream ref.
+    // for the validated subject (anchor) and the parent invariant (the
+    // upstream link). The validation's own rationale renders in the
+    // panel-prefix block (with metadata header). Mirrors the
+    // InvariantTopic builder's shape.
     use crate::collaborator::models::Author;
 
     let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
@@ -5706,11 +5860,13 @@ mod tests {
     assert_eq!(
       entry.scope_references.len(),
       2,
-      "scope_references must carry the subject anchor and the parent invariant"
+      "scope_references must carry only the subject anchor and the parent \
+       invariant — the validation's own rationale renders in the panel-prefix \
+       block, not here"
     );
-    // Order is part of the contract: subject ref first (the anchor),
-    // then the invariant ref (the upstream link), matching the
-    // InvariantTopic context-builder's shape.
+    // Order is part of the contract: subject (where the verdict was
+    // reached) → parent invariant (what was verdicted). The
+    // validation's rationale sits in the prefix block above.
     assert_eq!(
       *entry.scope_references[0].reference_topic(),
       subject_a,
@@ -5731,5 +5887,305 @@ mod tests {
       Some(inv_x.numeric_id() as usize),
       "invariant Reference.sort_key must track invariant_topic"
     );
+    assert!(
+      !entry
+        .scope_references
+        .iter()
+        .any(|r| *r.reference_topic() == val_xa),
+      "validation must not self-ref in topic_context (would double-render \
+       with the panel prefix)"
+    );
+  }
+
+  #[test]
+  fn rebuild_feature_context_threat_topic_context_carries_subject_and_falsified_condition()
+   {
+    // Pins ThreatTopic's main-panel shape: subject anchor → falsified
+    // condition. The threat's own description renders in the
+    // panel-prefix block (with [severity] keyword + author + time);
+    // self-ref in topic_context would double-render. Reading the
+    // combined view: prefix names the threat; panel shows where it
+    // plays out and which assertion it falsifies.
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&7);
+    let cond_x = topic::new_adversarial_property_topic(2);
+    let threat_x = topic::new_adversarial_property_topic(5);
+
+    audit.topic_metadata.insert(
+      threat_x,
+      TopicMetadata::ThreatTopic {
+        topic: threat_x,
+        description: "an external caller front-runs the deposit".to_string(),
+        subject_topic: subject_a,
+        falsifies_condition: cond_x,
+        controlled_by: ThreatActor::Caller,
+        evidence_topics: vec![],
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+
+    let context = audit
+      .topic_context
+      .get(&threat_x)
+      .expect("ThreatTopic must have a topic_context entry");
+    assert_eq!(context.len(), 1);
+    let entry = &context[0];
+    assert_eq!(entry.scope, threat_x);
+    assert_eq!(
+      entry.scope_references.len(),
+      2,
+      "scope_references must carry the subject anchor and the falsified \
+       condition only — the threat's own description renders in the \
+       panel-prefix block"
+    );
+    assert_eq!(*entry.scope_references[0].reference_topic(), subject_a);
+    assert_eq!(*entry.scope_references[1].reference_topic(), cond_x);
+    assert!(
+      !entry
+        .scope_references
+        .iter()
+        .any(|r| *r.reference_topic() == threat_x),
+      "threat must not self-ref in topic_context (would double-render \
+       with the panel prefix)"
+    );
+  }
+
+  #[test]
+  fn rebuild_feature_context_condition_topic_context_carries_subject_only() {
+    // Pins ConditionTopic's main-panel shape: subject anchor only. The
+    // condition's own description renders in the panel-prefix block
+    // (with metadata header); self-ref in topic_context would
+    // double-render. Conditions are the first A-family step, so there
+    // is no upstream chain parent to render either.
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&7);
+    let cond_x = topic::new_adversarial_property_topic(2);
+
+    audit.topic_metadata.insert(
+      cond_x,
+      TopicMetadata::ConditionTopic {
+        topic: cond_x,
+        description: "the caller is the registered owner".to_string(),
+        subject_topic: subject_a,
+        kind: ConditionKind::AuthorizedAccess,
+        evidence_topics: vec![],
+        author: Author::AgentLarge,
+        created_at: None,
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+
+    let context = audit
+      .topic_context
+      .get(&cond_x)
+      .expect("ConditionTopic must have a topic_context entry");
+    assert_eq!(context.len(), 1);
+    let entry = &context[0];
+    assert_eq!(entry.scope, cond_x);
+    assert_eq!(
+      entry.scope_references.len(),
+      1,
+      "scope_references must carry the subject anchor only — the \
+       condition's own description renders in the panel-prefix block"
+    );
+    assert_eq!(*entry.scope_references[0].reference_topic(), subject_a);
+    assert!(
+      !entry
+        .scope_references
+        .iter()
+        .any(|r| *r.reference_topic() == cond_x),
+      "condition must not self-ref in topic_context (would double-render \
+       with the panel prefix)"
+    );
+  }
+
+  #[test]
+  fn rebuild_feature_context_functional_purpose_topic_context_carries_subject_and_self()
+   {
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&7);
+    let purpose_x = topic::new_functional_property_topic(10);
+
+    audit.topic_metadata.insert(
+      purpose_x,
+      TopicMetadata::FunctionalPurposeTopic {
+        topic: purpose_x,
+        description: "records that the deposit happened".to_string(),
+        subject_topic: subject_a,
+        author: Author::AgentLarge,
+        created_at: None,
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+
+    let context = audit
+      .topic_context
+      .get(&purpose_x)
+      .expect("FunctionalPurposeTopic must have a topic_context entry");
+    assert_eq!(context.len(), 1);
+    let entry = &context[0];
+    assert_eq!(entry.scope, purpose_x);
+    assert_eq!(entry.scope_references.len(), 2);
+    assert_eq!(*entry.scope_references[0].reference_topic(), subject_a);
+    assert_eq!(*entry.scope_references[1].reference_topic(), purpose_x);
+  }
+
+  #[test]
+  fn rebuild_feature_context_placement_rationale_topic_context_carries_subject_and_self()
+   {
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&7);
+    let placement_x = topic::new_functional_property_topic(11);
+
+    audit.topic_metadata.insert(
+      placement_x,
+      TopicMetadata::PlacementRationaleTopic {
+        topic: placement_x,
+        description: "must run before the external transfer".to_string(),
+        subject_topic: subject_a,
+        author: Author::AgentLarge,
+        created_at: None,
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+
+    let context = audit
+      .topic_context
+      .get(&placement_x)
+      .expect("PlacementRationaleTopic must have a topic_context entry");
+    assert_eq!(context.len(), 1);
+    let entry = &context[0];
+    assert_eq!(entry.scope, placement_x);
+    assert_eq!(entry.scope_references.len(), 2);
+    assert_eq!(*entry.scope_references[0].reference_topic(), subject_a);
+    assert_eq!(*entry.scope_references[1].reference_topic(), placement_x);
+  }
+
+  #[test]
+  fn rebuild_feature_context_citation_expanded_contexts_pull_from_evidence_and_anchors()
+   {
+    // The citation-driven expanded_context builder hydrates the
+    // secondary panel from `evidence_topics` (Condition / Threat /
+    // Validation) and `anchors` (Invariant). Each citation's existing
+    // topic_context entry contributes its scope groups; absent
+    // citations are silently skipped. Mirrors the
+    // FeatureTopic.expanded_context behaviour.
+    use crate::collaborator::models::Author;
+
+    let mut audit = new_audit_data("test".to_string(), HashSet::new(), None);
+    let subject_a = topic::new_node_topic(&7);
+    let evidence_a = topic::new_node_topic(&8);
+    let cond_x = topic::new_adversarial_property_topic(2);
+    let threat_x = topic::new_adversarial_property_topic(5);
+    let inv_x = topic::new_adversarial_property_topic(11);
+    let val_x = topic::new_adversarial_property_topic(15);
+
+    // Stub topic_context for the evidence/anchor node so the
+    // expanded-context lookup has something to copy.
+    audit.topic_context.insert(
+      evidence_a,
+      vec![SourceContext {
+        scope: evidence_a,
+        sort_key: Some(evidence_a.numeric_id() as usize),
+        is_in_scope: true,
+        scope_references: vec![Reference::ProjectReference {
+          reference_topic: evidence_a,
+          sort_key: Some(evidence_a.numeric_id() as usize),
+        }],
+        nested_references: vec![],
+      }],
+    );
+
+    audit.topic_metadata.insert(
+      cond_x,
+      TopicMetadata::ConditionTopic {
+        topic: cond_x,
+        description: "the caller is the registered owner".to_string(),
+        subject_topic: subject_a,
+        kind: ConditionKind::AuthorizedAccess,
+        evidence_topics: vec![evidence_a],
+        author: Author::AgentLarge,
+        created_at: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      threat_x,
+      TopicMetadata::ThreatTopic {
+        topic: threat_x,
+        description: "front-runner".to_string(),
+        subject_topic: subject_a,
+        falsifies_condition: cond_x,
+        controlled_by: ThreatActor::Caller,
+        evidence_topics: vec![evidence_a],
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      inv_x,
+      TopicMetadata::InvariantTopic {
+        topic: inv_x,
+        description: "every privileged setter checks ownership".to_string(),
+        threat_topic: threat_x,
+        subject_topic: subject_a,
+        kind: InvariantKind::AccessGate,
+        anchors: vec![evidence_a],
+        author: Author::AgentLarge,
+        created_at: None,
+        severity: None,
+      },
+    );
+    audit.topic_metadata.insert(
+      val_x,
+      TopicMetadata::ValidationTopic {
+        topic: val_x,
+        invariant_topic: inv_x,
+        subject_topic: subject_a,
+        verdict: ValidationVerdict::Enforced,
+        rationale: "onlyOwner gates this entry".to_string(),
+        evidence_topics: vec![evidence_a],
+        author: Author::AgentLarge,
+        created_at: None,
+      },
+    );
+
+    rebuild_feature_context(&mut audit);
+
+    for (label, t) in [
+      ("condition", cond_x),
+      ("threat", threat_x),
+      ("invariant", inv_x),
+      ("validation", val_x),
+    ] {
+      let ctx = audit.expanded_topic_context.get(&t).unwrap_or_else(|| {
+        panic!("{} must have an expanded_topic_context", label)
+      });
+      assert!(
+        !ctx.is_empty(),
+        "{}'s expanded_topic_context must include the cited node",
+        label
+      );
+      assert!(
+        ctx.iter().any(|g| g.scope == evidence_a),
+        "{}'s expanded_topic_context must reference the evidence/anchor node",
+        label
+      );
+    }
   }
 }

@@ -4962,9 +4962,6 @@ Cite topics inside the function: the subject node, its descendants, \
 sibling statements in the same semantic block, the containing function, \
 its modifiers, its parameters. Cross-function evidence is invalid — \
 that's a propagation concern handled in a later pipeline step.\n\n\
-**Use the audit-wide security context.** Any `Security context` block \
-above this prompt names known defenses and role definitions. Use it \
-to anchor your judgment of what enforcement counts at this audit.\n\n\
 Return a JSON object with a `validations` key whose value is an \
 array. Each entry has:\n\
 - `invariant_topic`: an A-prefixed topic ID from the \
@@ -5062,28 +5059,22 @@ struct ValidationsContext {
 /// Run the validations LLM task against a single function rendered by
 /// `context::render_batch_for_extraction` in `subject` shape, augmented
 /// by the pipeline step with a top-level `invariants_to_validate`
-/// array. `label` identifies the function for logs. `security_notes` is
-/// the audit-wide framing rendered by
-/// `pipeline::render_security_characteristics`; when `Some` and
-/// non-empty, it is prepended to the prompt as a `Security context:`
-/// block so the LLM's verdict judgments anchor in defenses the auditor
-/// has already documented. Validation drops bad entries but keeps the
-/// good — a batch with one malformed validation still produces verdicts
-/// from the rest. Same drop-and-warn shape as steps 5/6/7/8.
+/// array. `label` identifies the function for logs. Validation drops
+/// bad entries but keeps the good — a batch with one malformed
+/// validation still produces verdicts from the rest. Same drop-and-
+/// warn shape as steps 5/6/7/8.
+///
+/// Unlike steps 7/8 (condition / threat generation), step 10 does
+/// **not** receive the audit's `Security`-kind characteristics as
+/// context. The invariant + its `anchors` already names the specific
+/// defensive property to verify, so audit-wide framing would be noise:
+/// the LLM's job here is "is *this property* enforced in *this
+/// function*?", not "what defenses does this audit document?"
 pub async fn extract_validations_from_batch(
   batch_json: &str,
   label: &str,
-  security_notes: Option<&str>,
 ) -> Result<ParsedValidations, TaskError> {
-  let prompt = match security_notes {
-    Some(notes) if !notes.trim().is_empty() => format!(
-      "Security context:\n{}\n\n{}Batch:\n{}",
-      notes.trim(),
-      EXTRACT_VALIDATIONS_PROMPT,
-      batch_json
-    ),
-    _ => format!("{}Batch:\n{}", EXTRACT_VALIDATIONS_PROMPT, batch_json),
-  };
+  let prompt = format!("{}Batch:\n{}", EXTRACT_VALIDATIONS_PROMPT, batch_json);
 
   let log_label = format!("validations_{}", label);
   let response = router::chat_completion(
