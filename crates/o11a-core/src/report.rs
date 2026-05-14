@@ -23,13 +23,13 @@
 use crate::collaborator::models::Author;
 use crate::domain::{
   AuditData, Characteristic, MatchSource, Requirement,
-  SystemCharacteristicKind, TopicMetadata,
+  SystemCharacteristicKind, ThreatFeatureLink, TopicMetadata,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The current audit-report schema version. Bump on breaking changes.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Name of the tool that produced the report.
 pub const GENERATOR_NAME: &str = "o11a-analyze";
@@ -79,6 +79,13 @@ pub struct PipelineOutput {
   pub behaviors: Vec<ReportBehavior>,
   pub characteristics: Vec<ReportCharacteristic>,
   pub functional_semantics: Vec<ReportFunctionalSemantic>,
+  pub functional_purposes: Vec<ReportFunctionalPurpose>,
+  pub placement_rationales: Vec<ReportPlacementRationale>,
+  pub conditions: Vec<ReportCondition>,
+  pub threats: Vec<ReportThreat>,
+  pub invariants: Vec<ReportInvariant>,
+  pub validations: Vec<ReportValidation>,
+  pub threat_feature_links: Vec<ReportThreatFeatureLink>,
   pub feature_requirement_links: Vec<FeatureLink>,
   pub feature_behavior_links: Vec<FeatureLink>,
 }
@@ -148,6 +155,106 @@ pub struct FeatureLink {
   pub topic: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportFunctionalPurpose {
+  /// P-prefixed topic id.
+  pub topic: String,
+  /// Why this subject exists in business terms.
+  pub description: String,
+  /// The non-pure subject this purpose is on (N-prefixed).
+  pub subject_topic: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportPlacementRationale {
+  /// P-prefixed topic id.
+  pub topic: String,
+  /// Why this subject is at this point in its containing function.
+  pub description: String,
+  /// The non-pure subject this placement rationale is on (N-prefixed).
+  pub subject_topic: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportCondition {
+  /// A-prefixed topic id.
+  pub topic: String,
+  /// The assertion, phrased affirmatively.
+  pub description: String,
+  /// The non-pure subject whose purpose+placement this assertion supports
+  /// (N-prefixed).
+  pub subject_topic: String,
+  /// Category of assertion.
+  pub kind: crate::domain::ConditionKind,
+  /// Topic IDs cited as justifying the assertion.
+  pub evidence_topics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportThreat {
+  /// A-prefixed topic id.
+  pub topic: String,
+  /// The scenario, phrased actor-agnostically.
+  pub description: String,
+  /// The non-pure subject this threat belongs to (N-prefixed).
+  pub subject_topic: String,
+  /// The A-prefixed condition this threat is the adversarial inversion of.
+  pub falsifies_condition: String,
+  /// The party whose action drives the scenario.
+  pub controlled_by: crate::domain::ThreatActor,
+  /// Topic IDs cited as the vulnerable code surface.
+  pub evidence_topics: Vec<String>,
+  /// Severity assigned during impact analysis; None means pending.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub severity: Option<crate::domain::ThreatSeverity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportInvariant {
+  /// A-prefixed topic id.
+  pub topic: String,
+  /// The defensive property ("X must Y" / "every Z does W").
+  pub description: String,
+  /// The A-prefixed threat this invariant defends against.
+  pub threat_topic: String,
+  /// The non-pure subject this invariant protects (N-prefixed).
+  pub subject_topic: String,
+  /// Category of defensive pattern.
+  pub kind: crate::domain::InvariantKind,
+  /// Declaration topics the property is stated against.
+  #[serde(default)]
+  pub anchors: Vec<String>,
+  /// Severity inherited from parent threat at write time.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub severity: Option<crate::domain::ThreatSeverity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportValidation {
+  /// A-prefixed topic id.
+  pub topic: String,
+  /// The A-prefixed invariant this validation verdicts on.
+  pub invariant_topic: String,
+  /// The non-pure subject this validation was performed at (N-prefixed).
+  pub subject_topic: String,
+  /// The verdict.
+  pub verdict: crate::domain::ValidationVerdict,
+  /// One-sentence justification of the verdict.
+  pub rationale: String,
+  /// Topic IDs cited as evidence for the verdict.
+  pub evidence_topics: Vec<String>,
+}
+
+/// A link between a threat and a feature, established during impact
+/// analysis. Carries the relationship type and severity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportThreatFeatureLink {
+  pub threat_topic: String,
+  pub feature_topic: String,
+  pub relation: crate::domain::ThreatFeatureRelation,
+  pub severity: crate::domain::ThreatSeverity,
+}
+
 // ============================================================================
 // Export: AuditData → AuditReport
 // ============================================================================
@@ -181,6 +288,13 @@ pub fn build_report(
     behaviors: collect_behaviors(audit_data),
     characteristics: collect_characteristics(audit_data),
     functional_semantics: collect_functional_semantics(audit_data),
+    functional_purposes: collect_functional_purposes(audit_data),
+    placement_rationales: collect_placement_rationales(audit_data),
+    conditions: collect_conditions(audit_data),
+    threats: collect_threats(audit_data),
+    invariants: collect_invariants(audit_data),
+    validations: collect_validations(audit_data),
+    threat_feature_links: collect_threat_feature_links(audit_data),
     feature_requirement_links: flatten_links(
       &audit_data.feature_requirement_links,
     ),
@@ -375,9 +489,196 @@ fn flatten_links(
   out
 }
 
-// ============================================================================
-// Import: AuditReport → AuditData (applied on top of a freshly-parsed audit)
-// ============================================================================
+fn collect_functional_purposes(
+  audit_data: &AuditData,
+) -> Vec<ReportFunctionalPurpose> {
+  let mut out: Vec<ReportFunctionalPurpose> = audit_data
+    .topic_metadata
+    .values()
+    .filter_map(|m| match m {
+      TopicMetadata::FunctionalPurposeTopic {
+        topic,
+        description,
+        subject_topic,
+        ..
+      } => Some(ReportFunctionalPurpose {
+        topic: topic.id().to_string(),
+        description: description.clone(),
+        subject_topic: subject_topic.id().to_string(),
+      }),
+      _ => None,
+    })
+    .collect();
+  out.sort_by(|a, b| a.topic.cmp(&b.topic));
+  out
+}
+
+fn collect_placement_rationales(
+  audit_data: &AuditData,
+) -> Vec<ReportPlacementRationale> {
+  let mut out: Vec<ReportPlacementRationale> = audit_data
+    .topic_metadata
+    .values()
+    .filter_map(|m| match m {
+      TopicMetadata::PlacementRationaleTopic {
+        topic,
+        description,
+        subject_topic,
+        ..
+      } => Some(ReportPlacementRationale {
+        topic: topic.id().to_string(),
+        description: description.clone(),
+        subject_topic: subject_topic.id().to_string(),
+      }),
+      _ => None,
+    })
+    .collect();
+  out.sort_by(|a, b| a.topic.cmp(&b.topic));
+  out
+}
+
+fn collect_conditions(audit_data: &AuditData) -> Vec<ReportCondition> {
+  let mut out: Vec<ReportCondition> = audit_data
+    .topic_metadata
+    .values()
+    .filter_map(|m| match m {
+      TopicMetadata::ConditionTopic {
+        topic,
+        description,
+        subject_topic,
+        kind,
+        evidence_topics,
+        ..
+      } => Some(ReportCondition {
+        topic: topic.id().to_string(),
+        description: description.clone(),
+        subject_topic: subject_topic.id().to_string(),
+        kind: *kind,
+        evidence_topics: evidence_topics
+          .iter()
+          .map(|t| t.id().to_string())
+          .collect(),
+      }),
+      _ => None,
+    })
+    .collect();
+  out.sort_by(|a, b| a.topic.cmp(&b.topic));
+  out
+}
+
+fn collect_threats(audit_data: &AuditData) -> Vec<ReportThreat> {
+  let mut out: Vec<ReportThreat> = audit_data
+    .topic_metadata
+    .values()
+    .filter_map(|m| match m {
+      TopicMetadata::ThreatTopic {
+        topic,
+        description,
+        subject_topic,
+        falsifies_condition,
+        controlled_by,
+        evidence_topics,
+        severity,
+        ..
+      } => Some(ReportThreat {
+        topic: topic.id().to_string(),
+        description: description.clone(),
+        subject_topic: subject_topic.id().to_string(),
+        falsifies_condition: falsifies_condition.id().to_string(),
+        controlled_by: *controlled_by,
+        evidence_topics: evidence_topics
+          .iter()
+          .map(|t| t.id().to_string())
+          .collect(),
+        severity: *severity,
+      }),
+      _ => None,
+    })
+    .collect();
+  out.sort_by(|a, b| a.topic.cmp(&b.topic));
+  out
+}
+
+fn collect_invariants(audit_data: &AuditData) -> Vec<ReportInvariant> {
+  let mut out: Vec<ReportInvariant> = audit_data
+    .topic_metadata
+    .values()
+    .filter_map(|m| match m {
+      TopicMetadata::InvariantTopic {
+        topic,
+        description,
+        threat_topic,
+        subject_topic,
+        kind,
+        anchors,
+        severity,
+        ..
+      } => Some(ReportInvariant {
+        topic: topic.id().to_string(),
+        description: description.clone(),
+        threat_topic: threat_topic.id().to_string(),
+        subject_topic: subject_topic.id().to_string(),
+        kind: *kind,
+        anchors: anchors.iter().map(|t| t.id().to_string()).collect(),
+        severity: *severity,
+      }),
+      _ => None,
+    })
+    .collect();
+  out.sort_by(|a, b| a.topic.cmp(&b.topic));
+  out
+}
+
+fn collect_validations(audit_data: &AuditData) -> Vec<ReportValidation> {
+  let mut out: Vec<ReportValidation> = audit_data
+    .topic_metadata
+    .values()
+    .filter_map(|m| match m {
+      TopicMetadata::ValidationTopic {
+        topic,
+        invariant_topic,
+        subject_topic,
+        verdict,
+        rationale,
+        evidence_topics,
+        ..
+      } => Some(ReportValidation {
+        topic: topic.id().to_string(),
+        invariant_topic: invariant_topic.id().to_string(),
+        subject_topic: subject_topic.id().to_string(),
+        verdict: *verdict,
+        rationale: rationale.clone(),
+        evidence_topics: evidence_topics
+          .iter()
+          .map(|t| t.id().to_string())
+          .collect(),
+      }),
+      _ => None,
+    })
+    .collect();
+  out.sort_by(|a, b| a.topic.cmp(&b.topic));
+  out
+}
+
+fn collect_threat_feature_links(
+  audit_data: &AuditData,
+) -> Vec<ReportThreatFeatureLink> {
+  let mut out: Vec<ReportThreatFeatureLink> = audit_data
+    .threat_feature_links
+    .iter()
+    .map(|link| ReportThreatFeatureLink {
+      threat_topic: link.threat_topic.id().to_string(),
+      feature_topic: link.feature_topic.id().to_string(),
+      relation: link.relation,
+      severity: link.severity,
+    })
+    .collect();
+  out.sort_by(|a, b| {
+    (a.threat_topic.as_str(), a.feature_topic.as_str())
+      .cmp(&(b.threat_topic.as_str(), b.feature_topic.as_str()))
+  });
+  out
+}
 
 /// Errors that can occur when applying a report to an `AuditData`.
 #[derive(Debug)]
@@ -412,16 +713,13 @@ impl std::error::Error for ApplyReportError {}
 /// Apply a report's pipeline output onto an `AuditData` that has already been
 /// populated from source parsing (ASTs, symbol tables, topic metadata for
 /// parsed declarations). This installs the LLM-derived topics (features,
-/// requirements, behaviors, characteristics, functional semantics) and their
-/// links. Also reseeds every per-prefix ID counter (`S`, `P`, `A`) past the
-/// highest ID of that variant in the merged `topic_metadata`, so subsequent
-/// in-memory allocations (user-entity hydration, comment authoring, pipeline
-/// rerun) never collide with anything the report installed or with anything
-/// `apply_snapshot` hydrated earlier in the startup sequence. The `A` reseed
-/// is load-bearing here even though `apply_report` does not itself install
-/// `A`-prefixed topics: the binary snapshot hydrated immediately beforehand
-/// carries `ConditionTopic` / `ThreatTopic` / `InvariantTopic` /
-/// `ValidationTopic` entries that must not be re-allocated over.
+/// requirements, behaviors, characteristics, functional semantics,
+/// functional purposes, placement rationales, conditions, threats, invariants,
+/// validations) and their links. Also reseeds every per-prefix ID counter
+/// (`S`, `P`, `A`) past the highest ID of that variant in the merged
+/// `topic_metadata`, so subsequent in-memory allocations (user-entity
+/// hydration, comment authoring, pipeline rerun) never collide with anything
+/// the report installed.
 ///
 /// Callers should invoke `crate::domain::rebuild_feature_context` on the audit
 /// data after applying the report, so that reverse indexes are refreshed.
@@ -445,7 +743,9 @@ pub fn apply_report(
 
   use crate::domain::topic;
 
-  // Drop any stale pipeline-topic metadata before hydrating from the report.
+  // Drop any stale pipeline-topic metadata before hydrating from the
+  // report. All pipeline-output TopicMetadata variants are stripped so
+  // the report is the sole source of truth for the full pipeline state.
   audit_data.topic_metadata.retain(|_, m| {
     !matches!(
       m,
@@ -454,12 +754,19 @@ pub fn apply_report(
         | TopicMetadata::BehaviorTopic { .. }
         | TopicMetadata::CharacteristicTopic { .. }
         | TopicMetadata::FunctionalSemanticTopic { .. }
+        | TopicMetadata::FunctionalPurposeTopic { .. }
+        | TopicMetadata::PlacementRationaleTopic { .. }
+        | TopicMetadata::ConditionTopic { .. }
+        | TopicMetadata::ThreatTopic { .. }
+        | TopicMetadata::InvariantTopic { .. }
+        | TopicMetadata::ValidationTopic { .. }
     )
   });
   audit_data.requirements.clear();
   audit_data.characteristics.clear();
   audit_data.feature_requirement_links.clear();
   audit_data.feature_behavior_links.clear();
+  audit_data.threat_feature_links.clear();
 
   for f in &report.pipeline.features {
     let topic = topic::new_topic(&f.topic);
@@ -584,23 +891,150 @@ pub fn apply_report(
       .push(topic::new_topic(&link.topic));
   }
 
+  for p in &report.pipeline.functional_purposes {
+    let topic = topic::new_topic(&p.topic);
+    let subject_topic = topic::new_topic(&p.subject_topic);
+    audit_data.topic_metadata.insert(
+      topic,
+      TopicMetadata::FunctionalPurposeTopic {
+        topic,
+        description: p.description.clone(),
+        subject_topic,
+        author: Author::System,
+        created_at: None,
+      },
+    );
+  }
+
+  for pr in &report.pipeline.placement_rationales {
+    let topic = topic::new_topic(&pr.topic);
+    let subject_topic = topic::new_topic(&pr.subject_topic);
+    audit_data.topic_metadata.insert(
+      topic,
+      TopicMetadata::PlacementRationaleTopic {
+        topic,
+        description: pr.description.clone(),
+        subject_topic,
+        author: Author::System,
+        created_at: None,
+      },
+    );
+  }
+
+  for c in &report.pipeline.conditions {
+    let topic = topic::new_topic(&c.topic);
+    let subject_topic = topic::new_topic(&c.subject_topic);
+    let evidence_topics = c
+      .evidence_topics
+      .iter()
+      .map(|s| topic::new_topic(s))
+      .collect();
+    audit_data.topic_metadata.insert(
+      topic,
+      TopicMetadata::ConditionTopic {
+        topic,
+        description: c.description.clone(),
+        subject_topic,
+        kind: c.kind,
+        evidence_topics,
+        author: Author::System,
+        created_at: None,
+      },
+    );
+  }
+
+  for t in &report.pipeline.threats {
+    let topic = topic::new_topic(&t.topic);
+    let subject_topic = topic::new_topic(&t.subject_topic);
+    let falsifies_condition = topic::new_topic(&t.falsifies_condition);
+    let evidence_topics = t
+      .evidence_topics
+      .iter()
+      .map(|s| topic::new_topic(s))
+      .collect();
+    audit_data.topic_metadata.insert(
+      topic,
+      TopicMetadata::ThreatTopic {
+        topic,
+        description: t.description.clone(),
+        subject_topic,
+        falsifies_condition,
+        controlled_by: t.controlled_by,
+        evidence_topics,
+        author: Author::System,
+        created_at: None,
+        severity: t.severity,
+      },
+    );
+  }
+
+  for inv in &report.pipeline.invariants {
+    let topic = topic::new_topic(&inv.topic);
+    let threat_topic = topic::new_topic(&inv.threat_topic);
+    let subject_topic = topic::new_topic(&inv.subject_topic);
+    let anchors = inv.anchors.iter().map(|s| topic::new_topic(s)).collect();
+    audit_data.topic_metadata.insert(
+      topic,
+      TopicMetadata::InvariantTopic {
+        topic,
+        description: inv.description.clone(),
+        threat_topic,
+        subject_topic,
+        kind: inv.kind,
+        anchors,
+        author: Author::System,
+        created_at: None,
+        severity: inv.severity,
+      },
+    );
+  }
+
+  for v in &report.pipeline.validations {
+    let topic = topic::new_topic(&v.topic);
+    let invariant_topic = topic::new_topic(&v.invariant_topic);
+    let subject_topic = topic::new_topic(&v.subject_topic);
+    let evidence_topics = v
+      .evidence_topics
+      .iter()
+      .map(|s| topic::new_topic(s))
+      .collect();
+    audit_data.topic_metadata.insert(
+      topic,
+      TopicMetadata::ValidationTopic {
+        topic,
+        invariant_topic,
+        subject_topic,
+        verdict: v.verdict,
+        rationale: v.rationale.clone(),
+        evidence_topics,
+        author: Author::System,
+        created_at: None,
+      },
+    );
+  }
+
+  for link in &report.pipeline.threat_feature_links {
+    audit_data.threat_feature_links.push(ThreatFeatureLink {
+      threat_topic: topic::new_topic(&link.threat_topic),
+      feature_topic: topic::new_topic(&link.feature_topic),
+      relation: link.relation,
+      severity: link.severity,
+    });
+  }
+
   // Reseed every per-prefix counter so subsequent allocations skip past
   // every topic this report installed and every topic `apply_snapshot`
   // hydrated earlier in the startup sequence.
   //
-  // - `S` (spec): the four pipeline-output spec-family kinds
-  //   (Feature/Requirement/Behavior/Characteristic) all key by
+  // - `S` (spec): Feature/Requirement/Behavior/Characteristic all key by
   //   `Topic::Spec`. Apply_report just reinserted them; scanning
-  //   `topic_metadata` keys covers every spec ID this report introduced.
-  // - `P` (functional property): functional semantics also key by
-  //   `Topic::FunctionalProperty` and were just reinserted; for
-  //   functional_purpose / placement_rationale topics, those came from
-  //   the snapshot and are also present in the merged `topic_metadata`.
-  // - `A` (adversarial property): `ConditionTopic` / `ThreatTopic` /
-  //   `InvariantTopic` / `ValidationTopic` are not in the report — they
-  //   come from the snapshot. Since `apply_report` runs after
-  //   `apply_snapshot` in the server startup sequence, scanning the
-  //   merged `topic_metadata` here covers them too.
+  //   `topic_metadata` keys covers every spec ID.
+  // - `P` (functional property): FunctionalSemantic, FunctionalPurpose,
+  //   PlacementRationale all key by `Topic::FunctionalProperty`.
+  //   Apply_report just reinserted them.
+  // - `A` (adversarial property): Condition/Threat/Invariant/Validation
+  //   all key by `Topic::AdversarialProperty`. Apply_report just
+  //   reinserted them.
   //
   // Each scan is O(n) over `topic_metadata` and runs at startup only.
   crate::ids::reseed_spec_id(max_spec_id(audit_data));
@@ -646,11 +1080,7 @@ fn max_functional_property_id(audit_data: &AuditData) -> i32 {
 
 /// Highest numeric ID across every `Topic::AdversarialProperty` key in
 /// `topic_metadata`, or 0 if there are none. Peer of `max_spec_id`; used
-/// to bound the adversarial-property-counter reseed. Adversarial-property
-/// topics enter `topic_metadata` via `apply_snapshot`, not via the report
-/// itself, so this scan finds the snapshot's ConditionTopic / ThreatTopic
-/// / InvariantTopic / ValidationTopic entries that must not be re-
-/// allocated over.
+/// to bound the adversarial-property-counter reseed.
 fn max_adversarial_property_id(audit_data: &AuditData) -> i32 {
   audit_data
     .topic_metadata
@@ -698,6 +1128,13 @@ mod tests {
       behaviors: vec![],
       characteristics: vec![],
       functional_semantics: vec![],
+      functional_purposes: vec![],
+      placement_rationales: vec![],
+      conditions: vec![],
+      threats: vec![],
+      invariants: vec![],
+      validations: vec![],
+      threat_feature_links: vec![],
       feature_requirement_links: vec![],
       feature_behavior_links: vec![],
     }
@@ -818,45 +1255,43 @@ mod tests {
   }
 
   #[test]
-  fn apply_report_reseeds_adversarial_property_counter_past_snapshot_topic() {
-    // Adversarial-property topics (Condition/Threat/Invariant/Validation)
-    // enter `topic_metadata` via `apply_snapshot`, not via the report.
-    // Simulate that by pre-seeding an A-prefixed entry and asserting
-    // apply_report's reseed picks it up. Without this, the next user-create
-    // on any A-prefixed topic would collide.
+  fn apply_report_reseeds_adversarial_property_counter_past_report_topic() {
+    // Adversarial-property topics now come from the report (not the
+    // snapshot). The retain filter clears any stale A-prefixed entries
+    // before hydration, so the reseed sees only what the report installed.
     let _guards = lock_all_counters();
 
     crate::ids::reseed_adversarial_property_id(0);
 
-    let mut audit = empty_audit();
-    let invariant_topic =
-      crate::domain::topic::new_adversarial_property_topic(73);
-    audit.topic_metadata.insert(
-      invariant_topic,
-      crate::domain::TopicMetadata::InvariantTopic {
-        topic: invariant_topic,
-        description: "every privileged setter checks ownership".to_string(),
-        threat_topic: crate::domain::topic::new_adversarial_property_topic(5),
-        subject_topic: crate::domain::topic::new_node_topic(&10),
-        kind: crate::domain::InvariantKind::AccessGate,
-        anchors: vec![],
-        author: Author::System,
-        created_at: None,
-        severity: None,
-      },
-    );
+    let mut pipeline = empty_pipeline();
+    pipeline.invariants.push(ReportInvariant {
+      topic: "A73".to_string(),
+      description: "every privileged setter checks ownership".to_string(),
+      threat_topic: "A5".to_string(),
+      subject_topic: "N10".to_string(),
+      kind: crate::domain::InvariantKind::AccessGate,
+      anchors: vec![],
+      severity: None,
+    });
+    // Also add the parent threat so the invariant has a valid chain.
+    pipeline.threats.push(ReportThreat {
+      topic: "A5".to_string(),
+      description: "unauthorized access".to_string(),
+      subject_topic: "N10".to_string(),
+      falsifies_condition: "A3".to_string(),
+      controlled_by: crate::domain::ThreatActor::Caller,
+      evidence_topics: vec![],
+      severity: None,
+    });
 
-    apply_report(
-      "audit-1",
-      &mut audit,
-      &report_with_pipeline(empty_pipeline()),
-    )
-    .expect("apply_report");
+    let mut audit = empty_audit();
+    apply_report("audit-1", &mut audit, &report_with_pipeline(pipeline))
+      .expect("apply_report");
 
     let next = crate::ids::allocate_adversarial_property_id();
     assert_eq!(
       next, 74,
-      "adversarial-property counter must reseed past max A-id in topic_metadata"
+      "adversarial-property counter must reseed past max A-id in report"
     );
   }
 

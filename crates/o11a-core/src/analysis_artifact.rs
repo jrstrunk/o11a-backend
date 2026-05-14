@@ -23,23 +23,21 @@
 //! Included (see [`AuditDataSnapshot`]):
 //!   - `audit_name`, `in_scope_files`, `security_notes`
 //!   - `asts`, `nodes`, `function_properties`, `variable_types`
-//!   - `topic_metadata` *minus* the pipeline-output variants
+//!   - `topic_metadata` *minus* all pipeline-output variants
 //!     (FeatureTopic, RequirementTopic, BehaviorTopic,
-//!     CharacteristicTopic, FunctionalSemanticTopic — those are in
-//!     `audit.json` and are reapplied by `report::apply_report`).
-//!     The adversarial-property family (ConditionTopic, ThreatTopic,
-//!     InvariantTopic, ValidationTopic) and the functional-property
-//!     family (FunctionalPurposeTopic, PlacementRationaleTopic) ride
-//!     in the snapshot since they share the A/P counter spaces.
+//!     CharacteristicTopic, FunctionalSemanticTopic,
+//!     FunctionalPurposeTopic, PlacementRationaleTopic,
+//!     ConditionTopic, ThreatTopic, InvariantTopic, ValidationTopic
+//!     — those are in `audit.json` and are reapplied by
+//!     `report::apply_report`).
 //!   - `name_index`, `comment_index`
 //!   - `topic_context`, `expanded_topic_context`
-//!   - `threat_feature_links`
 //!   - `mentions_index`
 //!
 //! Excluded (reconstructed after load):
 //!   - `requirements`, `characteristics`, `feature_requirement_links`,
-//!     `feature_behavior_links` — applied from `audit.json` via
-//!     `report::apply_report`
+//!     `feature_behavior_links`, `threat_feature_links` — applied from
+//!     `audit.json` via `report::apply_report`
 //!   - `section_requirements`, `section_characteristics`, `member_behaviors`,
 //!     `declaration_semantics`, `subject_purposes`, `subject_placements`,
 //!     `subject_conditions`, `subject_threats`, `condition_threats`,
@@ -57,7 +55,7 @@
 
 use crate::domain::{
   AST, AuditData, FunctionModProperties, Node, ProjectPath, SolidityType,
-  SourceContext, ThreatFeatureLink, TopicMetadata, TopicNameIndex, topic,
+  SourceContext, TopicMetadata, TopicNameIndex, topic,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -67,7 +65,7 @@ use std::path::{Path, PathBuf};
 /// Bumped on any breaking change to [`AuditDataSnapshot`] or
 /// [`AnalysisArtifact`]. The server refuses to load a file whose version
 /// it doesn't recognize.
-pub const ARTIFACT_SCHEMA_VERSION: u32 = 9;
+pub const ARTIFACT_SCHEMA_VERSION: u32 = 10;
 
 /// Binary envelope for the analyzed `AuditData` snapshot. Private format
 /// between `o11a-analyze` (writer) and `o11a-server` (reader). Encoded
@@ -102,7 +100,6 @@ pub struct AuditDataSnapshot {
   pub comment_index: HashMap<topic::Topic, Vec<topic::Topic>>,
   pub topic_context: BTreeMap<topic::Topic, Vec<SourceContext>>,
   pub expanded_topic_context: BTreeMap<topic::Topic, Vec<SourceContext>>,
-  pub threat_feature_links: Vec<ThreatFeatureLink>,
   pub mentions_index: HashMap<topic::Topic, Vec<topic::Topic>>,
 }
 
@@ -122,6 +119,12 @@ pub fn snapshot_from_audit_data(audit_data: &AuditData) -> AuditDataSnapshot {
           | TopicMetadata::BehaviorTopic { .. }
           | TopicMetadata::CharacteristicTopic { .. }
           | TopicMetadata::FunctionalSemanticTopic { .. }
+          | TopicMetadata::FunctionalPurposeTopic { .. }
+          | TopicMetadata::PlacementRationaleTopic { .. }
+          | TopicMetadata::ConditionTopic { .. }
+          | TopicMetadata::ThreatTopic { .. }
+          | TopicMetadata::InvariantTopic { .. }
+          | TopicMetadata::ValidationTopic { .. }
       )
     })
     .map(|(t, m)| (*t, m.clone()))
@@ -140,7 +143,6 @@ pub fn snapshot_from_audit_data(audit_data: &AuditData) -> AuditDataSnapshot {
     comment_index: audit_data.comment_index.clone(),
     topic_context: audit_data.topic_context.clone(),
     expanded_topic_context: audit_data.expanded_topic_context.clone(),
-    threat_feature_links: audit_data.threat_feature_links.clone(),
     mentions_index: audit_data.mentions_index.clone(),
   }
 }
@@ -164,7 +166,6 @@ pub fn apply_snapshot(audit_data: &mut AuditData, snap: AuditDataSnapshot) {
   audit_data.comment_index = snap.comment_index;
   audit_data.topic_context = snap.topic_context;
   audit_data.expanded_topic_context = snap.expanded_topic_context;
-  audit_data.threat_feature_links = snap.threat_feature_links;
   audit_data.mentions_index = snap.mentions_index;
   audit_data.requirements.clear();
   audit_data.characteristics.clear();

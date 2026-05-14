@@ -2924,7 +2924,7 @@ generates adversarial inversions of these assertions. If you find \
 yourself writing \"could fail,\" \"may be stale,\" \"an attacker can \
 …\", or any phrase about something going wrong, stop and re-state as \
 the assumption being violated by that scenario. Distinguishing tests:\n\
-- If a condition reads \"the code must enforce X,\" you have written a \
+- If a condition reads \"the code must X,\" you have written a \
 small invariant — rewrite as \"the purpose presumes X.\"\n\
 - If a condition names a specific failure scenario, you have written a \
 threat — rewrite as the assumption that scenario would violate.\n\n\
