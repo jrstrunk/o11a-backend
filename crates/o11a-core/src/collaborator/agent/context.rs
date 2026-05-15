@@ -3411,11 +3411,23 @@ fn first_semantic(
 ) -> Option<String> {
   let sem_topics = audit_data.declaration_semantics.get(decl_topic)?;
   if sem_topics.len() > 1 {
+    let descriptions: Vec<String> = sem_topics
+      .iter()
+      .filter_map(|st| {
+        audit_data.topic_metadata.get(st).and_then(|m| match m {
+          TopicMetadata::FunctionalSemanticTopic { description, .. } => {
+            Some(description.clone())
+          }
+          _ => None,
+        })
+      })
+      .collect();
     tracing::warn!(
       declaration = %decl_topic.id(),
       count = sem_topics.len(),
-      "declaration has multiple functional semantics; using the first \u{2014} \
-       condensation may have failed"
+      semantics = ?descriptions,
+      "declaration has multiple functional semantics; using the first \
+       \u{2014} condensation may have failed"
     );
   }
   for sem_topic in sem_topics {

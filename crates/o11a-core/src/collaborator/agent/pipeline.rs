@@ -1574,6 +1574,19 @@ pub async fn build_semantic_links(
 /// Per-step in-place condensation. Resolves transitive topics, then groups
 /// the accumulator by declaration topic; any group of size > 1 fires a
 /// `condense_semantics` LLM call and is replaced with the condensed
+/// Format a member topic as `name (N12345)` for log readability.
+fn member_display(
+  member: &topic::Topic,
+  audit_data: &domain::AuditData,
+) -> String {
+  let name = audit_data
+    .topic_metadata
+    .get(member)
+    .and_then(|m| m.name())
+    .unwrap_or("?");
+  format!("{} ({})", name, member.id())
+}
+
 /// entries. Single-link groups pass through unchanged. Match-source merging
 /// follows `MatchSource::merge` (mechanical > bm25).
 async fn condense_in_place(
@@ -1654,11 +1667,16 @@ async fn condense_in_place(
         }
       }
       Ok((decl_topic, originals, Err(e))) => {
+        let original_texts: Vec<&str> =
+          originals.iter().map(|l| l.description.as_str()).collect();
         tracing::error!(
-          "{}: condense_semantics failed for {}: {}, keeping originals",
+          "{}: condense_semantics failed for {}: {}, keeping {} \
+           originals: {:?}",
           step_label,
           decl_topic.id(),
-          e
+          e,
+          originals.len(),
+          original_texts,
         );
         links.extend(originals);
       }
@@ -1806,6 +1824,11 @@ pub async fn build_functional_properties(
     for batch in &batches {
       for member in &batch.members {
         if !context::member_has_feature_link(member, audit_data) {
+          tracing::debug!(
+            "Skipping member with no feature link: {} ({})",
+            member_display(member, audit_data),
+            member.id(),
+          );
           total_skipped_no_feature += 1;
           continue;
         }
@@ -2013,6 +2036,11 @@ pub async fn build_conditions(
     for batch in &batches {
       for member in &batch.members {
         if !context::member_has_feature_link(member, audit_data) {
+          tracing::debug!(
+            "Skipping member with no feature link: {} ({})",
+            member_display(member, audit_data),
+            member.id(),
+          );
           total_skipped_no_feature += 1;
           continue;
         }
@@ -2282,6 +2310,11 @@ pub async fn build_threats(
     for batch in &batches {
       for member in &batch.members {
         if !context::member_has_feature_link(member, audit_data) {
+          tracing::debug!(
+            "Skipping member with no feature link: {} ({})",
+            member_display(member, audit_data),
+            member.id(),
+          );
           total_skipped_no_feature += 1;
           continue;
         }
@@ -2554,6 +2587,11 @@ pub async fn build_invariants(
     for batch in &batches {
       for member in &batch.members {
         if !context::member_has_feature_link(member, audit_data) {
+          tracing::debug!(
+            "Skipping member with no feature link: {} ({})",
+            member_display(member, audit_data),
+            member.id(),
+          );
           total_skipped_no_feature += 1;
           continue;
         }
@@ -2663,6 +2701,14 @@ pub async fn build_invariants(
                ThreatTopic; skipping its invariants and rationale",
               threat_invariants.threat_topic
             );
+            tracing::debug!(
+              "Dropped invariant descriptions: {:?}",
+              threat_invariants
+                .invariants
+                .iter()
+                .map(|inv| &inv.description)
+                .collect::<Vec<_>>()
+            );
             total_dropped_unknown_parent += 1;
             continue;
           }
@@ -2671,6 +2717,14 @@ pub async fn build_invariants(
               "invariants: parent {:?} missing from topic_metadata; \
                skipping its invariants and rationale",
               threat_invariants.threat_topic
+            );
+            tracing::debug!(
+              "Dropped invariant descriptions: {:?}",
+              threat_invariants
+                .invariants
+                .iter()
+                .map(|inv| &inv.description)
+                .collect::<Vec<_>>()
             );
             total_dropped_unknown_parent += 1;
             continue;
@@ -2859,6 +2913,11 @@ pub async fn build_validations(
     for batch in &batches {
       for member in &batch.members {
         if !context::member_has_feature_link(member, audit_data) {
+          tracing::debug!(
+            "Skipping member with no feature link: {} ({})",
+            member_display(member, audit_data),
+            member.id(),
+          );
           total_skipped_no_feature += 1;
           continue;
         }
@@ -2952,6 +3011,11 @@ pub async fn build_validations(
               "validations: parent {:?} missing from topic_metadata or \
                not an InvariantTopic; skipping",
               v.invariant_topic
+            );
+            tracing::debug!(
+              "Dropped validation: verdict={:?} rationale={:?}",
+              v.verdict,
+              v.rationale,
             );
             total_dropped_unknown_invariant += 1;
             continue;

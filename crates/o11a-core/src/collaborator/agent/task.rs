@@ -2228,6 +2228,13 @@ pub fn render_characteristic_synthesis_context(
 /// LLM call consolidates across both inputs and produces the final
 /// `CharacteristicTopic` set the pipeline persists.
 ///
+/// If the single-call response is truncated (the model's output token
+/// limit is exceeded — observed with 47 characteristics against glm-5.1),
+/// falls back to a chunked strategy: split the extracted characteristics
+/// in half, synthesize each half independently, then merge the results.
+/// The security notes are included in both halves so every chunk sees
+/// the full adversarial context.
+///
 /// The caller is expected to skip this step when both inputs are empty;
 /// when only one side is empty the step still runs (cross-section
 /// consolidation is valuable even without a `security.md`, and a
@@ -2240,6 +2247,26 @@ pub fn render_characteristic_synthesis_context(
 /// ever changes, also update the `Author` literal here so the on-wire
 /// authorship stays consistent with the model that produced the text.
 pub async fn synthesize_characteristics(
+  security_notes: &str,
+  extracted_json: &str,
+) -> Result<SynthesizedCharacteristics, TaskError> {
+  match synthesize_characteristics_single(security_notes, extracted_json).await
+  {
+    Ok(result) => Ok(result),
+    Err(TaskError::JsonParse { .. }) => {
+      tracing::warn!(
+        "Characteristic synthesis response was truncated; falling back \
+         to chunked synthesis"
+      );
+      synthesize_characteristics_chunked(security_notes, extracted_json).await
+    }
+    Err(e) => Err(e),
+  }
+}
+
+/// Single-call characteristic synthesis. Returns the parsed result on
+/// success, or the original error on failure.
+async fn synthesize_characteristics_single(
   security_notes: &str,
   extracted_json: &str,
 ) -> Result<SynthesizedCharacteristics, TaskError> {
@@ -2260,6 +2287,107 @@ pub async fn synthesize_characteristics(
   let wrapper: LLMCharacteristicsResponse =
     router::parse_response(&response, "synthesized characteristics", &prompt)?;
 
+  build_synthesized_characteristics(wrapper)
+}
+
+/// Chunked fallback: split the extracted characteristics JSON array in
+/// half, synthesize each half independently (both see the full security
+/// notes), then merge the results with fresh local IDs.
+async fn synthesize_characteristics_chunked(
+  security_notes: &str,
+  extracted_json: &str,
+) -> Result<SynthesizedCharacteristics, TaskError> {
+  let items: Vec<serde_json::Value> =
+    serde_json::from_str(extracted_json).map_err(|e| {
+      TaskError::Other(format!(
+        "chunked characteristic synthesis: extracted_json is not valid JSON: {}",
+        e
+      ))
+    })?;
+
+  if items.len() <= 2 {
+    // Already too small to split meaningfully; re-raise would loop.
+    return Err(TaskError::Other(
+      "Characteristic synthesis response was truncated and input is too \
+       small to chunk further"
+        .to_string(),
+    ));
+  }
+
+  let mid = items.len() / 2;
+  let left_json = serde_json::to_string(&items[..mid]).unwrap_or_default();
+  let right_json = serde_json::to_string(&items[mid..]).unwrap_or_default();
+
+  tracing::info!(
+    "Chunked characteristic synthesis: {} items split into {} + {}",
+    items.len(),
+    mid,
+    items.len() - mid,
+  );
+
+  let (left_result, right_result) = tokio::join!(
+    synthesize_characteristics_single(security_notes, &left_json),
+    synthesize_characteristics_single(security_notes, &right_json),
+  );
+
+  let left = left_result?;
+  let right = right_result?;
+
+  // Merge: renumber right's local IDs to avoid collision with left's.
+  let max_left = left
+    .topic_metadata
+    .keys()
+    .map(|t| t.numeric_id())
+    .max()
+    .unwrap_or(0);
+
+  let mut topic_metadata = left.topic_metadata;
+  let mut characteristics = left.characteristics;
+
+  for (old_topic, characteristic) in right.characteristics {
+    let metadata = right.topic_metadata.get(&old_topic).cloned();
+    let new_id = max_left + old_topic.numeric_id();
+    let new_topic = topic::new_spec_topic(new_id);
+
+    if let Some(domain::TopicMetadata::CharacteristicTopic {
+      description,
+      kind,
+      section_topic,
+      author,
+      created_at,
+      ..
+    }) = metadata
+    {
+      topic_metadata.insert(
+        new_topic,
+        domain::TopicMetadata::CharacteristicTopic {
+          topic: new_topic,
+          description,
+          kind,
+          section_topic,
+          author,
+          created_at,
+        },
+      );
+    }
+    characteristics.insert(new_topic, characteristic);
+  }
+
+  tracing::info!(
+    "Chunked characteristic synthesis produced {} characteristics",
+    characteristics.len(),
+  );
+
+  Ok(SynthesizedCharacteristics {
+    topic_metadata,
+    characteristics,
+  })
+}
+
+/// Build `SynthesizedCharacteristics` from a parsed LLM response.
+fn build_synthesized_characteristics(
+  wrapper: LLMCharacteristicsResponse,
+) -> Result<SynthesizedCharacteristics, TaskError> {
   let mut topic_metadata = BTreeMap::new();
   let mut characteristics = BTreeMap::new();
 
@@ -2670,9 +2798,10 @@ pub async fn extract_behaviors_from_batch(
         tracing::warn!(
           batch = %label,
           "behavior extraction: member_topic {:?} is not an N-prefixed topic; \
-           skipping {} behavior(s)",
+           skipping {} behavior(s): {:?}",
           other,
-          group.behaviors.len()
+          group.behaviors.len(),
+          group.behaviors,
         );
         continue;
       }
@@ -2680,10 +2809,11 @@ pub async fn extract_behaviors_from_batch(
         tracing::warn!(
           batch = %label,
           "behavior extraction: failed to parse member_topic {:?}: {}; \
-           skipping {} behavior(s)",
+           skipping {} behavior(s): {:?}",
           group.member_topic,
           e,
-          group.behaviors.len()
+          group.behaviors.len(),
+          group.behaviors,
         );
         continue;
       }
